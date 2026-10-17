@@ -517,13 +517,10 @@ struct ModSearchRequest {
 
 async fn search_mods(Json(req): Json<ModSearchRequest>) -> Result<Json<Value>, ApiErr> {
     let client = reqwest::Client::new();
-    
-    // Filtra pelo tipo de projeto (mod, plugin, datapack)
     let facets = format!(
         r#"[["project_type:{}"],["categories:{}"],["versions:{}"]]"#,
         req.project_type, req.loader, req.version
     );
-    
     let url = format!(
         "https://api.modrinth.com/v2/search?query={}&facets={}&limit=20",
         urlencoding::encode(&req.query),
@@ -549,21 +546,18 @@ async fn install_mod(State(app): State<AppState>, Json(req): Json<ModInstallRequ
     let i = app.0.lock().await;
     let dir = expand(&i.cfg.server_dir);
     
-    // Define a pasta correta: mods, plugins ou datapacks
     let folder_name = match req.project_type.as_str() {
         "plugin" => "plugins",
-        "datapack" => "world/datapacks", // Datapacks do mundo principal
+        "datapack" => "world/datapacks",
         _ => "mods",
     };
     let target_dir = dir.join(folder_name);
     tokio::fs::create_dir_all(&target_dir).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Pasta {folder_name}: {e}")))?;
 
     let client = reqwest::Client::new();
-    
-    // Monta a URL de busca de versão correta baseada no tipo
     let loaders_param = match req.project_type.as_str() {
         "mod" => format!("loaders=[\"{}\"]", req.loader),
-        _ => "loaders=[]".to_string(), // Plugins/datapacks não usam loader
+        _ => "loaders=[]".to_string(),
     };
 
     let url = format!(
@@ -659,6 +653,76 @@ async fn install_modpack(State(app): State<AppState>, Json(req): Json<ModpackIns
     Ok(Json(view(&mut i)))
 }
 
+// --- GERENCIAMENTO DE ARQUIVOS (Listar e Excluir) ---
+
+#[derive(Deserialize)]
+struct ListFilesRequest {
+    project_type: String,
+}
+
+async fn list_installed_files(State(app): State<AppState>, Json(req): Json<ListFilesRequest>) -> Result<Json<Value>, ApiErr> {
+    let i = app.0.lock().await;
+    let dir = expand(&i.cfg.server_dir);
+    let folder = match req.project_type.as_str() {
+        "plugin" => "plugins",
+        "datapack" => "world/datapacks",
+        _ => "mods",
+    };
+    let target = dir.join(folder);
+    
+    let mut files = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(&target).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Ok(meta) = entry.metadata().await {
+                if meta.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(".jar") || name.ends_with(".zip") {
+                        files.push(json!({
+                            "name": name,
+                            "size": meta.len(),
+                            "modified": meta.modified().ok().map(|t| {
+                                let dt: chrono::DateTime<chrono::Local> = t.into();
+                                dt.format("%d/%m/%Y %H:%M").to_string()
+                            }).unwrap_or_default()
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Json(json!({ "files": files })))
+}
+
+#[derive(Deserialize)]
+struct DeleteFileRequest {
+    project_type: String,
+    filename: String,
+}
+
+async fn delete_installed_file(State(app): State<AppState>, Json(req): Json<DeleteFileRequest>) -> Result<Json<Value>, ApiErr> {
+    let i = app.0.lock().await;
+    let dir = expand(&i.cfg.server_dir);
+    let folder = match req.project_type.as_str() {
+        "plugin" => "plugins",
+        "datapack" => "world/datapacks",
+        _ => "mods",
+    };
+    
+    let safe_name = std::path::Path::new(&req.filename).file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de arquivo inválido"))?;
+    
+    let path = dir.join(folder).join(safe_name);
+    if !path.exists() {
+        return Err(err(StatusCode::NOT_FOUND, "Arquivo não encontrado"));
+    }
+    tokio::fs::remove_file(&path).await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao excluir: {e}")))?;
+    
+    Ok(Json(json!({ "ok": true })))
+}
+
 // ───────────────────────── Infra ─────────────────────────
 
 async fn host_guard(req: Request, next: Next) -> Response {
@@ -726,6 +790,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/mods/install", post(install_mod))
         .route("/api/modpacks/search", post(search_modpacks))
         .route("/api/modpacks/install", post(install_modpack))
+        .route("/api/files/list", post(list_installed_files))
+        .route("/api/files/delete", post(delete_installed_file))
         .route("/api/config", post(save_config))
         .route("/api/e4all/config", post(save_e4all))
         .route("/api/command", post(command))

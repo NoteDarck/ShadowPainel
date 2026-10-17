@@ -15,14 +15,24 @@
   let notice = ''; 
   let saved = false;
 
-  // Modal de Mods/Plugins/Datapacks
+  // Wizard de Criação
+  let wizardStep = 0;
+  let wizardType = 'vanilla';
+  let wizardVersion = '1.21.1';
+  let wizardMemory = 4;
+
+  // Modal de Mods
   let showModBrowser = false;
-  let browserType = 'mod'; // 'mod', 'plugin', 'datapack'
+  let browserType = 'mod';
   let searchQuery = '';
   let searchResults: any[] = [];
   let isSearching = false;
   let selectedMod: any = null;
   let installingMod = false;
+
+  // Gerenciador de Arquivos
+  let installedFiles: any[] = [];
+  let managingType = 'mod';
 
   const api = async <T = unknown>(path:string, options?:RequestInit):Promise<T> => { 
     const r = await fetch(`/api${path}`, options); 
@@ -78,28 +88,27 @@
     } catch { notice='Console disponível quando online.'; } 
   }
 
-  // --- INSTALAÇÃO E MODS ---
-  async function downloadServer() {
-    loading = true; notice = '';
+  async function createServer() {
+    wizardStep = 3;
+    notice = 'Baixando e preparando o servidor...';
     try {
-      server = await api<ServerState>('/server/download', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({version: server.version}) });
-      notice = 'Download do server.jar concluído!';
-    } catch(e) { notice = e instanceof Error ? e.message : 'Falha no download.'; }
-    loading = false;
-  }
-
-  async function acceptEula() {
-    loading = true; notice = '';
-    try { await api('/server/eula', { method: 'POST' }); notice = 'EULA aceita!'; }
-    catch(e) { notice = e instanceof Error ? e.message : 'Falha ao aceitar EULA.'; }
-    loading = false;
-  }
-
-  async function installFabric() {
-    loading = true; notice = '';
-    try { await api('/server/install-fabric', { method: 'POST' }); notice = 'Fabric instalado!'; }
-    catch(e) { notice = e instanceof Error ? e.message : 'Falha ao instalar Fabric.'; }
-    loading = false;
+      if (wizardType === 'vanilla') {
+        await api('/server/download', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({version: wizardVersion}) });
+        await api('/server/eula', { method: 'POST' });
+      } else if (wizardType === 'fabric') {
+        await api('/server/download', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({version: wizardVersion}) });
+        await api('/server/install-fabric', { method: 'POST' });
+        await api('/server/eula', { method: 'POST' });
+      }
+      await api('/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({server_name:server.server_name, version:wizardVersion, server_dir:server.server_dir, memory_limit_gb:wizardMemory})});
+      await refresh();
+      notice = 'Servidor criado com sucesso!';
+      wizardStep = 0;
+      activeTab = 'Visão geral';
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao criar servidor.';
+      wizardStep = 0;
+    }
   }
 
   async function openBrowser(type: string) {
@@ -107,6 +116,7 @@
     showModBrowser = true;
     searchQuery = '';
     searchResults = [];
+    selectedMod = null;
     await doSearch();
   }
 
@@ -157,10 +167,36 @@
       notice = `${selectedMod.title} instalado com sucesso!`;
       showModBrowser = false;
       selectedMod = null;
+      await loadInstalled(managingType);
     } catch(e) {
       notice = e instanceof Error ? e.message : 'Falha ao instalar.';
     }
     installingMod = false;
+  }
+
+  async function loadInstalled(type: string) {
+    managingType = type;
+    try {
+      const data = await api<any>('/files/list', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ project_type: type })
+      });
+      installedFiles = data.files || [];
+    } catch(e) { installedFiles = []; }
+  }
+
+  async function deleteFile(filename: string) {
+    if (!confirm(`Excluir ${filename}?`)) return;
+    try {
+      await api('/files/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ project_type: managingType, filename })
+      });
+      await loadInstalled(managingType);
+      notice = 'Arquivo excluído.';
+    } catch(e) { notice = e instanceof Error ? e.message : 'Falha ao excluir.'; }
   }
 
   function uptime(sec:number) { 
@@ -168,7 +204,7 @@
     return `${h}:${m}:${s}`; 
   }
 
-  onMount(() => { refresh(); const timer=setInterval(refresh, 3000); return () => clearInterval(timer); });
+  onMount(() => { refresh(); loadInstalled('mod'); const timer=setInterval(refresh, 3000); return () => clearInterval(timer); });
 </script>
 
 <div class="shell">
@@ -240,52 +276,89 @@
     {:else if activeTab === 'Configurações'}
       <section class="settings-card">
         <div class="card-head">
-          <div><h3>Configuração do servidor</h3><p>Preferências e criação do servidor do zero</p></div>
-        </div>
-        <div class="form-grid">
-          <label>Nome do servidor<input bind:value={server.server_name}></label>
-          <label>Versão Minecraft<input bind:value={server.version}></label>
-          <label>Pasta do servidor<input bind:value={server.server_dir}></label>
-          <label>Memória (GB)<input type="number" min="1" max="64" bind:value={server.memory_limit_gb}></label>
-        </div>
-        
-        <div class="java-check">
-          <span class:ok={server.java_detected}>●</span>
-          <div><b>{server.java_detected ? 'Java detectado' : 'Java não detectado'}</b><small>{server.java_path} · necessário para iniciar um servidor real</small></div>
-        </div>
-        
-        <div style="display: flex; gap: 12px; margin-bottom: 24px;">
-          <button class="secondary" on:click={downloadServer} disabled={loading}>⬇ Baixar server.jar</button>
-          <button class="secondary" on:click={acceptEula} disabled={loading}>✓ Aceitar EULA</button>
-          <button class="secondary" on:click={installFabric} disabled={loading}>🧵 Instalar Fabric</button>
+          <div><h3>Criar Novo Servidor</h3><p>Siga os passos para baixar e configurar seu servidor</p></div>
         </div>
 
-        <button class="primary" on:click={saveConfig}>SALVAR CONFIGURAÇÃO <span>→</span></button>
+        {#if wizardStep === 0}
+          <div style="padding: 24px;">
+            <p style="margin-bottom: 16px; color: var(--muted);">Escolha o tipo de servidor:</p>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+              <button class="quick" on:click={() => { wizardType = 'vanilla'; wizardStep = 1; }} style="justify-content: center;">
+                <span class="q-icon">🌍</span>
+                <div style="text-align: center;"><b>Vanilla</b><small>Servidor puro da Mojang</small></div>
+              </button>
+              <button class="quick" on:click={() => { wizardType = 'fabric'; wizardStep = 1; }} style="justify-content: center;">
+                <span class="q-icon">🧵</span>
+                <div style="text-align: center;"><b>Fabric</b><small>Para mods e e4all</small></div>
+              </button>
+              <button class="quick" on:click={() => { wizardType = 'paper'; wizardStep = 1; }} style="justify-content: center;">
+                <span class="q-icon">📄</span>
+                <div style="text-align: center;"><b>Paper</b><small>Para plugins (em breve)</small></div>
+              </button>
+            </div>
+          </div>
+
+        {:else if wizardStep === 1}
+          <div style="padding: 24px;">
+            <p style="margin-bottom: 16px; color: var(--muted);">Versão do Minecraft:</p>
+            <div class="form-grid" style="grid-template-columns: 1fr;">
+              <label>Versão<input bind:value={wizardVersion} placeholder="1.21.1"></label>
+            </div>
+            <div style="display: flex; gap: 12px; margin-top: 16px;">
+              <button class="secondary" on:click={() => wizardStep = 0}>Voltar</button>
+              <button class="primary" on:click={() => wizardStep = 2}>Próximo →</button>
+            </div>
+          </div>
+
+        {:else if wizardStep === 2}
+          <div style="padding: 24px;">
+            <p style="margin-bottom: 16px; color: var(--muted);">Configurações básicas:</p>
+            <div class="form-grid">
+              <label>Nome do servidor<input bind:value={server.server_name}></label>
+              <label>Memória (GB)<input type="number" min="1" max="64" bind:value={wizardMemory}></label>
+            </div>
+            <div style="display: flex; gap: 12px; margin-top: 16px;">
+              <button class="secondary" on:click={() => wizardStep = 1}>Voltar</button>
+              <button class="primary" on:click={createServer}>Criar Servidor →</button>
+            </div>
+          </div>
+
+        {:else if wizardStep === 3}
+          <div style="padding: 48px; text-align: center;">
+            <p style="color: var(--muted);">Baixando arquivos... Isso pode levar alguns minutos.</p>
+            <div style="margin-top: 16px; width: 40px; height: 40px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; margin: 16px auto; animation: spin 1s linear infinite;"></div>
+          </div>
+          <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+        {/if}
       </section>
 
       <section class="settings-card" style="margin-top: 24px;">
         <div class="card-head">
-          <div>
-            <h3>Gerenciador de Conteúdo</h3>
-            <p>Instale mods, plugins ou datapacks diretamente do Modrinth</p>
-          </div>
-          <span class="mod-badge">MODRINTH</span>
+          <div><h3>Gerenciador de Conteúdo</h3><p>Veja, exclua ou adicione mods, plugins e datapacks</p></div>
         </div>
         
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;">
-          <button class="quick" on:click={() => openBrowser('mod')} style="justify-content: center;">
-            <span class="q-icon">🧩</span>
-            <div style="text-align: center;"><b>Instalar Mods</b><small>Fabric / Forge</small></div>
-          </button>
-          <button class="quick" on:click={() => openBrowser('plugin')} style="justify-content: center;">
-            <span class="q-icon">🔌</span>
-            <div style="text-align: center;"><b>Instalar Plugins</b><small>Bukkit / Spigot / Paper</small></div>
-          </button>
-          <button class="quick" on:click={() => openBrowser('datapack')} style="justify-content: center;">
-            <span class="q-icon">📦</span>
-            <div style="text-align: center;"><b>Instalar Datapacks</b><small>Para o mundo</small></div>
-          </button>
+        <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+          <button class="secondary" on:click={() => loadInstalled('mod')}>Mods</button>
+          <button class="secondary" on:click={() => loadInstalled('plugin')}>Plugins</button>
+          <button class="secondary" on:click={() => loadInstalled('datapack')}>Datapacks</button>
+          <button class="primary" style="margin-left: auto;" on:click={() => openBrowser(managingType)}>+ Adicionar</button>
         </div>
+
+        {#if installedFiles.length === 0}
+          <p style="color: var(--muted); text-align: center; padding: 24px;">Nenhum arquivo instalado. Clique em "+ Adicionar" para buscar.</p>
+        {:else}
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            {#each installedFiles as file}
+              <div style="display: flex; justify-content: space-between; align-items: center; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;">
+                <div>
+                  <b style="color: #fff;">{file.name}</b>
+                  <small style="color: var(--muted); margin-left: 12px;">{(file.size / 1024).toFixed(1)} KB · {file.modified}</small>
+                </div>
+                <button class="secondary" style="color: var(--red); border-color: rgba(255,92,92,0.3);" on:click={() => deleteFile(file.name)}>Excluir</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </section>
 
     {:else if activeTab === 'Visão geral'}
@@ -346,7 +419,6 @@
   </main>
 </div>
 
-<!-- MODAL DE BUSCA (Estilo Prism Launcher) -->
 {#if showModBrowser}
   <div class="modal-overlay">
     <div class="modal-content">
