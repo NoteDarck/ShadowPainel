@@ -21,7 +21,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-const APP_VERSION: &str = "0.7.1";
+const APP_VERSION: &str = "0.7.2";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1355,6 +1355,46 @@ struct ContentItem {
     kind: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct InstalledContent {
+    project_id: String,
+    kind: String,
+    filename: String,
+    version_id: String,
+}
+
+fn content_manifest(base: &std::path::Path) -> PathBuf {
+    base.join(".shadowpainel-content.json")
+}
+
+async fn read_installed_content(base: &std::path::Path) -> Vec<InstalledContent> {
+    tokio::fs::read(content_manifest(base))
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+async fn write_installed_content(
+    base: &std::path::Path,
+    items: &[InstalledContent],
+) -> Result<(), ApiErr> {
+    let bytes = serde_json::to_vec_pretty(items).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar catálogo: {e}"),
+        )
+    })?;
+    tokio::fs::write(content_manifest(base), bytes)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao salvar catálogo: {e}"),
+            )
+        })
+}
+
 async fn list_content(
     State(app): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<ContentQuery>,
@@ -1386,9 +1426,13 @@ async fn list_content(
     })? {
         let metadata = entry.metadata().await.ok();
         if metadata.as_ref().is_some_and(|m| m.is_file()) {
+            let filename = entry.file_name().to_string_lossy().into_owned();
+            if filename.starts_with('.') {
+                continue;
+            }
             items.push(ContentItem {
-                filename: entry.file_name().to_string_lossy().into_owned(),
-                size: metadata.unwrap().len(),
+                filename,
+                size: metadata.map(|m| m.len()).unwrap_or_default(),
                 kind: kind.clone(),
             });
         }
@@ -1424,6 +1468,10 @@ async fn delete_content(
                 format!("Não foi possível excluir: {e}"),
             )
         })?;
+    let base = dir.parent().unwrap_or(&dir);
+    let mut installed = read_installed_content(base).await;
+    installed.retain(|item| !(item.kind == req.kind && item.filename == filename));
+    write_installed_content(base, &installed).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1435,7 +1483,10 @@ struct ContentSearchRequest {
     version: String,
 }
 
-async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Value>, ApiErr> {
+async fn search_content(
+    State(app): State<AppState>,
+    Json(req): Json<ContentSearchRequest>,
+) -> Result<Json<Value>, ApiErr> {
     let project_type = match req.kind.as_str() {
         "plugins" => "plugin",
         "datapacks" => "datapack",
@@ -1455,7 +1506,7 @@ async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Va
         urlencoding::encode(&req.query),
         urlencoding::encode(&facets)
     );
-    let data: Value = reqwest::Client::new()
+    let mut data: Value = reqwest::Client::new()
         .get(url)
         .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
         .send()
@@ -1471,7 +1522,64 @@ async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Va
         .json()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
+    let base = {
+        let i = app.0.lock().await;
+        expand(&i.cfg.server_dir)
+    };
+    let installed: std::collections::HashSet<String> = read_installed_content(&base)
+        .await
+        .into_iter()
+        .filter(|item| item.kind == req.kind)
+        .map(|item| item.project_id)
+        .collect();
+    if let Some(hits) = data.get_mut("hits").and_then(Value::as_array_mut) {
+        for hit in hits {
+            let id = hit
+                .get("project_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            hit["installed"] = Value::Bool(installed.contains(id));
+        }
+    }
     Ok(Json(data))
+}
+
+#[derive(Deserialize)]
+struct ContentVersionsRequest {
+    project_id: String,
+    loader: String,
+    version: String,
+}
+
+async fn content_versions(Json(req): Json<ContentVersionsRequest>) -> Result<Json<Value>, ApiErr> {
+    let url = format!(
+        "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
+        urlencoding::encode(&req.project_id),
+        urlencoding::encode(&req.loader),
+        urlencoding::encode(&req.version)
+    );
+    let data: Value = reqwest::Client::new()
+        .get(url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Falha ao consultar versões: {e}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Modrinth retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
+    Ok(Json(json!({"versions": data})))
 }
 
 #[derive(Deserialize)]
@@ -1480,6 +1588,8 @@ struct ContentInstallRequest {
     kind: String,
     loader: String,
     version: String,
+    #[serde(default)]
+    version_id: Option<String>,
 }
 
 async fn install_content(
@@ -1498,13 +1608,20 @@ async fn install_content(
         )
     })?;
     let client = reqwest::Client::new();
-    let url = format!(
-        "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
-        urlencoding::encode(&req.project_id),
-        urlencoding::encode(&req.loader),
-        urlencoding::encode(&req.version)
-    );
-    let versions: Vec<Value> = client
+    let url = if let Some(version_id) = req.version_id.as_deref().filter(|id| !id.is_empty()) {
+        format!(
+            "https://api.modrinth.com/v2/version/{}",
+            urlencoding::encode(version_id)
+        )
+    } else {
+        format!(
+            "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
+            urlencoding::encode(&req.project_id),
+            urlencoding::encode(&req.loader),
+            urlencoding::encode(&req.version)
+        )
+    };
+    let version_data: Value = client
         .get(url)
         .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
         .send()
@@ -1525,6 +1642,10 @@ async fn install_content(
         .json()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
+    let versions: Vec<Value> = match version_data {
+        Value::Array(items) => items,
+        item => vec![item],
+    };
     let file = versions
         .first()
         .and_then(|v| v["files"].as_array())
@@ -1559,6 +1680,15 @@ async fn install_content(
                 format!("Falha ao salvar conteúdo: {e}"),
             )
         })?;
+    let mut installed = read_installed_content(&base).await;
+    installed.retain(|item| !(item.kind == req.kind && item.filename == safe));
+    installed.push(InstalledContent {
+        project_id: req.project_id,
+        kind: req.kind,
+        filename: safe.to_string(),
+        version_id: req.version_id.unwrap_or_default(),
+    });
+    write_installed_content(&base, &installed).await?;
     Ok(Json(json!({"ok": true, "filename": safe})))
 }
 
@@ -1678,6 +1808,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/content", get(list_content))
         .route("/api/content/delete", post(delete_content))
         .route("/api/content/search", post(search_content))
+        .route("/api/content/versions", post(content_versions))
         .route("/api/content/install", post(install_content))
         .route("/api/mods/search", post(search_mods))
         .route("/api/mods/install", post(install_mod))

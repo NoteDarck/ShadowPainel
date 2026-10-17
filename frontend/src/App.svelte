@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
-  const APP_VERSION = '0.7.1';
+  const APP_VERSION = '0.7.2';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -9,7 +9,11 @@
   type ContentItem = { filename:string; size:number; kind:string };
   type ContentResult = {
     project_id:string; title:string; description:string;
-    icon_url?:string; downloads:number;
+    icon_url?:string; downloads:number; installed?:boolean;
+  };
+  type ContentVersion = {
+    id:string; version_number:string; name?:string; date_published?:string;
+    files:{filename:string; url:string; primary?:boolean}[];
   };
   type E4all = {
     loader:string; minecraft_version:string; android_variant:boolean;
@@ -76,6 +80,13 @@
   let catalogLoading = false;
   let catalogError = '';
   let catalogQuery = '';
+  let selectedProjects:string[] = [];
+  let selectedVersions:Record<string,string> = {};
+  let projectVersions:Record<string,ContentVersion[]> = {};
+  let detailVersions:ContentVersion[] = [];
+  let detailVersionId = '';
+  let detailLoading = false;
+  let batchInstalling = false;
 
   // ── Helpers de API ──
   const api = async <T=unknown>(path:string, options?:RequestInit):Promise<T> => {
@@ -206,17 +217,69 @@
   }
 
   // ── Conteúdo ──
-  async function installContent(project_id:string) {
-    try {
-      const version = contentVersion || server.version;
-      await api('/content/install', json({
-        project_id, kind:contentKind, loader:contentLoader, version,
-      }));
+  async function installContent(project_id:string, version_id?:string, silent=false) {
+    const version = contentVersion || server.version;
+    await api('/content/install', json({
+      project_id, kind:contentKind, loader:contentLoader, version,
+      version_id: version_id || selectedVersions[project_id] || '',
+    }));
+    if (!silent) {
       notice = 'Conteúdo instalado.';
+      selectedProjects = selectedProjects.filter(id => id !== project_id);
       await loadContent();
-    } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao instalar conteúdo.';
+      await runCatalogSearch();
     }
+  }
+
+  async function loadProjectVersions(item:ContentResult) {
+    detailLoading = true;
+    try {
+      const data = await api<{versions:ContentVersion[]}>('/content/versions', json({
+        project_id:item.project_id, loader:contentLoader,
+        version:contentVersion || server.version,
+      }));
+      projectVersions = {...projectVersions, [item.project_id]:data.versions || []};
+      detailVersions = data.versions || [];
+      detailVersionId = selectedVersions[item.project_id] || detailVersions[0]?.id || '';
+      selectedVersions = {...selectedVersions, [item.project_id]:detailVersionId};
+    } catch(e) {
+      catalogError = e instanceof Error ? e.message : 'Falha ao carregar versões do conteúdo.';
+    }
+    detailLoading = false;
+  }
+
+  async function openItem(item:ContentResult) {
+    catalogDetail = item;
+    detailVersions = projectVersions[item.project_id] || [];
+    detailVersionId = selectedVersions[item.project_id] || detailVersions[0]?.id || '';
+    if (!detailVersions.length) await loadProjectVersions(item);
+  }
+
+  async function toggleProject(item:ContentResult) {
+    if (item.installed) return;
+    if (selectedProjects.includes(item.project_id)) {
+      selectedProjects = selectedProjects.filter(id => id !== item.project_id);
+      return;
+    }
+    if (!projectVersions[item.project_id]) await loadProjectVersions(item);
+    selectedProjects = [...selectedProjects, item.project_id];
+  }
+
+  async function installSelected() {
+    if (!selectedProjects.length) return;
+    batchInstalling = true;
+    try {
+      await Promise.all(selectedProjects.map(project_id => installContent(
+        project_id, selectedVersions[project_id], true
+      )));
+      notice = `${selectedProjects.length} item(ns) instalado(s).`;
+      selectedProjects = [];
+      await loadContent();
+      await runCatalogSearch();
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao instalar seleção.';
+    }
+    batchInstalling = false;
   }
 
   async function deleteContent(filename:string) {
@@ -590,26 +653,34 @@
                 <br/>Tente outra versão, outro loader ou um termo diferente.
               </div>
             {:else}
+              <div class="catalog-batch-bar">
+                <span>{selectedProjects.length} selecionado(s)</span>
+                <button class="primary" disabled={!selectedProjects.length || batchInstalling}
+                        on:click={installSelected}>
+                  {batchInstalling ? 'INSTALANDO...' : 'INSTALAR SELECIONADOS'}
+                </button>
+              </div>
               <div class="catalog-grid">
                 {#each results as item}
-                  <div class="catalog-card" role="button" tabindex="0"
-                       on:click={()=>catalogDetail=item}
-                       on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&(catalogDetail=item)}>
+                  <div class:installed-card={item.installed} class:selected-card={selectedProjects.includes(item.project_id)} class="catalog-card" role="button" tabindex="0"
+                       on:click={()=>openItem(item)}
+                       on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&openItem(item)}>
+                    <div class="catalog-check">
+                      <input type="checkbox" checked={selectedProjects.includes(item.project_id) || !!item.installed}
+                             disabled={item.installed} on:click|stopPropagation on:change={()=>toggleProject(item)}/>
+                      <span>{item.installed ? 'INSTALADO' : selectedProjects.includes(item.project_id) ? 'SELECIONADO' : 'SELECIONAR'}</span>
+                    </div>
                     <div class="catalog-icon">
-                      {#if item.icon_url}
-                        <img src={item.icon_url} alt="" loading="lazy"/>
-                      {:else}
-                        <span>{item.title.slice(0,1).toUpperCase()}</span>
-                      {/if}
+                      {#if item.icon_url}<img src={item.icon_url} alt="" loading="lazy"/>{:else}<span>{item.title.slice(0,1).toUpperCase()}</span>{/if}
                     </div>
                     <div class="catalog-text">
                       <b>{item.title}</b>
                       <small>{item.description || 'Projeto Modrinth'}</small>
                       <span class="catalog-downloads">⇩ {item.downloads.toLocaleString('pt-BR')}</span>
                     </div>
-                    <button class="primary small-button"
-                            on:click|stopPropagation={()=>installContent(item.project_id)}>
-                      Instalar
+                    <button class="secondary small-button" disabled={!!item.installed}
+                            on:click|stopPropagation={()=>toggleProject(item)}>
+                      {item.installed ? 'Já instalado' : selectedProjects.includes(item.project_id) ? 'Remover seleção' : 'Selecionar'}
                     </button>
                   </div>
                 {/each}
@@ -633,12 +704,24 @@
                   <button class="modal-close" on:click={()=>catalogDetail=null}>✕</button>
                 </div>
                 <p>{catalogDetail.description || 'Sem descrição fornecida.'}</p>
-                <div class="detail-actions">
-                  <button class="primary"
-                          on:click={()=>{installContent(catalogDetail!.project_id);catalogDetail=null;}}>
-                    Instalar em {contentVersion}
-                  </button>
-                </div>
+                {#if detailLoading}
+                  <div class="catalog-loading"><div class="spinner"></div> Carregando versões do projeto…</div>
+                {:else}
+                  <label class="version-picker">Versão do {contentKind.slice(0,-1)}
+                    <select bind:value={detailVersionId} on:change={()=>selectedVersions={...selectedVersions,[catalogDetail!.project_id]:detailVersionId}}>
+                      {#each detailVersions as modVersion}
+                        <option value={modVersion.id}>{modVersion.version_number}{modVersion.name ? ` — ${modVersion.name}` : ''}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <small class="selected-version">Minecraft {contentVersion} · {detailVersions.length} versão(ões) compatível(is)</small>
+                  <div class="detail-actions">
+                    <button class="primary" disabled={!detailVersionId || !!catalogDetail.installed}
+                            on:click={()=>{selectedVersions={...selectedVersions,[catalogDetail!.project_id]:detailVersionId};toggleProject(catalogDetail!);catalogDetail=null;}}>
+                      {catalogDetail.installed ? 'Já instalado' : 'Adicionar à seleção'}
+                    </button>
+                  </div>
+                {/if}
               </div>
             {/if}
           </div>

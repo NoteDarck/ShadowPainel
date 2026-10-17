@@ -186,6 +186,9 @@ jobs:
           cp "desktop/target/release/${{ matrix.desktop_binary }}" "$ROOT/shadowpainel-desktop.exe"
           cp -r frontend/dist/. "$ROOT/frontend/dist/"
           cp README.md "$ROOT/"
+          cp packaging/shadowpainel.ico "$ROOT/"
+          curl --fail --location --retry 5 --output WebView2Bootstrapper.exe \
+            https://go.microsoft.com/fwlink/p/?LinkId=2124703
           cat > installer.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -193,15 +196,30 @@ jobs:
               <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
               <MajorUpgrade DowngradeErrorMessage="Uma versão mais recente do ShadowPainel já está instalada." />
               <MediaTemplate EmbedCab="yes" />
-              <Feature Id="ProductFeature" Title="ShadowPainel" Level="1"><ComponentGroupRef Id="AppFiles" /></Feature>
-              <Directory Id="TARGETDIR" Name="SourceDir"><Directory Id="ProgramFiles64Folder"><Directory Id="INSTALLFOLDER" Name="ShadowPainel" /></Directory></Directory>
+              <Icon Id="ShadowPainelIcon" SourceFile="$(var.SourceDir)\shadowpainel.ico" />
+              <Property Id="ARPPRODUCTICON" Value="ShadowPainelIcon" />
+              <Feature Id="ProductFeature" Title="ShadowPainel" Level="1"><ComponentGroupRef Id="AppFiles" /><ComponentRef Id="StartMenuShortcut" /></Feature>
+              <Directory Id="TARGETDIR" Name="SourceDir">
+                <Directory Id="ProgramFiles64Folder"><Directory Id="INSTALLFOLDER" Name="ShadowPainel" /></Directory>
+                <Directory Id="ProgramMenuFolder"><Directory Id="ApplicationProgramsFolder" Name="ShadowPainel" /></Directory>
+              </Directory>
+              <DirectoryRef Id="ApplicationProgramsFolder">
+                <Component Id="StartMenuShortcut" Guid="*">
+                  <Shortcut Id="ShadowPainelShortcut" Name="ShadowPainel" Description="Painel local para servidores Minecraft" Target="[INSTALLFOLDER]shadowpainel-desktop.exe" WorkingDirectory="INSTALLFOLDER" />
+                  <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+                  <RegistryValue Root="HKCU" Key="Software\NoteDarck\ShadowPainel" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+                </Component>
+              </DirectoryRef>
+              <Binary Id="WebView2Bootstrapper" SourceFile="$(var.SourceDir)\..\WebView2Bootstrapper.exe" />
+              <CustomAction Id="InstallWebView2" BinaryKey="WebView2Bootstrapper" Execute="deferred" Return="check" Impersonate="no" ExeCommand="/silent /install" />
+              <InstallExecuteSequence><Custom Action="InstallWebView2" After="InstallFiles">NOT Installed</Custom></InstallExecuteSequence>
             </Product>
           </Wix>
           EOF
           heat dir "$ROOT" -cg AppFiles -dr INSTALLFOLDER -gg -srd -sreg -sfrag -var var.SourceDir -out files.wxs
           candle -arch x64 -dProductVersion="${PKG_VERSION}.0" installer.wxs files.wxs -dSourceDir="$ROOT"
           light installer.wixobj files.wixobj -out "${ROOT}.msi"
-          rm -f installer.wxs files.wxs installer.wixobj files.wixobj
+          rm -f installer.wxs files.wxs installer.wixobj files.wixobj WebView2Bootstrapper.exe
           rm -rf "$ROOT"
 
       - name: Upload package

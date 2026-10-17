@@ -454,3 +454,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 @media (max-width:900px) { .catalog-grid { grid-template-columns:1fr; } }
 @media (max-width:760px) { .modal { max-height:92vh; } .catalog-grid { padding:14px 16px 18px; } .catalog-search { padding:14px 16px 6px; flex-direction:column; } }
+.catalog-batch-bar { display:flex; justify-content:space-between; align-items:center; padding:12px 24px; background:rgba(141,93,255,.08); border-top:1px solid var(--border); border-bottom:1px solid var(--border); color:var(--muted); font-size:12px; }
+.catalog-card.installed-card { opacity:.48; filter:grayscale(.9); background:rgba(255,255,255,.025); }
+.catalog-card.selected-card { border-color:var(--accent); box-shadow:0 0 0 2px rgba(141,93,255,.18); }
+.catalog-check { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:10px; letter-spacing:.04em; cursor:pointer; }
+.catalog-check input { accent-color:var(--accent); }
+.version-picker { display:flex; flex-direction:column; gap:6px; margin-top:14px; color:var(--muted); font-size:12px; }
+.version-picker select { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:10px; }
