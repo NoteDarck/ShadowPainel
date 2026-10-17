@@ -223,6 +223,7 @@ impl Inner {
 #[derive(Clone)]
 struct AppState(Arc<Mutex<Inner>>);
 
+// ── substituir a struct View ──
 #[derive(Serialize)]
 struct View {
     status: Status,
@@ -237,10 +238,12 @@ struct View {
     server_dir: String,
     java_path: String,
     java_detected: bool,
+    installed: bool,          // NOVO
     e4all: E4allConfig,
     logs: Vec<LogLine>,
 }
 
+// ── substituir a função view ──
 fn view(i: &mut Inner) -> View {
     let (mut memory_mb, mut cpu_percent) = (0u64, 0.0f32);
     if let Some(pid) = i.pid {
@@ -254,11 +257,14 @@ fn view(i: &mut Inner) -> View {
             cpu_percent = (proc_.cpu_usage() / cores).min(100.0);
         }
     }
+    let dir = expand(&i.cfg.server_dir);
+    let installed = dir.join("server.jar").is_file()
+        || dir.join("fabric-server-launch.jar").is_file();
     let uptime_seconds = i
         .started
         .map(|s| (Utc::now() - s).num_seconds().max(0) as u64)
         .unwrap_or(0);
-    let address = format!("localhost:{}", server_port(&expand(&i.cfg.server_dir)));
+    let address = format!("localhost:{}", server_port(&dir));
     View {
         status: i.status,
         address,
@@ -272,6 +278,7 @@ fn view(i: &mut Inner) -> View {
         server_dir: i.cfg.server_dir.clone(),
         java_path: i.cfg.java_path.clone(),
         java_detected: i.java_detected,
+        installed,            // NOVO
         e4all: i.cfg.e4all.clone(),
         logs: i.logs.iter().cloned().collect(),
     }
@@ -685,6 +692,76 @@ async fn save_e4all(State(app): State<AppState>, Json(req): Json<E4allRequest>) 
         ));
     }
     i.push("Configuração do e4all salva.", "success");
+    Ok(Json(view(&mut i)))
+}
+#[derive(Deserialize)]
+struct DeleteServerRequest {
+    confirm_name: String,
+}
+
+async fn delete_server(
+    State(app): State<AppState>,
+    Json(req): Json<DeleteServerRequest>,
+) -> ApiResult {
+    let mut i = app.0.lock().await;
+
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de excluí-lo.",
+        ));
+    }
+
+    let expected = i.cfg.server_name.trim();
+    if req.confirm_name.trim() != expected {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "O nome digitado não corresponde ao nome do servidor.",
+        ));
+    }
+
+    let dir = expand(&i.cfg.server_dir);
+    if dir.exists() {
+        // Segurança: só remove se a pasta realmente contém um servidor
+        let looks_like_server = dir.join("server.jar").is_file()
+            || dir.join("fabric-server-launch.jar").is_file()
+            || dir.join("server.properties").is_file()
+            || dir.join("eula.txt").is_file();
+        if !looks_like_server {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "A pasta configurada não parece ser de um servidor. Exclusão cancelada por segurança.",
+            ));
+        }
+        tokio::fs::remove_dir_all(&dir).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao remover a pasta do servidor: {e}"),
+            )
+        })?;
+    }
+
+    // Reseta estado
+    i.cfg = Config::default();
+    i.status = Status::Offline;
+    i.players = 0;
+    i.started = None;
+    i.pid = None;
+    i.stdin = None;
+    i.kill_tx = None;
+    i.logs.clear();
+    i.push(
+        "Servidor excluído. Crie uma nova instalação para continuar.",
+        "warning",
+    );
+
+    if let Err(e) = i.persist().await {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao gravar config: {e}"),
+        ));
+    }
+
     Ok(Json(view(&mut i)))
 }
 
@@ -1586,11 +1663,13 @@ async fn main() -> anyhow::Result<()> {
     };
     let addr = listener.local_addr()?;
 
+    // CORREÇÃO: .route(...) ANTES do .with_state(...), sem `;` no meio.
     let api = Router::new()
         .route("/api/health", get(health))
         .route("/api/state", get(state))
         .route("/api/server/start", post(start))
         .route("/api/server/stop", post(stop))
+        .route("/api/server/delete", post(delete_server))
         .route("/api/server/download", post(download_server))
         .route("/api/server/eula", post(accept_eula))
         .route("/api/server/install-fabric", post(install_fabric))
