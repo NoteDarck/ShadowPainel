@@ -6,10 +6,21 @@
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
   type Version = { id:string; kind:string; release_time:string };
-  type ContentItem = { filename:string; size:number; kind:string };
+  type ContentItem = { 
+    filename:string; size:number; kind:string; 
+    project_id?:string; version_number?:string; icon_url?:string;
+    installed_version?:string;
+  };
   type ContentResult = {
     project_id:string; title:string; description:string;
-    icon_url?:string; downloads:number;
+    icon_url?:string; downloads:number; version_number?:string;
+  };
+  type ModVersion = {
+    id: string;
+    version_number: string;
+    game_versions: string[];
+    loaders: string[];
+    date_published: string;
   };
   type E4all = {
     loader:string; minecraft_version:string; android_variant:boolean;
@@ -63,6 +74,9 @@
   let command = '';
   let booted = false;
 
+  // ── Seleção múltipla de conteúdo ──
+  let selectedItems: Set<string> = new Set();
+
   // ── Exclusão do servidor (2 fatores) ──
   let deleteOpen = false;
   let deleteStep: 1 | 2 = 1;
@@ -76,8 +90,14 @@
   let catalogLoading = false;
   let catalogError = '';
   let catalogQuery = '';
-  let catalogCategory = 'all'; // NOVO: Estado da categoria
-  let showCatalogFilters = false; // NOVO: Controle do painel de filtros
+  let catalogCategory = 'all';
+  let showCatalogFilters = false;
+  
+  // ── NOVO: Seleção múltipla no catálogo e versão ──
+  let catalogSelected: Set<string> = new Set();
+  let modVersions: ModVersion[] = [];
+  let selectedModVersion = '';
+  let installingBatch = false;
 
   // ── Helpers de API ──
   const api = async <T=unknown>(path:string, options?:RequestInit):Promise<T> => {
@@ -132,6 +152,7 @@
     try {
       const data = await api<{items:ContentItem[]}>(`/content?kind=${contentKind}`);
       content = data.items;
+      selectedItems.clear();
     } catch(e) {
       notice = e instanceof Error ? e.message : 'Falha ao listar conteúdo.';
     }
@@ -208,11 +229,12 @@
   }
 
   // ── Conteúdo ──
-  async function installContent(project_id:string) {
+  async function installContent(project_id:string, version_id?: string) {
     try {
       const version = contentVersion || server.version;
       await api('/content/install', json({
         project_id, kind:contentKind, loader:contentLoader, version,
+        version_id, // Envia a versão específica
       }));
       notice = 'Conteúdo instalado.';
       await loadContent();
@@ -221,19 +243,78 @@
     }
   }
 
-  async function deleteContent(filename:string) {
-    if(!confirm(`Excluir ${filename}?`)) return;
+  async function installBatch() {
+    if (catalogSelected.size === 0) return;
+    installingBatch = true;
+    notice = '';
+    let success = 0;
+    let errors: string[] = [];
+
+    for (const projectId of catalogSelected) {
+      try {
+        const version = contentVersion || server.version;
+        await api('/content/install', json({
+          project_id: projectId, kind: contentKind, loader: contentLoader, version,
+        }));
+        success++;
+      } catch (e) {
+        errors.push(`${projectId}: ${e instanceof Error ? e.message : 'erro'}`);
+      }
+    }
+
+    installingBatch = false;
+    if (errors.length > 0) {
+      notice = `${success} instalado(s). Erros: ${errors.join(', ')}`;
+    } else {
+      notice = `${success} mod(s) instalado(s) com sucesso!`;
+      catalogSelected.clear();
+    }
+    await loadContent();
+  }
+
+  async function deleteSelectedContent() {
+    if (selectedItems.size === 0) return;
+    if (!confirm(`Excluir ${selectedItems.size} arquivo(s) selecionado(s)?`)) return;
     try {
-      await api('/content/delete', json({kind:contentKind, filename}));
+      const result = await api<{ok:boolean; deleted?:string[]; errors?:string[]}>('/content/delete', json({
+        kind: contentKind, 
+        filenames: Array.from(selectedItems)
+      }));
+      
+      if (result.ok) {
+        notice = `${result.deleted?.length || 0} arquivo(s) removido(s).`;
+      } else {
+        notice = `Erros: ${result.errors?.join(', ')}`;
+      }
       await loadContent();
     } catch(e) {
       notice = e instanceof Error ? e.message : 'Falha ao excluir.';
     }
   }
 
+  function toggleSelection(filename: string) {
+    if (selectedItems.has(filename)) {
+      selectedItems.delete(filename);
+    } else {
+      selectedItems.add(filename);
+    }
+    selectedItems = selectedItems;
+  }
+
+  function selectAll() {
+    if (selectedItems.size === content.length) {
+      selectedItems.clear();
+    } else {
+      content.forEach(c => selectedItems.add(c.filename));
+    }
+    selectedItems = selectedItems;
+  }
+
   // ── Catálogo ──
   async function openCatalog() {
     catalogOpen = true;
+    catalogDetail = null;
+    catalogSelected.clear();
     await runCatalogSearch();
   }
   async function runCatalogSearch() {
@@ -246,7 +327,7 @@
         kind: contentKind, 
         loader: contentLoader, 
         version,
-        category: catalogCategory // Envia a categoria
+        category: catalogCategory
       }));
       results = data.hits || [];
     } catch (e) {
@@ -260,7 +341,29 @@
     if (catalogOpen) runCatalogSearch();
   }
 
-  // ── Exclusão ──
+  // ── NOVO: Carregar versões do mod selecionado ──
+  async function loadModVersions(projectId: string) {
+    modVersions = [];
+    selectedModVersion = '';
+    if (!projectId) return;
+    
+    try {
+      const version = contentVersion || server.version;
+      const data = await api<ModVersion[]>(`/content/versions?query=${projectId}&loader=${contentLoader}&version=${version}`);
+      modVersions = data;
+      if (modVersions.length > 0) {
+        selectedModVersion = modVersions[0].id;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  function isInstalled(projectId: string) {
+    return content.some(item => item.project_id === projectId);
+  }
+
+  // ── Exclusão do servidor ──
   function openDelete() {
     deleteOpen = true;
     deleteStep = 1;
@@ -493,9 +596,14 @@
             <h3>Conteúdo do servidor</h3>
             <p>Gerencie {contentKind} como no Prism Launcher: veja o que está instalado e explore o catálogo por categoria.</p>
           </div>
-          <button class="primary" on:click={openCatalog}>
-            ＋ Adicionar {contentKind === 'mods' ? 'mods' : contentKind === 'plugins' ? 'plugins' : 'datapacks'}
-          </button>
+          <div style="display:flex; gap:10px;">
+            <button class="secondary" on:click={selectAll}>
+              {selectedItems.size === content.length ? 'Desmarcar Todos' : 'Selecionar Todos'}
+            </button>
+            <button class="primary" on:click={openCatalog}>
+              ＋ Adicionar {contentKind === 'mods' ? 'mods' : contentKind === 'plugins' ? 'plugins' : 'datapacks'}
+            </button>
+          </div>
         </div>
 
         <div class="content-tabs">
@@ -553,15 +661,36 @@
           <div class="installed-grid">
             {#each content as file}
               <div class="installed-card">
-                <span class="file-icon">{contentKind==='mods'?'◆':contentKind==='plugins'?'⬡':'◇'}</span>
+                <input type="checkbox" class="item-checkbox"
+                       checked={selectedItems.has(file.filename)}
+                       on:change={() => toggleSelection(file.filename)} />
+                
+                <div class="catalog-icon" style="width:36px; height:36px; font-size:14px;">
+                  {#if file.icon_url}
+                    <img src={file.icon_url} alt=""/>
+                  {:else}
+                    <span>{contentKind==='mods'?'◆':contentKind==='plugins'?'⬡':'◇'}</span>
+                  {/if}
+                </div>
+                
                 <div class="installed-meta">
                   <b>{file.filename}</b>
-                  <small>{formatBytes(file.size)} · {contentKind}</small>
+                  <small>
+                    {formatBytes(file.size)} 
+                    {#if file.installed_version}· Versão: {file.installed_version}{/if}
+                  </small>
                 </div>
-                <button class="danger small-button" on:click={()=>deleteContent(file.filename)}>Remover</button>
               </div>
             {/each}
           </div>
+          
+          {#if selectedItems.size > 0}
+            <div class="bulk-actions">
+              <button class="danger" on:click={deleteSelectedContent}>
+                Remover {selectedItems.size} arquivo(s) selecionado(s)
+              </button>
+            </div>
+          {/if}
         {/if}
       </section>
 
@@ -576,7 +705,6 @@
               <button class="modal-close" on:click={()=>{catalogOpen=false;catalogDetail=null;}}>✕</button>
             </div>
 
-            <!-- NOVO: Container da busca com botão de filtros -->
             <div class="catalog-search-container">
               <div class="catalog-search">
                 <input bind:value={catalogQuery}
@@ -591,7 +719,6 @@
                 </button>
               </div>
 
-              <!-- NOVO: Painel de Filtros Avançados (Categorias) -->
               {#if showCatalogFilters}
                 <div class="catalog-advanced-filters">
                   <label>
@@ -626,9 +753,25 @@
             {:else}
               <div class="catalog-grid">
                 {#each results as item}
-                  <div class="catalog-card" role="button" tabindex="0"
-                       on:click={()=>catalogDetail=item}
-                       on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&(catalogDetail=item)}>
+                  <!-- Card com checkbox para seleção múltipla e classe 'installed' -->
+                  <div class="catalog-card" 
+                       class:selected={catalogSelected.has(item.project_id)}
+                       class:installed={isInstalled(item.project_id)}
+                       class:disabled={isInstalled(item.project_id)}
+                       role="button" tabindex="0"
+                       on:click={() => !isInstalled(item.project_id) && (catalogDetail=item, loadModVersions(item.project_id))}
+                       on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&!isInstalled(item.project_id)&&(catalogDetail=item, loadModVersions(item.project_id))}>
+                    
+                    {#if !isInstalled(item.project_id)}
+                      <input type="checkbox" class="item-checkbox" 
+                             checked={catalogSelected.has(item.project_id)}
+                             on:click|stopPropagation={() => {
+                               if (catalogSelected.has(item.project_id)) catalogSelected.delete(item.project_id);
+                               else catalogSelected.add(item.project_id);
+                               catalogSelected = catalogSelected;
+                             }} />
+                    {/if}
+                    
                     <div class="catalog-icon">
                       {#if item.icon_url}
                         <img src={item.icon_url} alt="" loading="lazy"/>
@@ -641,15 +784,15 @@
                       <small>{item.description || 'Projeto Modrinth'}</small>
                       <span class="catalog-downloads">⇩ {item.downloads.toLocaleString('pt-BR')}</span>
                     </div>
-                    <button class="primary small-button"
-                            on:click|stopPropagation={()=>installContent(item.project_id)}>
-                      Instalar
-                    </button>
+                    {#if isInstalled(item.project_id)}
+                      <span class="installed-badge">Já instalado</span>
+                    {/if}
                   </div>
                 {/each}
               </div>
             {/if}
 
+            <!-- Painel de Detalhes com seleção de versão e botões de ação -->
             {#if catalogDetail}
               <div class="detail-sheet">
                 <div class="detail-head">
@@ -662,19 +805,52 @@
                   </div>
                   <div>
                     <h4>{catalogDetail.title}</h4>
+                    {#if catalogDetail.version_number}
+                      <small class="version-tag">Versão: {catalogDetail.version_number}</small>
+                    {/if}
                     <small>{catalogDetail.downloads.toLocaleString('pt-BR')} downloads</small>
                   </div>
-                  <button class="modal-close" on:click={()=>catalogDetail=null}>✕</button>
+                  <button class="modal-close" on:click={()=>{catalogDetail=null; modVersions=[];}}>✕</button>
                 </div>
                 <p>{catalogDetail.description || 'Sem descrição fornecida.'}</p>
+                
+                <!-- NOVO: Seleção de versão específica do mod -->
+                {#if modVersions.length > 0}
+                  <div class="version-picker">
+                    <label>Selecionar versão do mod</label>
+                    <select bind:value={selectedModVersion}>
+                      {#each modVersions as v}
+                        <option value={v.id}>{v.version_number} ({v.game_versions.join(', ')})</option>
+                      {/each}
+                    </select>
+                  </div>
+                {/if}
+
                 <div class="detail-actions">
+                  <button class="secondary" on:click={()=>{catalogDetail=null; modVersions=[];}}>
+                    Cancelar
+                  </button>
                   <button class="primary"
-                          on:click={()=>{installContent(catalogDetail!.project_id);catalogDetail=null;}}>
-                    Instalar em {contentVersion}
+                          on:click={async () => {
+                            if (catalogDetail) {
+                              await installContent(catalogDetail.project_id, selectedModVersion);
+                              catalogDetail=null;
+                              modVersions=[];
+                            }
+                          }}>
+                    Confirmar Instalação
                   </button>
                 </div>
               </div>
             {/if}
+
+            <!-- NOVO: Botão de instalação em lote no rodapé do modal -->
+            <div class="modal-footer-batch">
+              <span>{catalogSelected.size} mod(s) selecionado(s)</span>
+              <button class="primary" on:click={installBatch} disabled={catalogSelected.size === 0 || installingBatch}>
+                {installingBatch ? 'Instalando...' : 'Instalar Selecionados'}
+              </button>
+            </div>
           </div>
         </div>
       {/if}

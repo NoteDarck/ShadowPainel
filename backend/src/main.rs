@@ -793,7 +793,7 @@ async fn command(
     Ok(Json(json!({ "ok": true })))
 }
 
-// --- NOVAS FUNÇÕES PARA MODS E FABRIC ---
+// --- FUNÇÕES PARA MODS E FABRIC ---
 
 #[derive(Deserialize)]
 struct ModSearchRequest {
@@ -1351,6 +1351,10 @@ struct ContentItem {
     filename: String,
     size: u64,
     kind: String,
+    project_id: Option<String>,
+    version_number: Option<String>,
+    icon_url: Option<String>,
+    installed_version: Option<String>,
 }
 
 async fn list_content(
@@ -1376,6 +1380,7 @@ async fn list_content(
         )
     })?;
     let mut items = Vec::new();
+    
     while let Some(entry) = entries.next_entry().await.map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1384,10 +1389,17 @@ async fn list_content(
     })? {
         let metadata = entry.metadata().await.ok();
         if metadata.as_ref().is_some_and(|m| m.is_file()) {
+            let filename = entry.file_name().to_string_lossy().into_owned();
+            let version_number = Some(filename.trim_end_matches(".jar").to_string());
+            
             items.push(ContentItem {
-                filename: entry.file_name().to_string_lossy().into_owned(),
+                filename,
                 size: metadata.unwrap().len(),
                 kind: kind.clone(),
+                project_id: None,
+                version_number: version_number.clone(),
+                icon_url: None,
+                installed_version: version_number,
             });
         }
     }
@@ -1398,34 +1410,49 @@ async fn list_content(
 #[derive(Deserialize)]
 struct ContentDeleteRequest {
     kind: String,
-    filename: String,
+    filenames: Vec<String>,
 }
 
 async fn delete_content(
     State(app): State<AppState>,
     Json(req): Json<ContentDeleteRequest>,
 ) -> Result<Json<Value>, ApiErr> {
-    let filename = std::path::Path::new(&req.filename)
-        .file_name()
-        .and_then(|x| x.to_str())
-        .filter(|x| *x == req.filename && !x.is_empty())
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de arquivo inválido."))?;
     let i = app.0.lock().await;
     let dir = content_dir(&expand(&i.cfg.server_dir), &req.kind)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
     drop(i);
-    tokio::fs::remove_file(dir.join(filename))
-        .await
-        .map_err(|e| {
-            err(
-                StatusCode::NOT_FOUND,
-                format!("Não foi possível excluir: {e}"),
-            )
-        })?;
-    Ok(Json(json!({"ok": true})))
-}
 
-// ───────────────────────── ALTERAÇÃO AQUI: Adicionado campo category ─────────────────────────
+    let mut deleted = Vec::new();
+    let mut errors = Vec::new();
+
+    for filename in req.filenames {
+        let safe_name = std::path::Path::new(&filename)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .filter(|x| *x == filename && !x.is_empty());
+        
+        if let Some(name) = safe_name {
+            let path = dir.join(name);
+            if path.exists() {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    errors.push(format!("{name}: {e}"));
+                } else {
+                    deleted.push(name.to_string());
+                }
+            } else {
+                errors.push(format!("{name}: não encontrado"));
+            }
+        } else {
+            errors.push(format!("{filename}: nome inválido"));
+        }
+    }
+
+    if !errors.is_empty() {
+        return Ok(Json(json!({"ok": false, "deleted": deleted, "errors": errors})));
+    }
+
+    Ok(Json(json!({"ok": true, "deleted": deleted})))
+}
 
 #[derive(Deserialize)]
 struct ContentSearchRequest {
@@ -1433,7 +1460,7 @@ struct ContentSearchRequest {
     kind: String,
     loader: String,
     version: String,
-    category: Option<String>, // NOVO CAMPO
+    category: Option<String>,
 }
 
 async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Value>, ApiErr> {
@@ -1448,7 +1475,6 @@ async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Va
         String::new()
     };
     
-    // NOVO: Adiciona a categoria aos filtros se ela foi selecionada
     let category_facet = match req.category {
         Some(cat) if !cat.is_empty() && cat != "all" => format!(r#",["categories:{}"]"#, cat),
         _ => String::new(),
@@ -1484,12 +1510,44 @@ async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Va
     Ok(Json(data))
 }
 
+// NOVO: Rota para buscar todas as versões de um mod específico
+async fn get_content_versions(
+    axum::extract::Query(query): axum::extract::Query<ContentSearchRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let url = format!(
+        "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
+        urlencoding::encode(&query.query),
+        urlencoding::encode(&query.loader),
+        urlencoding::encode(&query.version)
+    );
+
+    let data: Value = reqwest::Client::new()
+        .get(url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Falha ao buscar versões: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Modrinth retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
+
+    Ok(Json(data))
+}
+
 #[derive(Deserialize)]
 struct ContentInstallRequest {
     project_id: String,
     kind: String,
     loader: String,
     version: String,
+    version_id: Option<String>, // NOVO: versão específica do mod escolhida
 }
 
 async fn install_content(
@@ -1535,8 +1593,15 @@ async fn install_content(
         .json()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
-    let file = versions
-        .first()
+    
+    // NOVO: Se version_id foi passado, filtra a versão exata
+    let version = if let Some(vid) = &req.version_id {
+        versions.iter().find(|v| v["id"].as_str() == Some(vid))
+    } else {
+        versions.first()
+    };
+
+    let file = version
         .and_then(|v| v["files"].as_array())
         .and_then(|files| {
             files
@@ -1687,6 +1752,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/content", get(list_content))
         .route("/api/content/delete", post(delete_content))
         .route("/api/content/search", post(search_content))
+        .route("/api/content/versions", get(get_content_versions)) // NOVO
         .route("/api/content/install", post(install_content))
         .route("/api/mods/search", post(search_mods))
         .route("/api/mods/install", post(install_mod))

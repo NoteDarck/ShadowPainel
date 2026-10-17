@@ -318,10 +318,36 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .tab-count { display:inline-block; margin-left:6px; background:rgba(141,93,255,.18); color:var(--accent-2); border-radius:10px; padding:1px 8px; font:10px 'DM Mono'; }
 
 .installed-grid { display:flex; flex-direction:column; gap:8px; }
-.installed-card { display:flex; align-items:center; gap:12px; padding:12px 14px; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; }
+.installed-card { 
+  display:flex; align-items:center; gap:12px; 
+  padding:12px 14px; 
+  background:var(--panel-2); 
+  border:1px solid var(--border); 
+  border-radius:8px; 
+  transition: border-color 0.2s;
+}
+.installed-card:hover { border-color: var(--accent); }
 .installed-meta { flex:1; min-width:0; }
 .installed-meta b { display:block; color:#fff; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .installed-meta small { display:block; color:var(--muted); font-size:11px; margin-top:3px; }
+
+/* Checkbox e ações em massa */
+.item-checkbox {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
+.bulk-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border);
+}
 
 /* Modal e Catálogo */
 .modal-overlay { position:fixed; inset:0; background:rgba(4,6,12,.72); backdrop-filter:blur(4px); display:grid; place-items:center; z-index:100; padding:24px; animation:fadeIn .15s ease; }
@@ -337,7 +363,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 .catalog-modal { max-width:1000px; }
 
-/* NOVO: Container da busca com botão de filtros */
 .catalog-search-container {
   padding: 18px 24px 6px;
   border-bottom: 1px solid var(--border);
@@ -351,7 +376,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .catalog-search input { flex:1; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px 14px; color:var(--text); font:13px Inter,sans-serif; outline:none; }
 .catalog-search input:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(141,93,255,.12); }
 
-/* NOVO: Painel de filtros avançados */
 .catalog-advanced-filters {
   display: flex;
   gap: 12px;
@@ -405,8 +429,40 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .spinner { width:18px; height:18px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg) } }
 .catalog-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:18px 24px 24px; overflow-y:auto; }
-.catalog-card { display:flex; align-items:center; gap:12px; padding:14px; background:var(--panel-2); border:1px solid var(--border); border-radius:10px; cursor:pointer; transition:.15s; }
+.catalog-card { 
+  display:flex; align-items:center; gap:12px; 
+  padding:14px; 
+  background:var(--panel-2); 
+  border:1px solid var(--border); 
+  border-radius:10px; 
+  cursor:pointer; 
+  transition:.15s; 
+}
 .catalog-card:hover { border-color:var(--accent); background:rgba(141,93,255,.06); transform:translateY(-1px); }
+.catalog-card.selected { border-color: var(--accent); background: rgba(141,93,255,.12); box-shadow: 0 0 0 1px var(--accent); }
+
+/* NOVO: Classe para mods já instalados (cinza) */
+.catalog-card.installed {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--panel);
+}
+.catalog-card.installed:hover {
+  border-color: var(--border);
+  background: var(--panel);
+  transform: none;
+}
+.installed-badge {
+  font-family: 'DM Mono';
+  font-size: 9px;
+  background: rgba(89, 203, 138, 0.15);
+  color: var(--green);
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 .catalog-icon { width:48px; height:48px; border-radius:8px; overflow:hidden; background:#1f2436; display:grid; place-items:center; flex-shrink:0; font:700 20px Outfit,sans-serif; color:var(--accent-2); }
 .catalog-icon img { width:100%; height:100%; object-fit:cover; }
 .catalog-icon.big { width:64px; height:64px; font-size:26px; }
@@ -419,9 +475,60 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .detail-head { display:flex; align-items:center; gap:14px; }
 .detail-head > div:nth-child(2) { flex:1; min-width:0; }
 .detail-head h4 { color:#fff; font:600 16px Outfit,sans-serif; }
-.detail-head small { color:var(--muted); font:11px 'DM Mono'; }
+.detail-head small { color:var(--muted); font:11px 'DM Mono'; display:block; }
+.detail-head .version-tag { color:var(--accent-2); font-family:'DM Mono'; font-size:11px; margin-top:2px; }
 .detail-sheet p { color:var(--text); font-size:12px; line-height:1.6; }
-.detail-actions { display:flex; gap:10px; }
+.detail-actions { display:flex; gap:10px; justify-content:flex-end; padding-top:12px; border-top:1px dashed var(--border); }
+
+/* NOVO: Seletor de versão do mod */
+.version-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--bg);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.version-picker label {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: var(--muted);
+}
+.version-picker select {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238d96aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 14px;
+  padding-right: 32px;
+}
+.version-picker select option { background: var(--panel); color: var(--text); }
+
+/* NOVO: Rodapé do modal para instalação em lote */
+.modal-footer-batch {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--panel-2);
+  border-radius: 0 0 14px 14px;
+}
+.modal-footer-batch span {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
 
 .danger-modal { max-width:520px; }
 .danger-modal .modal-head h3 { color:var(--red); }
