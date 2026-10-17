@@ -223,7 +223,6 @@ impl Inner {
 #[derive(Clone)]
 struct AppState(Arc<Mutex<Inner>>);
 
-// ── substituir a struct View ──
 #[derive(Serialize)]
 struct View {
     status: Status,
@@ -238,12 +237,11 @@ struct View {
     server_dir: String,
     java_path: String,
     java_detected: bool,
-    installed: bool, // NOVO
+    installed: bool,
     e4all: E4allConfig,
     logs: Vec<LogLine>,
 }
 
-// ── substituir a função view ──
 fn view(i: &mut Inner) -> View {
     let (mut memory_mb, mut cpu_percent) = (0u64, 0.0f32);
     if let Some(pid) = i.pid {
@@ -278,7 +276,7 @@ fn view(i: &mut Inner) -> View {
         server_dir: i.cfg.server_dir.clone(),
         java_path: i.cfg.java_path.clone(),
         java_detected: i.java_detected,
-        installed, // NOVO
+        installed,
         e4all: i.cfg.e4all.clone(),
         logs: i.logs.iter().cloned().collect(),
     }
@@ -795,7 +793,7 @@ async fn command(
     Ok(Json(json!({ "ok": true })))
 }
 
-// --- NOVAS FUNÇÕES PARA MODS E FABRIC ---
+// --- FUNÇÕES PARA MODS E FABRIC ---
 
 #[derive(Deserialize)]
 struct ModSearchRequest {
@@ -1353,6 +1351,10 @@ struct ContentItem {
     filename: String,
     size: u64,
     kind: String,
+    project_id: Option<String>,
+    version_number: Option<String>,
+    icon_url: Option<String>,
+    installed_version: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1362,19 +1364,16 @@ struct InstalledContent {
     filename: String,
     version_id: String,
 }
-
 fn content_manifest(base: &std::path::Path) -> PathBuf {
     base.join(".shadowpainel-content.json")
 }
-
 async fn read_installed_content(base: &std::path::Path) -> Vec<InstalledContent> {
     tokio::fs::read(content_manifest(base))
         .await
         .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
-
 async fn write_installed_content(
     base: &std::path::Path,
     items: &[InstalledContent],
@@ -1418,6 +1417,7 @@ async fn list_content(
         )
     })?;
     let mut items = Vec::new();
+
     while let Some(entry) = entries.next_entry().await.map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1430,10 +1430,16 @@ async fn list_content(
             if filename.starts_with('.') {
                 continue;
             }
+            let version_number = Some(filename.trim_end_matches(".jar").to_string());
+
             items.push(ContentItem {
                 filename,
-                size: metadata.map(|m| m.len()).unwrap_or_default(),
+                size: metadata.unwrap().len(),
                 kind: kind.clone(),
+                project_id: None,
+                version_number: version_number.clone(),
+                icon_url: None,
+                installed_version: version_number,
             });
         }
     }
@@ -1444,35 +1450,57 @@ async fn list_content(
 #[derive(Deserialize)]
 struct ContentDeleteRequest {
     kind: String,
-    filename: String,
+    filenames: Vec<String>,
 }
 
 async fn delete_content(
     State(app): State<AppState>,
     Json(req): Json<ContentDeleteRequest>,
 ) -> Result<Json<Value>, ApiErr> {
-    let filename = std::path::Path::new(&req.filename)
-        .file_name()
-        .and_then(|x| x.to_str())
-        .filter(|x| *x == req.filename && !x.is_empty())
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de arquivo inválido."))?;
     let i = app.0.lock().await;
     let dir = content_dir(&expand(&i.cfg.server_dir), &req.kind)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
     drop(i);
-    tokio::fs::remove_file(dir.join(filename))
-        .await
-        .map_err(|e| {
-            err(
-                StatusCode::NOT_FOUND,
-                format!("Não foi possível excluir: {e}"),
-            )
-        })?;
+
+    let mut deleted = Vec::new();
+    let mut errors = Vec::new();
+
+    for filename in req.filenames {
+        let safe_name = std::path::Path::new(&filename)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .filter(|x| *x == filename && !x.is_empty());
+
+        if let Some(name) = safe_name {
+            let path = dir.join(name);
+            if path.exists() {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    errors.push(format!("{name}: {e}"));
+                } else {
+                    deleted.push(name.to_string());
+                }
+            } else {
+                errors.push(format!("{name}: não encontrado"));
+            }
+        } else {
+            errors.push(format!("{filename}: nome inválido"));
+        }
+    }
+
     let base = dir.parent().unwrap_or(&dir);
     let mut installed = read_installed_content(base).await;
-    installed.retain(|item| !(item.kind == req.kind && item.filename == filename));
+    installed.retain(|x| {
+        !deleted
+            .iter()
+            .any(|name| x.kind == req.kind && x.filename == *name)
+    });
     write_installed_content(base, &installed).await?;
-    Ok(Json(json!({"ok": true})))
+    if !errors.is_empty() {
+        return Ok(Json(
+            json!({"ok": false, "deleted": deleted, "errors": errors}),
+        ));
+    }
+    Ok(Json(json!({"ok": true, "deleted": deleted})))
 }
 
 #[derive(Deserialize)]
@@ -1481,6 +1509,7 @@ struct ContentSearchRequest {
     kind: String,
     loader: String,
     version: String,
+    category: Option<String>,
 }
 
 async fn search_content(
@@ -1497,15 +1526,23 @@ async fn search_content(
     } else {
         String::new()
     };
+
+    let category_facet = match req.category {
+        Some(cat) if !cat.is_empty() && cat != "all" => format!(r#",["categories:{}"]"#, cat),
+        _ => String::new(),
+    };
+
     let facets = format!(
-        r#"[["project_type:{}"],["versions:{}"]{}]"#,
-        project_type, req.version, loader_facet
+        r#"[["project_type:{}"],["versions:{}"]{}{}]"#,
+        project_type, req.version, loader_facet, category_facet
     );
+
     let url = format!(
         "https://api.modrinth.com/v2/search?query={}&facets={}&limit=12",
         urlencoding::encode(&req.query),
         urlencoding::encode(&facets)
     );
+
     let mut data: Value = reqwest::Client::new()
         .get(url)
         .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
@@ -1529,8 +1566,8 @@ async fn search_content(
     let installed: std::collections::HashSet<String> = read_installed_content(&base)
         .await
         .into_iter()
-        .filter(|item| item.kind == req.kind)
-        .map(|item| item.project_id)
+        .filter(|x| x.kind == req.kind)
+        .map(|x| x.project_id)
         .collect();
     if let Some(hits) = data.get_mut("hits").and_then(Value::as_array_mut) {
         for hit in hits {
@@ -1544,20 +1581,17 @@ async fn search_content(
     Ok(Json(data))
 }
 
-#[derive(Deserialize)]
-struct ContentVersionsRequest {
-    project_id: String,
-    loader: String,
-    version: String,
-}
-
-async fn content_versions(Json(req): Json<ContentVersionsRequest>) -> Result<Json<Value>, ApiErr> {
+// NOVO: Rota para buscar todas as versões de um mod específico
+async fn get_content_versions(
+    axum::extract::Query(query): axum::extract::Query<ContentSearchRequest>,
+) -> Result<Json<Value>, ApiErr> {
     let url = format!(
         "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
-        urlencoding::encode(&req.project_id),
-        urlencoding::encode(&req.loader),
-        urlencoding::encode(&req.version)
+        urlencoding::encode(&query.query),
+        urlencoding::encode(&query.loader),
+        urlencoding::encode(&query.version)
     );
+
     let data: Value = reqwest::Client::new()
         .get(url)
         .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
@@ -1566,7 +1600,7 @@ async fn content_versions(Json(req): Json<ContentVersionsRequest>) -> Result<Jso
         .map_err(|e| {
             err(
                 StatusCode::BAD_GATEWAY,
-                format!("Falha ao consultar versões: {e}"),
+                format!("Falha ao buscar versões: {e}"),
             )
         })?
         .error_for_status()
@@ -1579,7 +1613,8 @@ async fn content_versions(Json(req): Json<ContentVersionsRequest>) -> Result<Jso
         .json()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
-    Ok(Json(json!({"versions": data})))
+
+    Ok(Json(data))
 }
 
 #[derive(Deserialize)]
@@ -1588,8 +1623,7 @@ struct ContentInstallRequest {
     kind: String,
     loader: String,
     version: String,
-    #[serde(default)]
-    version_id: Option<String>,
+    version_id: Option<String>, // NOVO: versão específica do mod escolhida
 }
 
 async fn install_content(
@@ -1614,12 +1648,7 @@ async fn install_content(
             urlencoding::encode(version_id)
         )
     } else {
-        format!(
-            "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
-            urlencoding::encode(&req.project_id),
-            urlencoding::encode(&req.loader),
-            urlencoding::encode(&req.version)
-        )
+        format!("https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]", urlencoding::encode(&req.project_id), urlencoding::encode(&req.loader), urlencoding::encode(&req.version))
     };
     let version_data: Value = client
         .get(url)
@@ -1646,8 +1675,9 @@ async fn install_content(
         Value::Array(items) => items,
         item => vec![item],
     };
-    let file = versions
-        .first()
+    let version = versions.first();
+
+    let file = version
         .and_then(|v| v["files"].as_array())
         .and_then(|files| {
             files
@@ -1681,7 +1711,7 @@ async fn install_content(
             )
         })?;
     let mut installed = read_installed_content(&base).await;
-    installed.retain(|item| !(item.kind == req.kind && item.filename == safe));
+    installed.retain(|x| !(x.kind == req.kind && x.filename == safe));
     installed.push(InstalledContent {
         project_id: req.project_id,
         kind: req.kind,
@@ -1793,7 +1823,6 @@ async fn main() -> anyhow::Result<()> {
     };
     let addr = listener.local_addr()?;
 
-    // CORREÇÃO: .route(...) ANTES do .with_state(...), sem `;` no meio.
     let api = Router::new()
         .route("/api/health", get(health))
         .route("/api/state", get(state))
@@ -1808,7 +1837,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/content", get(list_content))
         .route("/api/content/delete", post(delete_content))
         .route("/api/content/search", post(search_content))
-        .route("/api/content/versions", post(content_versions))
+        .route("/api/content/versions", get(get_content_versions)) // NOVO
         .route("/api/content/install", post(install_content))
         .route("/api/mods/search", post(search_mods))
         .route("/api/mods/install", post(install_mod))
