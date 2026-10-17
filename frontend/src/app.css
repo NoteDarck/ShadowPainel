@@ -394,3 +394,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .setup-note span { color:var(--muted); font-size:11px; line-height:1.5; }
 @media (max-width:900px) { .content-columns { grid-template-columns:1fr; } }
 @media (max-width:760px) { .content-toolbar { flex-direction:column; } .content-tabs { overflow-x:auto; } .content-tabs button { white-space:nowrap; } .setup-steps { overflow-x:auto; } }
+
+/* Filtros do catálogo no estilo de instâncias do Prism Launcher */
+.content-filters { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px; margin-bottom:14px; }
+.content-filters label { display:flex; flex-direction:column; gap:7px; color:var(--muted); font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+.content-filters select, .content-toolbar select { width:100%; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:11px 12px; color:var(--text); font:12px Inter,sans-serif; }
+.selected-version { display:block; color:var(--accent-2); font-size:10px; margin-top:5px; font-weight:500; }
+@media (max-width:760px) { .content-filters { grid-template-columns:1fr; } }

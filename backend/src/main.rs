@@ -21,7 +21,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-const APP_VERSION: &str = "0.6.5";
+const APP_VERSION: &str = "0.7.0";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1359,15 +1359,19 @@ struct ContentSearchRequest {
 }
 
 async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Value>, ApiErr> {
-    let _loader = req.loader;
     let project_type = match req.kind.as_str() {
         "plugins" => "plugin",
         "datapacks" => "datapack",
         _ => "mod",
     };
+    let loader_facet = if req.kind == "mods" && req.loader != "vanilla" {
+        format!(r#",["categories:{}"]"#, req.loader)
+    } else {
+        String::new()
+    };
     let facets = format!(
-        r#"[["project_type:{}"],["versions:{}"]]"#,
-        project_type, req.version
+        r#"[["project_type:{}"],["versions:{}"]{}]"#,
+        project_type, req.version, loader_facet
     );
     let url = format!(
         "https://api.modrinth.com/v2/search?query={}&facets={}&limit=12",
