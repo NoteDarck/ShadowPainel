@@ -90,6 +90,8 @@ jobs:
           cp "backend/target/release/${{ matrix.binary }}" "$APPDIR/usr/bin/shadowpainel"
           cp -r frontend/dist/. "$APPDIR/usr/share/shadowpainel/frontend/"
           cp README.md "$APPDIR/usr/share/doc/shadowpainel/README.md"
+          cp packaging/aur/shadowpainel.desktop "$APPDIR/shadowpainel.desktop"
+          sed -i 's/^Exec=.*/Exec=AppRun/' "$APPDIR/shadowpainel.desktop"
           cat > "$APPDIR/AppRun" <<'EOF'
           #!/bin/sh
           HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -136,7 +138,7 @@ jobs:
           cat > installer.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-            <Product Id="*" Name="ShadowPainel" Language="1046" Version="0.1.2.0" Manufacturer="NoteDarck" UpgradeCode="2DFA8B31-0C89-4B55-9C3D-5B25F32D5F4A">
+            <Product Id="*" Name="ShadowPainel" Language="1046" Codepage="65001" Version="0.1.2.0" Manufacturer="NoteDarck" UpgradeCode="2DFA8B31-0C89-4B55-9C3D-5B25F32D5F4A">
               <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
               <MajorUpgrade DowngradeErrorMessage="Uma versão mais recente do ShadowPainel já está instalada." />
               <MediaTemplate EmbedCab="yes" />
