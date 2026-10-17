@@ -1,6 +1,15 @@
 # ShadowPainel
 
-Painel local, em **Rust**, para configurar e administrar servidores Minecraft no computador pessoal. A interface é Svelte e o núcleo HTTP/ciclo de vida é Rust com Axum e Tokio.
+Painel local, em **Rust**, para configurar e administrar servidores Minecraft no computador pessoal. A interface é Svelte e o núcleo HTTP/ciclo de vida é Rust com Axum e Tokio. Desde a série `0.6.x`, o frontend é hospedado em uma WebView nativa dentro de uma janela própria do aplicativo.
+
+## Arquitetura revisada
+
+- `backend/`: núcleo Rust responsável pelo processo Java, console, métricas, persistência e API local.
+- `desktop/`: shell Rust/WebView multiplataforma; inicia o núcleo em uma porta loopback efêmera e encerra o processo ao fechar a janela.
+- `frontend/`: interface Svelte compilada como assets estáticos, sem estado de servidor próprio.
+- `packaging/`: integração AUR, desktop entry, ícone e receitas de distribuição.
+
+As configurações são gravadas localmente em `~/.shadowpainel/config.json` por substituição atômica. Isso evita deixar um JSON parcialmente escrito após queda de energia ou encerramento inesperado.
 
 ## O que já funciona
 
@@ -12,6 +21,8 @@ Painel local, em **Rust**, para configurar e administrar servidores Minecraft no
 - Inicia o `server.jar` real com Java, acompanha stdout/stderr e envia comandos pelo console.
 - Se a porta 4173 já estiver ocupada, escolhe automaticamente a próxima porta livre até 4193. Também é possível fixar uma porta com `SHADOWPAINEL_ADDR=127.0.0.1:4174`.
 - Configurações persistidas em `~/.shadowpainel/config.json`, sem conta, sem nuvem e sem envio de dados.
+- Validações de configuração e e4all cobertas por testes unitários Rust.
+- O botão **Reiniciar servidor** aguarda o encerramento gracioso antes de iniciar novamente.
 
 > O painel exige um `server.jar` na pasta configurada. O servidor é executado localmente com o Java detectado em `JAVA_HOME` ou no PATH.
 
@@ -95,3 +106,7 @@ As releases multiplataforma também geram:
 - Windows: `.zip`, executável `.exe` e instalador `.msi`;
 - macOS Intel: `.tar.gz` e `.dmg`;
 - macOS Apple Silicon: `.tar.gz` e `.dmg`.
+
+## Qualidade da versão 0.6.x
+
+Cada alteração da série `0.6.x` passa por `cargo fmt`, `cargo test`, `cargo clippy -D warnings`, `cargo check` do shell desktop, `svelte-check` e build do frontend. O workflow de release também compila a WebView nativa e publica checksums SHA-256. O AppImage e o `.deb` usam a mesma arquitetura do AUR: janela desktop, núcleo separado e assets Svelte compartilhados.

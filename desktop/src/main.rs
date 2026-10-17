@@ -21,7 +21,12 @@ fn find_file(paths: Vec<PathBuf>) -> io::Result<PathBuf> {
     paths
         .into_iter()
         .find(|path| path.is_file())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "núcleo do ShadowPainel não encontrado"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "núcleo do ShadowPainel não encontrado",
+            )
+        })
 }
 
 fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
@@ -50,7 +55,10 @@ fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
 
     let mut child = Command::new(core)
         .env("SHADOWPAINEL_FRONTEND_DIR", frontend_dir)
-        .env("SHADOWPAINEL_ADDR", env::var("SHADOWPAINEL_ADDR").unwrap_or_else(|_| "127.0.0.1:0".into()))
+        .env(
+            "SHADOWPAINEL_ADDR",
+            env::var("SHADOWPAINEL_ADDR").unwrap_or_else(|_| "127.0.0.1:0".into()),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;

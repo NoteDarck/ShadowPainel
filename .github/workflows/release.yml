@@ -103,7 +103,7 @@ jobs:
           cp -r frontend/dist/. "$ROOT/frontend/dist/"
           cp README.md "$ROOT/"
           cp -r packaging "$ROOT/"
-          printf 'Execute o binário dentro da pasta backend (ou defina SHADOWPAINEL_FRONTEND_DIR).\nDepois abra http://localhost:4173\n' > "$ROOT/EXECUTAR.txt"
+          printf 'Execute shadowpainel-desktop para abrir a janela própria do ShadowPainel.\nO núcleo Rust é iniciado automaticamente; não é necessário abrir o navegador.\n' > "$ROOT/EXECUTAR.txt"
           if [ "${{ matrix.archive }}" = "zip" ]; then
             7z a "${ROOT}.zip" "$ROOT" >/dev/null
           else

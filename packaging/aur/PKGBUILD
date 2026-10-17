@@ -23,6 +23,8 @@ prepare() {
   cd "$srcdir/ShadowPainel/backend"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+  cd ../desktop
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
   cd ../frontend
   npm ci
 }

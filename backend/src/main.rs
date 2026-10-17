@@ -10,11 +10,7 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::VecDeque,
-    net::SocketAddr,
-    path::PathBuf,
-    process::Stdio,
-    sync::Arc,
+    collections::VecDeque, net::SocketAddr, path::PathBuf, process::Stdio, sync::Arc,
     time::Duration,
 };
 use sysinfo::{Pid, ProcessesToUpdate, System};
@@ -202,7 +198,9 @@ impl Inner {
             tokio::fs::create_dir_all(parent).await?;
         }
         let data = serde_json::to_vec_pretty(&self.cfg).map_err(std::io::Error::other)?;
-        tokio::fs::write(&self.cfg_path, data).await
+        let temp = self.cfg_path.with_extension("json.tmp");
+        tokio::fs::write(&temp, data).await?;
+        tokio::fs::rename(temp, &self.cfg_path).await
     }
 }
 
@@ -234,7 +232,9 @@ fn view(i: &mut Inner) -> View {
         i.sys.refresh_processes(ProcessesToUpdate::Some(&[p]), true);
         if let Some(proc_) = i.sys.process(p) {
             memory_mb = proc_.memory() / 1024 / 1024;
-            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f32;
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1) as f32;
             cpu_percent = (proc_.cpu_usage() / cores).min(100.0);
         }
     }
@@ -403,23 +403,31 @@ struct ConfigRequest {
     memory_limit_gb: u64,
 }
 
-async fn save_config(State(app): State<AppState>, Json(req): Json<ConfigRequest>) -> ApiResult {
+fn validate_config(req: &ConfigRequest) -> Result<(), String> {
     if req.server_name.trim().is_empty()
         || req.version.trim().is_empty()
         || req.server_dir.trim().is_empty()
     {
-        return Err(err(StatusCode::BAD_REQUEST, "Nome, versão e pasta são obrigatórios"));
+        return Err("Nome, versão e pasta são obrigatórios".into());
     }
     if !(1..=64).contains(&req.memory_limit_gb) {
-        return Err(err(StatusCode::BAD_REQUEST, "Memória deve ficar entre 1 e 64 GB"));
+        return Err("Memória deve ficar entre 1 e 64 GB".into());
     }
+    Ok(())
+}
+
+async fn save_config(State(app): State<AppState>, Json(req): Json<ConfigRequest>) -> ApiResult {
+    validate_config(&req).map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
     let mut i = app.0.lock().await;
     i.cfg.server_name = req.server_name.trim().into();
     i.cfg.version = req.version.trim().into();
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
     if let Err(e) = i.persist().await {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao gravar a configuração: {e}")));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao gravar a configuração: {e}"),
+        ));
     }
     let msg = if i.status == Status::Offline {
         "Configuração salva."
@@ -441,14 +449,19 @@ struct E4allRequest {
     public_address: String,
 }
 
-async fn save_e4all(State(app): State<AppState>, Json(req): Json<E4allRequest>) -> ApiResult {
+fn validate_e4all(req: &E4allRequest) -> Result<(), String> {
     const LOADERS: [&str; 4] = ["fabric", "forge", "neoforge", "quilt"];
     if !LOADERS.contains(&req.loader.as_str())
         || req.minecraft_version.trim().is_empty()
         || req.install_path.trim().is_empty()
     {
-        return Err(err(StatusCode::BAD_REQUEST, "Loader, versão e pasta do e4all são obrigatórios"));
+        return Err("Loader, versão e pasta do e4all são obrigatórios".into());
     }
+    Ok(())
+}
+
+async fn save_e4all(State(app): State<AppState>, Json(req): Json<E4allRequest>) -> ApiResult {
+    validate_e4all(&req).map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
     let mut i = app.0.lock().await;
     i.cfg.e4all = E4allConfig {
         loader: req.loader,
@@ -460,9 +473,15 @@ async fn save_e4all(State(app): State<AppState>, Json(req): Json<E4allRequest>) 
         public_address: req.public_address.trim().into(),
     };
     if let Err(e) = i.persist().await {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao gravar a configuração: {e}")));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao gravar a configuração: {e}"),
+        ));
     }
-    i.push("Configuração do e4all salva. Instale o JAR correspondente na pasta mods.", "success");
+    i.push(
+        "Configuração do e4all salva. Instale o JAR correspondente na pasta mods.",
+        "success",
+    );
     Ok(Json(view(&mut i)))
 }
 
@@ -481,10 +500,16 @@ async fn command(
     }
     let mut i = app.0.lock().await;
     if i.status != Status::Online {
-        return Err(err(StatusCode::CONFLICT, "O servidor precisa estar online para receber comandos"));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "O servidor precisa estar online para receber comandos",
+        ));
     }
     if !send_line(&mut i, cmd).await {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "Falha ao enviar o comando ao servidor"));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Falha ao enviar o comando ao servidor",
+        ));
     }
     i.push(format!("> {cmd}"), "command");
     Ok(Json(json!({ "ok": true })))
@@ -500,7 +525,10 @@ async fn host_guard(req: Request, next: Next) -> Response {
         .and_then(|h| h.to_str().ok())
         .map(|h| {
             let host = if h.starts_with('[') {
-                h.split(']').next().map(|s| format!("{s}]")).unwrap_or_default()
+                h.split(']')
+                    .next()
+                    .map(|s| format!("{s}]"))
+                    .unwrap_or_default()
             } else {
                 h.split(':').next().unwrap_or("").to_string()
             };
@@ -563,7 +591,11 @@ async fn main() -> anyhow::Result<()> {
     let cfg_path = config_path();
     let cfg = load_config(&cfg_path).await;
     let java_detected = detect_java(&cfg.java_path).await;
-    let app_state = AppState(Arc::new(Mutex::new(Inner::new(cfg, cfg_path, java_detected))));
+    let app_state = AppState(Arc::new(Mutex::new(Inner::new(
+        cfg,
+        cfg_path,
+        java_detected,
+    ))));
 
     let configured_addr = std::env::var("SHADOWPAINEL_ADDR").ok();
     let requested: SocketAddr = configured_addr
@@ -584,7 +616,9 @@ async fn main() -> anyhow::Result<()> {
                 Err(error) => last_error = Some(error),
             }
         }
-        selected.ok_or_else(|| last_error.unwrap_or_else(|| std::io::Error::other("nenhuma porta disponível")))?
+        selected.ok_or_else(|| {
+            last_error.unwrap_or_else(|| std::io::Error::other("nenhuma porta disponível"))
+        })?
     };
     let addr = listener.local_addr()?;
 
@@ -614,4 +648,62 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     shutdown_server(&app_state).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_config() -> ConfigRequest {
+        ConfigRequest {
+            server_name: "Servidor".into(),
+            version: "1.21.1".into(),
+            server_dir: "~/Minecraft".into(),
+            memory_limit_gb: 4,
+        }
+    }
+
+    fn valid_e4all() -> E4allRequest {
+        E4allRequest {
+            loader: "fabric".into(),
+            minecraft_version: "1.21.1".into(),
+            android_variant: false,
+            offline_accounts: false,
+            voice_chat: true,
+            install_path: "~/Minecraft/mods".into(),
+            public_address: String::new(),
+        }
+    }
+
+    #[test]
+    fn config_validation_rejects_invalid_memory() {
+        let mut request = valid_config();
+        request.memory_limit_gb = 0;
+        assert!(validate_config(&request).is_err());
+    }
+
+    #[test]
+    fn config_validation_accepts_normal_values() {
+        assert!(validate_config(&valid_config()).is_ok());
+    }
+
+    #[test]
+    fn e4all_validation_rejects_unknown_loader() {
+        let mut request = valid_e4all();
+        request.loader = "unknown".into();
+        assert!(validate_e4all(&request).is_err());
+    }
+
+    #[test]
+    fn e4all_validation_accepts_supported_loader() {
+        assert!(validate_e4all(&valid_e4all()).is_ok());
+    }
+
+    #[test]
+    fn expand_keeps_absolute_paths() {
+        assert_eq!(
+            expand("/tmp/shadowpainel"),
+            PathBuf::from("/tmp/shadowpainel")
+        );
+    }
 }

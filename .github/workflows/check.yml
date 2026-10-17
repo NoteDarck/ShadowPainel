@@ -16,12 +16,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: backend
+          workspaces: |
+            backend
+            desktop
+      - run: cargo fmt --manifest-path backend/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path desktop/Cargo.toml -- --check
+      - run: cargo test --locked --manifest-path backend/Cargo.toml
       - run: cargo check --locked --manifest-path backend/Cargo.toml
-      - run: cargo clippy --locked --manifest-path backend/Cargo.toml
+      - run: cargo clippy --locked --manifest-path backend/Cargo.toml -- -D warnings
+
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev
+      - run: cargo check --locked --manifest-path desktop/Cargo.toml
 
   frontend:
     runs-on: ubuntu-latest
