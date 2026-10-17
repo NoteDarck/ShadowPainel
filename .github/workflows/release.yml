@@ -110,7 +110,7 @@ jobs:
           cp -r frontend/dist/. "$APPDIR/usr/share/shadowpainel/frontend/"
           cp packaging/aur/shadowpainel.desktop "$APPDIR/shadowpainel.desktop"
           cp packaging/shadowpainel.svg "$APPDIR/shadowpainel.svg"
-          sed -i 's/^Categories=.*/Categories=Utility;/; s/^Exec=.*/Exec=AppRun/' "$APPDIR/shadowpainel.desktop"
+          sed -i 's/^Categories=.*/Categories=Utility;/; s/^Exec=.*/Exec=AppRun/; s/^Icon=.*/Icon=shadowpainel/' "$APPDIR/shadowpainel.desktop"
           cat > "$APPDIR/AppRun" <<'EOF'
           #!/bin/sh
           HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
