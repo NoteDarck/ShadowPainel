@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=ShadowPainel
+Comment=Painel local para servidores Minecraft
+Exec=shadowpainel
+Icon=applications-games
+Terminal=true
+Type=Application
+Categories=Game;Utility;

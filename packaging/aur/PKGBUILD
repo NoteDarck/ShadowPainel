@@ -1,0 +1,33 @@
+# Maintainer: NoteDarck
+pkgname=shadowpainel-git
+pkgver=r1
+pkgrel=1
+pkgdesc='Painel local em Rust para configurar servidores Minecraft'
+arch=('x86_64' 'aarch64')
+url='https://github.com/NoteDarck/ShadowPainel'
+license=('MIT')
+makedepends=('git' 'rust' 'npm')
+source=('git+https://github.com/NoteDarck/ShadowPainel.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/ShadowPainel"
+  printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$srcdir/ShadowPainel/frontend"
+  npm ci
+  npm run build
+  cd ../backend
+  cargo build --release
+}
+
+package() {
+  cd "$srcdir/ShadowPainel"
+  install -Dm755 backend/target/release/shadowpainel "$pkgdir/usr/bin/shadowpainel"
+  install -Dm644 packaging/aur/shadowpainel.desktop "$pkgdir/usr/share/applications/shadowpainel.desktop"
+  install -dm755 "$pkgdir/usr/share/shadowpainel/frontend"
+  cp -r frontend/dist/. "$pkgdir/usr/share/shadowpainel/frontend/"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/shadowpainel/README.md"
+}

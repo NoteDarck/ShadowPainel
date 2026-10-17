@@ -1,28 +1,66 @@
 # ShadowPainel
 
-MVP de um painel visual para gerenciar servidores Minecraft sem exigir terminal, Java ou arquivos `.jar` do usuário. O projeto foi adicionado em uma pasta própria para não alterar o jogo Godot existente em `Newfoundland`.
+Painel local, em **Rust**, para configurar e administrar servidores Minecraft no computador pessoal. A interface é Svelte e o núcleo HTTP/ciclo de vida é Rust com Axum e Tokio.
 
-## Stack
+## O que já funciona
 
-- **Rust + Axum + Tokio**: núcleo HTTP local e ciclo de vida do servidor.
-- **Svelte + TypeScript + Vite**: dashboard responsivo.
-- **sysinfo**: métricas de CPU e memória.
-- Futuro: processo Java real, SQLite, Tauri e empacotamento Windows/Linux.
+- Dashboard local servido pelo binário Rust em `http://127.0.0.1:4173`.
+- Iniciar/parar o estado do servidor, uptime e métricas locais.
+- Console com envio de comandos e histórico de logs.
+- Tela de configurações para nome, versão, pasta e memória.
+- Diagnóstico do caminho do Java via `JAVA_HOME`.
+- Sem conta, sem nuvem e sem envio de dados.
 
-## Rodar em desenvolvimento
+> Esta versão é uma base de teste segura: o fluxo de servidor ainda simula o processo Java. O próximo passo é conectar o `tokio::process::Command` ao `server.jar` configurado e persistir os perfis em SQLite.
+
+## Rodar para testar
+
+Pré-requisitos: Rust 1.80+, Node.js 20+ e npm.
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run build
 cd ../backend
 cargo run
 ```
 
-Abra `http://localhost:4173`.
+Abra `http://localhost:4173`. Para verificar o núcleo: `curl http://localhost:4173/api/health`.
 
-O backend atual oferece uma simulação segura do ciclo de vida: iniciar/parar, logs, comandos, endereço e métricas. O próximo passo de produção é conectar `tokio::process::Command` ao Java detectado e persistir servidores em SQLite.
+## Build de produção
 
-## Distribuição
+```bash
+cd frontend && npm ci && npm run build
+cd ../backend && cargo build --release
+./target/release/shadowpainel
+```
 
-O backend é Rust multiplataforma. Para Linux, gerar um binário e empacotar como AppImage; para Windows, compilar com `x86_64-pc-windows-msvc` e distribuir como `.exe`. A camada de frontend permanece a mesma nos dois sistemas.
+## Arch Linux / AUR
+
+A receita de teste está em [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD). Depois que o repositório estiver publicado:
+
+```bash
+git clone https://aur.archlinux.org/shadowpainel-git.git
+cd shadowpainel-git
+makepkg -si
+```
+
+Para um teste direto antes de enviar ao AUR:
+
+```bash
+cd packaging/aur
+makepkg -f
+sudo pacman -U shadowpainel-git-*.pkg.tar.zst
+```
+
+## Publicar no GitHub
+
+```bash
+git add .
+git commit -m "feat: consolidar painel Rust e pacote Arch Linux"
+git push origin main
+```
+
+## Licença
+
+MIT.
