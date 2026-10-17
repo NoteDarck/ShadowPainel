@@ -82,3 +82,24 @@ cd ShadowPainel-v0.1.0-linux-x86_64/backend
 ```
 
 No Windows, execute `shadowpainel.exe` dentro da pasta `backend`. O navegador deve ser aberto em `http://localhost:4173`.
+
+## Integração e4all
+
+O ShadowPainel inclui uma tela dedicada para o [e4all no Modrinth](https://modrinth.com/mod/e4all). O e4all é um **mod**, não um plugin Bukkit/Spigot, e oferece builds para Fabric, Forge, NeoForge e Quilt. A integração permite selecionar:
+
+- Mod loader e versão do Minecraft;
+- pasta `mods` usada pelo perfil;
+- variante Android do JAR;
+- suporte a contas offline/cracked;
+- suporte ao Simple Voice Chat via P2P.
+
+O painel salva o perfil e orienta a instalação do JAR correspondente do Modrinth. A configuração efetiva do mundo continua sendo feita no menu **Abrir para LAN** do Minecraft, conforme o funcionamento do próprio mod.
+
+## Formatos de distribuição
+
+As releases multiplataforma também geram:
+
+- Linux: `.tar.gz`, `.AppImage` e `.deb`;
+- Windows: `.zip`, executável `.exe` e instalador `.msi`;
+- macOS Intel: `.tar.gz` e `.dmg`;
+- macOS Apple Silicon: `.tar.gz` e `.dmg`.
