@@ -9,9 +9,10 @@ Painel local, em **Rust**, para configurar e administrar servidores Minecraft no
 - Console com envio de comandos e histórico de logs.
 - Tela de configurações para nome, versão, pasta e memória.
 - Diagnóstico do caminho do Java via `JAVA_HOME`.
-- Sem conta, sem nuvem e sem envio de dados.
+- Inicia o `server.jar` real com Java, acompanha stdout/stderr e envia comandos pelo console.
+- Configurações persistidas em `~/.shadowpainel/config.json`, sem conta, sem nuvem e sem envio de dados.
 
-> Esta versão é uma base de teste segura: o fluxo de servidor ainda simula o processo Java. O próximo passo é conectar o `tokio::process::Command` ao `server.jar` configurado e persistir os perfis em SQLite.
+> O painel exige um `server.jar` na pasta configurada. O servidor é executado localmente com o Java detectado em `JAVA_HOME` ou no PATH.
 
 ## Rodar para testar
 
@@ -67,21 +68,9 @@ MIT.
 
 ## Releases multiplataforma
 
-Ao criar uma tag `v*`, o GitHub Actions compila e publica automaticamente pacotes para:
+Ao criar uma tag `v*`, o GitHub Actions compila e publica automaticamente Linux x86_64 (`.tar.gz`, `.AppImage` e `.deb`), Windows x86_64 (`.zip` e `.msi`), macOS Intel (`.tar.gz` e `.dmg`) e macOS Apple Silicon/ARM64 (`.tar.gz` e `.dmg`). A release também publica `SHA256SUMS.txt` para verificação de integridade.
 
-- Linux x86_64 (`.tar.gz`)
-- Windows x86_64 (`.zip`)
-- macOS Intel (`.tar.gz`)
-- macOS Apple Silicon/ARM64 (`.tar.gz`)
-
-Baixe a versão desejada em [Releases](https://github.com/NoteDarck/ShadowPainel/releases), extraia o arquivo e execute o binário dentro da pasta `backend`:
-
-```bash
-cd ShadowPainel-v0.1.0-linux-x86_64/backend
-./shadowpainel
-```
-
-No Windows, execute `shadowpainel.exe` dentro da pasta `backend`. O navegador deve ser aberto em `http://localhost:4173`.
+Baixe a versão desejada em [Releases](https://github.com/NoteDarck/ShadowPainel/releases). Nos formatos portáteis, execute o binário e abra `http://localhost:4173`; no Linux empacotado, o frontend é instalado em `/usr/share/shadowpainel/frontend`.
 
 ## Integração e4all
 

@@ -6,7 +6,10 @@ pkgdesc='Painel local em Rust para configurar servidores Minecraft'
 arch=('x86_64' 'aarch64')
 url='https://github.com/NoteDarck/ShadowPainel'
 license=('MIT')
+optdepends=('jre-openjdk-headless: necessário para iniciar servidores Minecraft')
 makedepends=('git' 'rust' 'npm')
+provides=('shadowpainel')
+conflicts=('shadowpainel')
 source=('git+https://github.com/NoteDarck/ShadowPainel.git')
 sha256sums=('SKIP')
 
@@ -15,19 +18,30 @@ pkgver() {
   printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
+prepare() {
+  cd "$srcdir/ShadowPainel/backend"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+  cd ../frontend
+  npm ci
+}
+
 build() {
   cd "$srcdir/ShadowPainel/frontend"
-  npm ci
   npm run build
   cd ../backend
-  cargo build --release
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
 }
 
 package() {
   cd "$srcdir/ShadowPainel"
   install -Dm755 backend/target/release/shadowpainel "$pkgdir/usr/bin/shadowpainel"
   install -Dm644 packaging/aur/shadowpainel.desktop "$pkgdir/usr/share/applications/shadowpainel.desktop"
+  install -Dm644 packaging/shadowpainel.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/shadowpainel.svg"
   install -dm755 "$pkgdir/usr/share/shadowpainel/frontend"
   cp -r frontend/dist/. "$pkgdir/usr/share/shadowpainel/frontend/"
   install -Dm644 README.md "$pkgdir/usr/share/doc/shadowpainel/README.md"
+  [ -f LICENSE ] && install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE" || true
 }

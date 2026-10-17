@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   RELEASE_NAME: ShadowPainel-${{ github.ref_name }}
 
@@ -40,13 +44,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Versão do pacote
+        shell: bash
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          V="${V%%[-+]*}"
+          case "$V" in [0-9]*.[0-9]*.[0-9]*) ;; *) V="0.0.0" ;; esac
+          echo "PKG_VERSION=$V" >> "$GITHUB_ENV"
+
       - name: Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Node.js 20
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -59,7 +76,7 @@ jobs:
 
       - name: Build backend
         working-directory: backend
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Assemble package
         shell: bash
@@ -71,7 +88,7 @@ jobs:
           cp -r frontend/dist/. "$ROOT/frontend/dist/"
           cp README.md "$ROOT/"
           cp -r packaging "$ROOT/"
-          printf '\nExecute o binário dentro da pasta backend para que o frontend seja encontrado.\n' > "$ROOT/EXECUTAR.txt"
+          printf 'Execute o binário dentro da pasta backend (ou defina SHADOWPAINEL_FRONTEND_DIR).\nDepois abra http://localhost:4173\n' > "$ROOT/EXECUTAR.txt"
           if [ "${{ matrix.archive }}" = "zip" ]; then
             7z a "${ROOT}.zip" "$ROOT" >/dev/null
           else
@@ -85,17 +102,15 @@ jobs:
         run: |
           set -e
           ROOT="${{ env.RELEASE_NAME }}-${{ matrix.name }}"
+
+          # ---------- AppImage ----------
           APPDIR="$ROOT.AppDir"
-          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/shadowpainel/frontend" "$APPDIR/usr/share/doc/shadowpainel" "$APPDIR/DEBIAN"
+          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/shadowpainel/frontend"
           cp "backend/target/release/${{ matrix.binary }}" "$APPDIR/usr/bin/shadowpainel"
           cp -r frontend/dist/. "$APPDIR/usr/share/shadowpainel/frontend/"
-          cp README.md "$APPDIR/usr/share/doc/shadowpainel/README.md"
           cp packaging/aur/shadowpainel.desktop "$APPDIR/shadowpainel.desktop"
-          cat > "$APPDIR/shadowpainel.svg" <<'EOF'
-          <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#10131c"/><path d="M128 36 201 78v84l-73 42-73-42V78z" fill="#8d5dff"/><path d="m128 70 43 25v50l-43 25-43-25V95z" fill="#171126"/><text x="128" y="133" fill="#fff" font-family="sans-serif" font-size="42" font-weight="700" text-anchor="middle">S</text></svg>
-          EOF
-          sed -i 's/^Icon=.*/Icon=shadowpainel/; s/^Categories=.*/Categories=Utility;/' "$APPDIR/shadowpainel.desktop"
-          sed -i 's/^Exec=.*/Exec=AppRun/' "$APPDIR/shadowpainel.desktop"
+          cp packaging/shadowpainel.svg "$APPDIR/shadowpainel.svg"
+          sed -i 's/^Categories=.*/Categories=Utility;/; s/^Exec=.*/Exec=AppRun/' "$APPDIR/shadowpainel.desktop"
           cat > "$APPDIR/AppRun" <<'EOF'
           #!/bin/sh
           HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -105,18 +120,33 @@ jobs:
           chmod +x "$APPDIR/AppRun" "$APPDIR/usr/bin/shadowpainel"
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
           chmod +x appimagetool
-          ./appimagetool --appimage-extract-and-run "$APPDIR" "${ROOT}.AppImage"
-          cat > "$APPDIR/DEBIAN/control" <<EOF
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$APPDIR" "${ROOT}.AppImage"
+
+          # ---------- .deb (árvore separada) ----------
+          DEBDIR="$ROOT.deb-root"
+          mkdir -p "$DEBDIR/DEBIAN" "$DEBDIR/usr/bin" \
+            "$DEBDIR/usr/share/shadowpainel/frontend" \
+            "$DEBDIR/usr/share/applications" \
+            "$DEBDIR/usr/share/icons/hicolor/scalable/apps" \
+            "$DEBDIR/usr/share/doc/shadowpainel"
+          cp "backend/target/release/${{ matrix.binary }}" "$DEBDIR/usr/bin/shadowpainel"
+          cp -r frontend/dist/. "$DEBDIR/usr/share/shadowpainel/frontend/"
+          cp packaging/aur/shadowpainel.desktop "$DEBDIR/usr/share/applications/shadowpainel.desktop"
+          cp packaging/shadowpainel.svg "$DEBDIR/usr/share/icons/hicolor/scalable/apps/shadowpainel.svg"
+          cp README.md "$DEBDIR/usr/share/doc/shadowpainel/README.md"
+          chmod 755 "$DEBDIR/usr/bin/shadowpainel"
+          cat > "$DEBDIR/DEBIAN/control" <<EOF
           Package: shadowpainel
-          Version: ${GITHUB_REF_NAME#v}
+          Version: ${PKG_VERSION}
           Section: games
           Priority: optional
           Architecture: amd64
           Maintainer: NoteDarck
+          Recommends: default-jre-headless
           Description: Painel local Rust para servidores Minecraft
           EOF
-          dpkg-deb --build "$APPDIR" "${ROOT}.deb"
-          rm -rf "$APPDIR" appimagetool
+          dpkg-deb --root-owner-group --build "$DEBDIR" "${ROOT}.deb"
+          rm -rf "$APPDIR" "$DEBDIR" appimagetool
 
       - name: Build DMG (macOS)
         if: startsWith(matrix.name, 'macos-')
@@ -142,17 +172,17 @@ jobs:
           cat > installer.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-            <Product Id="*" Name="ShadowPainel" Language="1046" Codepage="65001" Version="0.2.2.0" Manufacturer="NoteDarck" UpgradeCode="2DFA8B31-0C89-4B55-9C3D-5B25F32D5F4A">
-              <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+            <Product Id="*" Name="ShadowPainel" Language="1046" Codepage="65001" Version="$(var.ProductVersion)" Manufacturer="NoteDarck" UpgradeCode="2DFA8B31-0C89-4B55-9C3D-5B25F32D5F4A">
+              <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
               <MajorUpgrade DowngradeErrorMessage="Uma versão mais recente do ShadowPainel já está instalada." />
               <MediaTemplate EmbedCab="yes" />
               <Feature Id="ProductFeature" Title="ShadowPainel" Level="1"><ComponentGroupRef Id="AppFiles" /></Feature>
-              <Directory Id="TARGETDIR" Name="SourceDir"><Directory Id="ProgramFilesFolder"><Directory Id="INSTALLFOLDER" Name="ShadowPainel" /></Directory></Directory>
+              <Directory Id="TARGETDIR" Name="SourceDir"><Directory Id="ProgramFiles64Folder"><Directory Id="INSTALLFOLDER" Name="ShadowPainel" /></Directory></Directory>
             </Product>
           </Wix>
           EOF
           heat dir "$ROOT" -cg AppFiles -dr INSTALLFOLDER -gg -srd -sreg -sfrag -var var.SourceDir -out files.wxs
-          candle installer.wxs files.wxs -dSourceDir="$ROOT"
+          candle -arch x64 -dProductVersion="${PKG_VERSION}.0" installer.wxs files.wxs -dSourceDir="$ROOT"
           light installer.wixobj files.wixobj -out "${ROOT}.msi"
           rm -f installer.wxs files.wxs installer.wixobj files.wixobj
           rm -rf "$ROOT"
@@ -167,6 +197,7 @@ jobs:
   publish:
     name: Publicar GitHub Release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     steps:
       - name: Download packages
@@ -175,6 +206,10 @@ jobs:
           path: artifacts
           pattern: package-*
           merge-multiple: true
+
+      - name: Checksums
+        working-directory: artifacts
+        run: sha256sum ShadowPainel-* > SHA256SUMS.txt
 
       - name: Publish release
         env:
