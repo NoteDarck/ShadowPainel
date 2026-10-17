@@ -76,6 +76,8 @@
   let catalogLoading = false;
   let catalogError = '';
   let catalogQuery = '';
+  let catalogCategory = 'all'; // NOVO: Estado da categoria
+  let showCatalogFilters = false; // NOVO: Controle do painel de filtros
 
   // ── Helpers de API ──
   const api = async <T=unknown>(path:string, options?:RequestInit):Promise<T> => {
@@ -240,7 +242,11 @@
     try {
       const version = contentVersion || server.version;
       const data = await api<{hits:ContentResult[]}>('/content/search', json({
-        query: catalogQuery, kind: contentKind, loader: contentLoader, version,
+        query: catalogQuery, 
+        kind: contentKind, 
+        loader: contentLoader, 
+        version,
+        category: catalogCategory // Envia a categoria
       }));
       results = data.hits || [];
     } catch (e) {
@@ -560,7 +566,7 @@
       </section>
 
       {#if catalogOpen}
-        <div class="modal-overlay" role="presentation" on:click|self={()=>{catalogOpen=false;catalogDetail=null;}} on:keydown={(e)=>e.key==='Escape'&&(catalogOpen=false,catalogDetail=null)}>
+        <div class="modal-overlay" on:click|self={()=>{catalogOpen=false;catalogDetail=null;}}>
           <div class="modal catalog-modal">
             <div class="modal-head">
               <div>
@@ -570,14 +576,42 @@
               <button class="modal-close" on:click={()=>{catalogOpen=false;catalogDetail=null;}}>✕</button>
             </div>
 
-            <div class="catalog-search">
-              <input bind:value={catalogQuery}
-                     placeholder="Pesquisar no Modrinth (ex.: sodium, worldedit)..."
-                     on:keydown={(e)=>e.key==='Enter'&&runCatalogSearch()}/>
-              <button class="primary" on:click={runCatalogSearch}
-                      disabled={catalogLoading || !contentVersion}>
-                {catalogLoading?'Buscando...':'Buscar'}
-              </button>
+            <!-- NOVO: Container da busca com botão de filtros -->
+            <div class="catalog-search-container">
+              <div class="catalog-search">
+                <input bind:value={catalogQuery}
+                       placeholder="Pesquisar no Modrinth (ex.: sodium, worldedit)..."
+                       on:keydown={(e)=>e.key==='Enter'&&runCatalogSearch()}/>
+                <button class="secondary" on:click={() => showCatalogFilters = !showCatalogFilters} title="Filtros Avançados">
+                  ⚙ Filtros
+                </button>
+                <button class="primary" on:click={runCatalogSearch}
+                        disabled={catalogLoading || !contentVersion}>
+                  {catalogLoading?'Buscando...':'Buscar'}
+                </button>
+              </div>
+
+              <!-- NOVO: Painel de Filtros Avançados (Categorias) -->
+              {#if showCatalogFilters}
+                <div class="catalog-advanced-filters">
+                  <label>
+                    Categoria
+                    <select bind:value={catalogCategory} on:change={runCatalogSearch}>
+                      <option value="all">Todas as categorias</option>
+                      <option value="adventure">Aventura</option>
+                      <option value="exploration">Exploração</option>
+                      <option value="worldgen">Geração de Mundo (Estruturas)</option>
+                      <option value="magic">Magia</option>
+                      <option value="technology">Tecnologia</option>
+                      <option value="decoration">Decoração</option>
+                      <option value="equipment">Equipamentos</option>
+                      <option value="optimization">Otimização</option>
+                      <option value="utility">Utilidades</option>
+                      <option value="library">Biblioteca (APIs)</option>
+                    </select>
+                  </label>
+                </div>
+              {/if}
             </div>
 
             {#if catalogError}<div class="notice">{catalogError}</div>{/if}
@@ -587,7 +621,7 @@
             {:else if results.length===0}
               <div class="empty">
                 Nenhum resultado para <b>{contentVersion}</b> em <b>{contentLoader}</b>.
-                <br/>Tente outra versão, outro loader ou um termo diferente.
+                <br/>Tente outra versão, outro loader, outra categoria ou um termo diferente.
               </div>
             {:else}
               <div class="catalog-grid">
@@ -777,7 +811,7 @@
     {/if}
 
     {#if deleteOpen}
-      <div class="modal-overlay" role="presentation" on:click|self={closeDelete} on:keydown={(e)=>e.key==='Escape'&&closeDelete()}>
+      <div class="modal-overlay" on:click|self={closeDelete}>
         <div class="modal danger-modal">
           <div class="modal-head">
             <div>

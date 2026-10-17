@@ -21,7 +21,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-const APP_VERSION: &str = "0.7.1";
+const APP_VERSION: &str = "0.7.0";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -223,7 +223,6 @@ impl Inner {
 #[derive(Clone)]
 struct AppState(Arc<Mutex<Inner>>);
 
-// ── substituir a struct View ──
 #[derive(Serialize)]
 struct View {
     status: Status,
@@ -238,12 +237,11 @@ struct View {
     server_dir: String,
     java_path: String,
     java_detected: bool,
-    installed: bool, // NOVO
+    installed: bool,
     e4all: E4allConfig,
     logs: Vec<LogLine>,
 }
 
-// ── substituir a função view ──
 fn view(i: &mut Inner) -> View {
     let (mut memory_mb, mut cpu_percent) = (0u64, 0.0f32);
     if let Some(pid) = i.pid {
@@ -258,8 +256,8 @@ fn view(i: &mut Inner) -> View {
         }
     }
     let dir = expand(&i.cfg.server_dir);
-    let installed =
-        dir.join("server.jar").is_file() || dir.join("fabric-server-launch.jar").is_file();
+    let installed = dir.join("server.jar").is_file()
+        || dir.join("fabric-server-launch.jar").is_file();
     let uptime_seconds = i
         .started
         .map(|s| (Utc::now() - s).num_seconds().max(0) as u64)
@@ -278,7 +276,7 @@ fn view(i: &mut Inner) -> View {
         server_dir: i.cfg.server_dir.clone(),
         java_path: i.cfg.java_path.clone(),
         java_detected: i.java_detected,
-        installed, // NOVO
+        installed,
         e4all: i.cfg.e4all.clone(),
         logs: i.logs.iter().cloned().collect(),
     }
@@ -1427,12 +1425,15 @@ async fn delete_content(
     Ok(Json(json!({"ok": true})))
 }
 
+// ───────────────────────── ALTERAÇÃO AQUI: Adicionado campo category ─────────────────────────
+
 #[derive(Deserialize)]
 struct ContentSearchRequest {
     query: String,
     kind: String,
     loader: String,
     version: String,
+    category: Option<String>, // NOVO CAMPO
 }
 
 async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Value>, ApiErr> {
@@ -1446,15 +1447,24 @@ async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Va
     } else {
         String::new()
     };
+    
+    // NOVO: Adiciona a categoria aos filtros se ela foi selecionada
+    let category_facet = match req.category {
+        Some(cat) if !cat.is_empty() && cat != "all" => format!(r#",["categories:{}"]"#, cat),
+        _ => String::new(),
+    };
+
     let facets = format!(
-        r#"[["project_type:{}"],["versions:{}"]{}]"#,
-        project_type, req.version, loader_facet
+        r#"[["project_type:{}"],["versions:{}"]{}{}]"#,
+        project_type, req.version, loader_facet, category_facet
     );
+    
     let url = format!(
         "https://api.modrinth.com/v2/search?query={}&facets={}&limit=12",
         urlencoding::encode(&req.query),
         urlencoding::encode(&facets)
     );
+    
     let data: Value = reqwest::Client::new()
         .get(url)
         .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
@@ -1663,7 +1673,6 @@ async fn main() -> anyhow::Result<()> {
     };
     let addr = listener.local_addr()?;
 
-    // CORREÇÃO: .route(...) ANTES do .with_state(...), sem `;` no meio.
     let api = Router::new()
         .route("/api/health", get(health))
         .route("/api/state", get(state))
