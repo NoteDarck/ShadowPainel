@@ -46,6 +46,7 @@ struct E4allConfig {
     offline_accounts: bool,
     voice_chat: bool,
     install_path: String,
+    public_address: String,
 }
 
 impl Default for E4allConfig {
@@ -57,6 +58,7 @@ impl Default for E4allConfig {
             offline_accounts: false,
             voice_chat: true,
             install_path: "~/Minecraft/MeuServidor/mods".into(),
+            public_address: "".into(),
         }
     }
 }
@@ -436,6 +438,7 @@ struct E4allRequest {
     offline_accounts: bool,
     voice_chat: bool,
     install_path: String,
+    public_address: String,
 }
 
 async fn save_e4all(State(app): State<AppState>, Json(req): Json<E4allRequest>) -> ApiResult {
@@ -454,6 +457,7 @@ async fn save_e4all(State(app): State<AppState>, Json(req): Json<E4allRequest>) 
         offline_accounts: req.offline_accounts,
         voice_chat: req.voice_chat,
         install_path: req.install_path.trim().into(),
+        public_address: req.public_address.trim().into(),
     };
     if let Err(e) = i.persist().await {
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao gravar a configuração: {e}")));
@@ -561,9 +565,28 @@ async fn main() -> anyhow::Result<()> {
     let java_detected = detect_java(&cfg.java_path).await;
     let app_state = AppState(Arc::new(Mutex::new(Inner::new(cfg, cfg_path, java_detected))));
 
-    let addr: SocketAddr = std::env::var("SHADOWPAINEL_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:4173".into())
+    let configured_addr = std::env::var("SHADOWPAINEL_ADDR").ok();
+    let requested: SocketAddr = configured_addr
+        .as_deref()
+        .unwrap_or("127.0.0.1:4173")
         .parse()?;
+    let listener = if configured_addr.is_some() {
+        tokio::net::TcpListener::bind(requested).await?
+    } else {
+        let mut last_error = None;
+        let mut selected = None;
+        for port in requested.port()..=requested.port().saturating_add(20) {
+            match tokio::net::TcpListener::bind(SocketAddr::new(requested.ip(), port)).await {
+                Ok(listener) => {
+                    selected = Some(listener);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        selected.ok_or_else(|| last_error.unwrap_or_else(|| std::io::Error::other("nenhuma porta disponível")))?
+    };
+    let addr = listener.local_addr()?;
 
     let api = Router::new()
         .route("/api/health", get(health))
@@ -583,7 +606,6 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("AVISO: o painel não tem autenticação e está exposto em {addr}.");
     }
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("ShadowPainel disponível em http://{addr}");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {

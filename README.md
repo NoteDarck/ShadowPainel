@@ -10,6 +10,7 @@ Painel local, em **Rust**, para configurar e administrar servidores Minecraft no
 - Tela de configurações para nome, versão, pasta e memória.
 - Diagnóstico do caminho do Java via `JAVA_HOME`.
 - Inicia o `server.jar` real com Java, acompanha stdout/stderr e envia comandos pelo console.
+- Se a porta 4173 já estiver ocupada, escolhe automaticamente a próxima porta livre até 4193. Também é possível fixar uma porta com `SHADOWPAINEL_ADDR=127.0.0.1:4174`.
 - Configurações persistidas em `~/.shadowpainel/config.json`, sem conta, sem nuvem e sem envio de dados.
 
 > O painel exige um `server.jar` na pasta configurada. O servidor é executado localmente com o Java detectado em `JAVA_HOME` ou no PATH.
@@ -83,6 +84,8 @@ O ShadowPainel inclui uma tela dedicada para o [e4all no Modrinth](https://modri
 - suporte ao Simple Voice Chat via P2P.
 
 O painel salva o perfil e orienta a instalação do JAR correspondente do Modrinth. A configuração efetiva do mundo continua sendo feita no menu **Abrir para LAN** do Minecraft, conforme o funcionamento do próprio mod.
+
+O e4all cria o túnel dentro do Minecraft e gera o domínio público no chat. Por isso, o ShadowPainel não tenta falsamente criar esse túnel a partir de um `server.jar` dedicado: ele permite registrar e copiar o domínio gerado pelo mod. Para usar a conexão, instale o e4all no computador host, abra o mundo no Minecraft, escolha **Abrir para LAN**, copie o domínio mostrado no chat e cole-o no campo **Domínio público e4all**.
 
 ## Formatos de distribuição
 
