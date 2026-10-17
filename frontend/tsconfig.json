@@ -1,0 +1,4 @@
+{
+  "compilerOptions": { "target": "ES2020", "useDefineForClassFields": true, "module": "ESNext", "moduleResolution": "Bundler", "strict": true, "skipLibCheck": true, "allowJs": false, "esModuleInterop": true, "types": ["svelte"] },
+  "include": ["src/**/*.ts", "src/**/*.svelte"]
+}
