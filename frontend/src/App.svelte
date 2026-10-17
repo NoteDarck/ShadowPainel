@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
-  const APP_VERSION = '0.7.0';
+  const APP_VERSION = '0.7.1';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -401,18 +401,21 @@
             <p>Minecraft Java Edition · {server.version || 'sem versão instalada'}</p>
           </div>
           <div class="orb"><div class="orb-inner">☾</div><i></i><i></i></div>
-          <div class="hero-actions">
-            <button class="primary" on:click={toggleServer} disabled={loading}>
-              {loading?'CARREGANDO...':server.status==='online'?'PARAR SERVIDOR':'INICIAR SERVIDOR'} <span>→</span>
-            </button>
-            <button class="secondary" on:click={acceptEula}>ACEITAR EULA</button>
-            <button class="secondary" on:click={()=>activeTab='setup'}>＋ Nova instalação</button>
-            <button class="secondary danger-outline" on:click={openDelete}>EXCLUIR SERVIDOR</button>
-          </div>
-          <div class="hero-meta">
-            <div><span>ENDEREÇO</span><b>{server.address}</b></div>
-            <div class="divider"></div>
-            <div><span>UPTIME</span><b>{uptime(server.uptime_seconds)}</b></div>
+          
+          <div class="hero-bottom">
+            <div class="hero-actions">
+              <button class="primary" on:click={toggleServer} disabled={loading}>
+                {loading?'CARREGANDO...':server.status==='online'?'PARAR SERVIDOR':'INICIAR SERVIDOR'} <span>→</span>
+              </button>
+              <button class="secondary" on:click={acceptEula}>ACEITAR EULA</button>
+              <button class="secondary" on:click={()=>activeTab='setup'}>＋ Nova instalação</button>
+              <button class="secondary danger-outline" on:click={openDelete}>EXCLUIR SERVIDOR</button>
+            </div>
+            <div class="hero-meta">
+              <div><span>ENDEREÇO</span><b>{server.address}</b></div>
+              <div class="divider"></div>
+              <div><span>UPTIME</span><b>{uptime(server.uptime_seconds)}</b></div>
+            </div>
           </div>
         </div>
 
@@ -441,7 +444,10 @@
             </div>
             <div class="console">
               {#each server.logs as log}
-                <div class="log"><span class="time">{log.time}</span><span>{log.text}</span></div>
+                <div class="log">
+                  <span class="time">{log.time}</span>
+                  <span class={log.kind}>{log.text}</span>
+                </div>
               {/each}
             </div>
             <div class="command-line">
