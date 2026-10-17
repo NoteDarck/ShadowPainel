@@ -21,6 +21,8 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
+const APP_VERSION: &str = "0.6.5";
+
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -102,6 +104,20 @@ fn expand(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+fn server_port(dir: &std::path::Path) -> u16 {
+    std::fs::read_to_string(dir.join("server.properties"))
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "server-port")
+                    .then(|| value.trim().parse().ok())
+                    .flatten()
+            })
+        })
+        .unwrap_or(25565)
 }
 
 fn config_path() -> PathBuf {
@@ -242,9 +258,10 @@ fn view(i: &mut Inner) -> View {
         .started
         .map(|s| (Utc::now() - s).num_seconds().max(0) as u64)
         .unwrap_or(0);
+    let address = format!("localhost:{}", server_port(&expand(&i.cfg.server_dir)));
     View {
         status: i.status,
-        address: "localhost:25565".into(),
+        address,
         players: i.players,
         memory_mb,
         memory_limit_gb: i.cfg.memory_limit_gb,
@@ -332,35 +349,145 @@ struct DownloadRequest {
     version: String,
 }
 
-async fn download_server(State(app): State<AppState>, Json(req): Json<DownloadRequest>) -> ApiResult {
+async fn download_server(
+    State(app): State<AppState>,
+    Json(req): Json<DownloadRequest>,
+) -> ApiResult {
     let mut i = app.0.lock().await;
     let dir = expand(&i.cfg.server_dir);
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao criar pasta: {e}")))?;
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao criar pasta: {e}"),
+        )
+    })?;
     let jar_path = dir.join("server.jar");
-    
+
     if jar_path.exists() {
-        return Err(err(StatusCode::CONFLICT, "O server.jar já existe nesta pasta"));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "O server.jar já existe nesta pasta",
+        ));
     }
 
     let manifest_url = "https://launchermeta.mojang.com/mc/game/version_manifest.json";
     let client = reqwest::Client::new();
-    let manifest: Value = client.get(manifest_url).header("User-Agent", "ShadowPainel/0.6.4").send().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha na rede: {e}")))?.json().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON inválido: {e}")))?;
+    let manifest: Value = client
+        .get(manifest_url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha na rede: {e}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Serviço externo retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("JSON inválido: {e}"),
+            )
+        })?;
 
-    let version_url = manifest["versions"].as_array().and_then(|versions| {
-        versions.iter().find_map(|v| if v["id"] == req.version { v["url"].as_str().map(String::from) } else { None })
-    }).ok_or_else(|| err(StatusCode::NOT_FOUND, format!("Versão {} não encontrada", req.version)))?;
+    let version_url = manifest["versions"]
+        .as_array()
+        .and_then(|versions| {
+            versions.iter().find_map(|v| {
+                if v["id"] == req.version {
+                    v["url"].as_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("Versão {} não encontrada", req.version),
+            )
+        })?;
 
-    let version_data: Value = client.get(&version_url).header("User-Agent", "ShadowPainel/0.6.4").send().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha na rede: {e}")))?.json().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON inválido: {e}")))?;
+    let version_data: Value = client
+        .get(&version_url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha na rede: {e}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Serviço externo retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("JSON inválido: {e}"),
+            )
+        })?;
 
-    let server_url = version_data["downloads"]["server"]["url"].as_str().ok_or_else(|| err(StatusCode::NOT_FOUND, "server.jar não disponível para esta versão"))?;
+    let server_url = version_data["downloads"]["server"]["url"]
+        .as_str()
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "server.jar não disponível para esta versão",
+            )
+        })?;
 
-    let bytes = client.get(server_url).header("User-Agent", "ShadowPainel/0.6.4").send().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha no download: {e}")))?.bytes().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha na leitura: {e}")))?;
+    let bytes = client
+        .get(server_url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha no download: {e}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha na leitura: {e}"),
+            )
+        })?;
 
-    tokio::fs::write(&jar_path, &bytes).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao salvar: {e}")))?;
+    tokio::fs::write(&jar_path, &bytes).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar: {e}"),
+        )
+    })?;
 
     i.cfg.version = req.version.clone();
     let _ = i.persist().await;
-    i.push(format!("server.jar da versão {} baixado.", req.version), "success");
+    i.push(
+        format!("server.jar da versão {} baixado.", req.version),
+        "success",
+    );
     Ok(Json(view(&mut i)))
 }
 
@@ -368,10 +495,23 @@ async fn accept_eula(State(app): State<AppState>) -> Result<Json<Value>, ApiErr>
     let i = app.0.lock().await;
     let dir = expand(&i.cfg.server_dir);
     let eula_path = dir.join("eula.txt");
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao criar pasta: {e}")))?;
-    
-    let content = format!("# EULA aceita via ShadowPainel em {}\neula=true\n", Local::now());
-    tokio::fs::write(&eula_path, content).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao escrever eula.txt: {e}")))?;
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao criar pasta: {e}"),
+        )
+    })?;
+
+    let content = format!(
+        "# EULA aceita via ShadowPainel em {}\neula=true\n",
+        Local::now()
+    );
+    tokio::fs::write(&eula_path, content).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao escrever eula.txt: {e}"),
+        )
+    })?;
 
     Ok(Json(json!({ "ok": true, "message": "EULA aceita." })))
 }
@@ -383,24 +523,57 @@ async fn start(State(app): State<AppState>) -> ApiResult {
     }
     let dir = expand(&i.cfg.server_dir);
     if !dir.join("server.jar").is_file() && !dir.join("fabric-server-launch.jar").is_file() {
-        return Err(err(StatusCode::BAD_REQUEST, "server.jar não encontrado. Use a tela de download."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "server.jar não encontrado. Use a tela de download.",
+        ));
     }
     let eula_path = dir.join("eula.txt");
-    if !eula_path.is_file() {
-        return Err(err(StatusCode::BAD_REQUEST, "Aceite a EULA antes de iniciar."));
+    let eula_accepted = tokio::fs::read_to_string(&eula_path)
+        .await
+        .ok()
+        .is_some_and(|contents| {
+            contents
+                .lines()
+                .any(|line| line.trim().eq_ignore_ascii_case("eula=true"))
+        });
+    if !eula_accepted {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Aceite a EULA antes de iniciar.",
+        ));
     }
 
     let mut cmd = Command::new(&i.cfg.java_path);
-    let jar_name = if dir.join("fabric-server-launch.jar").is_file() { "fabric-server-launch.jar" } else { "server.jar" };
-    
-    cmd.current_dir(&dir).arg(format!("-Xmx{}G", i.cfg.memory_limit_gb)).args(["-jar", jar_name, "nogui"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    
-    let mut child = cmd.spawn().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao iniciar o Java: {e}")))?;
+    let jar_name = if dir.join("fabric-server-launch.jar").is_file() {
+        "fabric-server-launch.jar"
+    } else {
+        "server.jar"
+    };
+
+    cmd.current_dir(&dir)
+        .arg(format!("-Xmx{}G", i.cfg.memory_limit_gb))
+        .args(["-jar", jar_name, "nogui"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd.spawn().map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao iniciar o Java: {e}"),
+        )
+    })?;
 
     i.pid = child.id();
     i.stdin = child.stdin.take();
-    if let Some(o) = child.stdout.take() { tokio::spawn(pump(app.clone(), o)); }
-    if let Some(e) = child.stderr.take() { tokio::spawn(pump(app.clone(), e)); }
+    if let Some(o) = child.stdout.take() {
+        tokio::spawn(pump(app.clone(), o));
+    }
+    if let Some(e) = child.stderr.take() {
+        tokio::spawn(pump(app.clone(), e));
+    }
     let (tx, rx) = oneshot::channel();
     i.kill_tx = Some(tx);
     i.status = Status::Online;
@@ -413,7 +586,9 @@ async fn start(State(app): State<AppState>) -> ApiResult {
 
 async fn stop(State(app): State<AppState>) -> ApiResult {
     let mut i = app.0.lock().await;
-    if i.status != Status::Online { return Err(err(StatusCode::CONFLICT, "O servidor não está online")); }
+    if i.status != Status::Online {
+        return Err(err(StatusCode::CONFLICT, "O servidor não está online"));
+    }
     i.status = Status::Stopping;
     send_line(&mut i, "stop").await;
     i.push("Parando o servidor (comando stop)…", "warning");
@@ -439,13 +614,32 @@ struct ConfigRequest {
     memory_limit_gb: u64,
 }
 
+fn validate_config(req: &ConfigRequest) -> Result<(), String> {
+    if req.server_name.trim().is_empty()
+        || req.version.trim().is_empty()
+        || req.server_dir.trim().is_empty()
+    {
+        return Err("Nome, versão e pasta são obrigatórios".into());
+    }
+    if !(1..=64).contains(&req.memory_limit_gb) {
+        return Err("Memória deve ficar entre 1 e 64 GB".into());
+    }
+    Ok(())
+}
+
 async fn save_config(State(app): State<AppState>, Json(req): Json<ConfigRequest>) -> ApiResult {
+    validate_config(&req).map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
     let mut i = app.0.lock().await;
     i.cfg.server_name = req.server_name.trim().into();
     i.cfg.version = req.version.trim().into();
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
-    if let Err(e) = i.persist().await { return Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao gravar: {e}"))); }
+    if let Err(e) = i.persist().await {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao gravar: {e}"),
+        ));
+    }
     i.push("Configuração salva.", "success");
     Ok(Json(view(&mut i)))
 }
@@ -461,12 +655,35 @@ struct E4allRequest {
     public_address: String,
 }
 
+fn validate_e4all(req: &E4allRequest) -> Result<(), String> {
+    const LOADERS: [&str; 4] = ["fabric", "forge", "neoforge", "quilt"];
+    if !LOADERS.contains(&req.loader.as_str())
+        || req.minecraft_version.trim().is_empty()
+        || req.install_path.trim().is_empty()
+    {
+        return Err("Loader, versão e pasta do e4all são obrigatórios".into());
+    }
+    Ok(())
+}
+
 async fn save_e4all(State(app): State<AppState>, Json(req): Json<E4allRequest>) -> ApiResult {
+    validate_e4all(&req).map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
     let mut i = app.0.lock().await;
     i.cfg.e4all = E4allConfig {
-        loader: req.loader, minecraft_version: req.minecraft_version.trim().into(), android_variant: req.android_variant, offline_accounts: req.offline_accounts, voice_chat: req.voice_chat, install_path: req.install_path.trim().into(), public_address: req.public_address.trim().into(),
+        loader: req.loader,
+        minecraft_version: req.minecraft_version.trim().into(),
+        android_variant: req.android_variant,
+        offline_accounts: req.offline_accounts,
+        voice_chat: req.voice_chat,
+        install_path: req.install_path.trim().into(),
+        public_address: req.public_address.trim().into(),
     };
-    if let Err(e) = i.persist().await { return Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao gravar: {e}"))); }
+    if let Err(e) = i.persist().await {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao gravar: {e}"),
+        ));
+    }
     i.push("Configuração do e4all salva.", "success");
     Ok(Json(view(&mut i)))
 }
@@ -476,12 +693,27 @@ struct CommandRequest {
     command: String,
 }
 
-async fn command(State(app): State<AppState>, Json(req): Json<CommandRequest>) -> Result<Json<Value>, ApiErr> {
+async fn command(
+    State(app): State<AppState>,
+    Json(req): Json<CommandRequest>,
+) -> Result<Json<Value>, ApiErr> {
     let cmd = req.command.trim();
-    if cmd.is_empty() { return Err(err(StatusCode::BAD_REQUEST, "Comando inválido")); }
+    if cmd.is_empty() || cmd.contains(['\n', '\r']) || cmd.len() > 4096 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Comando inválido ou muito longo",
+        ));
+    }
     let mut i = app.0.lock().await;
-    if i.status != Status::Online { return Err(err(StatusCode::CONFLICT, "Servidor offline.")); }
-    if !send_line(&mut i, cmd).await { return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "Falha ao enviar comando.")); }
+    if i.status != Status::Online {
+        return Err(err(StatusCode::CONFLICT, "Servidor offline."));
+    }
+    if !send_line(&mut i, cmd).await {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Falha ao enviar comando.",
+        ));
+    }
     i.push(format!("> {cmd}"), "command");
     Ok(Json(json!({ "ok": true })))
 }
@@ -497,11 +729,33 @@ struct ModSearchRequest {
 
 async fn search_mods(Json(req): Json<ModSearchRequest>) -> Result<Json<Value>, ApiErr> {
     let client = reqwest::Client::new();
-    let facets = format!(r#"[["categories:{}"],["versions:{}"]]"#, req.loader, req.version);
-    let url = format!("https://api.modrinth.com/v2/search?query={}&facets={}&limit=10", urlencoding::encode(&req.query), urlencoding::encode(&facets));
+    let facets = format!(
+        r#"[["categories:{}"],["versions:{}"]]"#,
+        req.loader, req.version
+    );
+    let url = format!(
+        "https://api.modrinth.com/v2/search?query={}&facets={}&limit=10",
+        urlencoding::encode(&req.query),
+        urlencoding::encode(&facets)
+    );
 
-    let resp = client.get(&url).header("User-Agent", "ShadowPainel/0.6.4").send().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Rede: {e}")))?;
-    let data: Value = resp.json().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON: {e}")))?;
+    let resp = client
+        .get(&url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Rede: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Serviço externo retornou erro: {e}"),
+            )
+        })?;
+    let data: Value = resp
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON: {e}")))?;
     Ok(Json(data))
 }
 
@@ -512,27 +766,76 @@ struct ModInstallRequest {
     version: String,
 }
 
-async fn install_mod(State(app): State<AppState>, Json(req): Json<ModInstallRequest>) -> Result<Json<Value>, ApiErr> {
+async fn install_mod(
+    State(app): State<AppState>,
+    Json(req): Json<ModInstallRequest>,
+) -> Result<Json<Value>, ApiErr> {
     let i = app.0.lock().await;
     let dir = expand(&i.cfg.server_dir);
     let mods_dir = dir.join("mods");
-    tokio::fs::create_dir_all(&mods_dir).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Pasta mods: {e}")))?;
+    tokio::fs::create_dir_all(&mods_dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Pasta mods: {e}"),
+        )
+    })?;
 
     let client = reqwest::Client::new();
-    let url = format!("https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]", req.project_id, req.loader, req.version);
-    let resp = client.get(&url).header("User-Agent", "ShadowPainel/0.6.4").send().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Rede: {e}")))?;
-    let versions: Vec<Value> = resp.json().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON: {e}")))?;
+    let url = format!(
+        "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
+        req.project_id, req.loader, req.version
+    );
+    let resp = client
+        .get(&url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Rede: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Serviço externo retornou erro: {e}"),
+            )
+        })?;
+    let versions: Vec<Value> = resp
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON: {e}")))?;
 
-    if versions.is_empty() { return Err(err(StatusCode::NOT_FOUND, "Mod incompatível.")); }
+    if versions.is_empty() {
+        return Err(err(StatusCode::NOT_FOUND, "Mod incompatível."));
+    }
 
     let file = &versions[0]["files"][0];
-    let download_url = file["url"].as_str().ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "URL faltando"))?;
-    let filename = file["filename"].as_str().ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "Nome faltando"))?;
+    let download_url = file["url"]
+        .as_str()
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "URL faltando"))?;
+    let filename = file["filename"]
+        .as_str()
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "Nome faltando"))?;
 
-    let bytes = client.get(download_url).header("User-Agent", "ShadowPainel/0.6.4").send().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Download: {e}")))?.bytes().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Leitura: {e}")))?;
+    let bytes = client
+        .get(download_url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Download: {e}")))?
+        .error_for_status()
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Leitura: {e}")))?;
 
-    let path = mods_dir.join(filename);
-    tokio::fs::write(&path, bytes).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Salvar: {e}")))?;
+    let safe_name = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| *name == filename && !name.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de arquivo do mod inválido"))?;
+    let path = mods_dir.join(safe_name);
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Salvar: {e}")))?;
 
     Ok(Json(json!({ "ok": true, "file": filename })))
 }
@@ -540,19 +843,45 @@ async fn install_mod(State(app): State<AppState>, Json(req): Json<ModInstallRequ
 async fn install_fabric(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
     let i = app.0.lock().await;
     let dir = expand(&i.cfg.server_dir);
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Pasta: {e}")))?;
-    
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Pasta: {e}")))?;
+
     let client = reqwest::Client::new();
-    let resp = client.get("https://meta.fabricmc.net/v2/versions/installer").header("User-Agent", "ShadowPainel/0.6.4").send().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Rede: {e}")))?;
-    let installers: Vec<Value> = resp.json().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON: {e}")))?;
-    
-    if installers.is_empty() { return Err(err(StatusCode::NOT_FOUND, "Instalador não encontrado.")); }
-    let download_url = installers[0]["url"].as_str().ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "URL faltando"))?;
-    
-    let bytes = client.get(download_url).send().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Download: {e}")))?.bytes().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Leitura: {e}")))?;
-    
+    let resp = client
+        .get("https://meta.fabricmc.net/v2/versions/installer")
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Rede: {e}")))?;
+    let installers: Vec<Value> = resp
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON: {e}")))?;
+
+    if installers.is_empty() {
+        return Err(err(StatusCode::NOT_FOUND, "Instalador não encontrado."));
+    }
+    let download_url = installers[0]["url"]
+        .as_str()
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "URL faltando"))?;
+
+    let bytes = client
+        .get(download_url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Download: {e}")))?
+        .error_for_status()
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Leitura: {e}")))?;
+
     let path = dir.join("fabric-server-launch.jar");
-    tokio::fs::write(&path, bytes).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Salvar: {e}")))?;
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Salvar: {e}")))?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -560,35 +889,69 @@ async fn install_fabric(State(app): State<AppState>) -> Result<Json<Value>, ApiE
 // ───────────────────────── Infra ─────────────────────────
 
 async fn host_guard(req: Request, next: Next) -> Response {
-    let ok = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(|h| {
-        let host = if h.starts_with('[') { h.split(']').next().map(|s| format!("{s}]")).unwrap_or_default() } else { h.split(':').next().unwrap_or("").to_string() };
-        matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
-    }).unwrap_or(false);
-    if ok { next.run(req).await } else { (StatusCode::FORBIDDEN, "Host inválido").into_response() }
+    let ok = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| {
+            let host = if h.starts_with('[') {
+                h.split(']')
+                    .next()
+                    .map(|s| format!("{s}]"))
+                    .unwrap_or_default()
+            } else {
+                h.split(':').next().unwrap_or("").to_string()
+            };
+            matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+        })
+        .unwrap_or(false);
+    if ok {
+        next.run(req).await
+    } else {
+        (StatusCode::FORBIDDEN, "Host inválido").into_response()
+    }
 }
 
 fn frontend_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("SHADOWPAINEL_FRONTEND_DIR") { return p.into(); }
+    if let Ok(p) = std::env::var("SHADOWPAINEL_FRONTEND_DIR") {
+        return p.into();
+    }
     let mut c: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(d) = exe.parent() {
-            c.push(d.join("../frontend/dist")); c.push(d.join("../../frontend/dist")); c.push(d.join("../../../frontend/dist"));
+            c.push(d.join("../frontend/dist"));
+            c.push(d.join("../../frontend/dist"));
+            c.push(d.join("../../../frontend/dist"));
         }
     }
-    c.extend(["../frontend/dist", "frontend/dist", "/usr/share/shadowpainel/frontend", "/usr/local/share/shadowpainel/frontend"].map(PathBuf::from));
-    c.into_iter().find(|p| p.join("index.html").is_file()).unwrap_or_else(|| PathBuf::from("../frontend/dist"))
+    c.extend(
+        [
+            "../frontend/dist",
+            "frontend/dist",
+            "/usr/share/shadowpainel/frontend",
+            "/usr/local/share/shadowpainel/frontend",
+        ]
+        .map(PathBuf::from),
+    );
+    c.into_iter()
+        .find(|p| p.join("index.html").is_file())
+        .unwrap_or_else(|| PathBuf::from("../frontend/dist"))
 }
 
 async fn shutdown_server(app: &AppState) {
     {
         let mut i = app.0.lock().await;
-        if i.status != Status::Online { return; }
+        if i.status != Status::Online {
+            return;
+        }
         i.status = Status::Stopping;
         send_line(&mut i, "stop").await;
     }
     for _ in 0..60 {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        if app.0.lock().await.status == Status::Offline { break; }
+        if app.0.lock().await.status == Status::Offline {
+            break;
+        }
     }
 }
 
@@ -597,16 +960,28 @@ async fn main() -> anyhow::Result<()> {
     let cfg_path = config_path();
     let cfg = load_config(&cfg_path).await;
     let java_detected = detect_java(&cfg.java_path).await;
-    let app_state = AppState(Arc::new(Mutex::new(Inner::new(cfg, cfg_path, java_detected))));
+    let app_state = AppState(Arc::new(Mutex::new(Inner::new(
+        cfg,
+        cfg_path,
+        java_detected,
+    ))));
 
     let configured_addr = std::env::var("SHADOWPAINEL_ADDR").ok();
-    let requested: SocketAddr = configured_addr.as_deref().unwrap_or("127.0.0.1:4173").parse()?;
+    let requested: SocketAddr = configured_addr
+        .as_deref()
+        .unwrap_or("127.0.0.1:4173")
+        .parse()?;
     let listener = if configured_addr.is_some() {
         tokio::net::TcpListener::bind(requested).await?
     } else {
         let mut selected = None;
         for port in requested.port()..=requested.port().saturating_add(20) {
-            if let Ok(l) = tokio::net::TcpListener::bind(SocketAddr::new(requested.ip(), port)).await { selected = Some(l); break; }
+            if let Ok(l) =
+                tokio::net::TcpListener::bind(SocketAddr::new(requested.ip(), port)).await
+            {
+                selected = Some(l);
+                break;
+            }
         }
         selected.ok_or_else(|| std::io::Error::other("nenhuma porta disponível"))?
     };
@@ -627,11 +1002,20 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/command", post(command))
         .with_state(app_state.clone());
 
-    let mut app = api.fallback_service(ServeDir::new(frontend_dir()).append_index_html_on_directories(true));
-    if addr.ip().is_loopback() { app = app.layer(middleware::from_fn(host_guard)); }
+    let mut app =
+        api.fallback_service(ServeDir::new(frontend_dir()).append_index_html_on_directories(true));
+    if addr.ip().is_loopback() {
+        app = app.layer(middleware::from_fn(host_guard));
+    }
 
     println!("ShadowPainel disponível em http://{addr}");
-    axum::serve(listener, app).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await?;
+    use std::io::Write;
+    std::io::stdout().flush()?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     shutdown_server(&app_state).await;
     Ok(())
 }

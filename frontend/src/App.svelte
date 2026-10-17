@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  const APP_VERSION = '0.6.5';
   type Log = { time:string; text:string; kind:string };
   type E4allConfig = { loader:string; minecraft_version:string; android_variant:boolean; offline_accounts:boolean; voice_chat:boolean; install_path:string; public_address:string };
   type ServerState = { status:string; address:string; players:number; memory_mb:number; memory_limit_gb:number; cpu_percent:number; uptime_seconds:number; server_name:string; version:string; server_dir:string; java_path:string; java_detected:boolean; e4all:E4allConfig; logs:Log[] };
@@ -133,11 +134,11 @@
     <div class="workspace">
       <div class="server-avatar">☾</div>
       <div><b>Meu servidor</b><small>LOCAL · PRINCIPAL</small></div>
-      <button class="dots">•••</button>
+      <button class="dots" aria-label="Mais opções" title="Mais opções">•••</button>
     </div>
     <nav>
       <div class="nav-label">GERENCIAMENTO</div>
-      {#each ['Visão geral','Console','Jogadores','Arquivos'] as tab}
+      {#each ['Visão geral'] as tab}
         <button class:active={activeTab===tab} on:click={() => activeTab=tab}>
           <span class="nav-icon">{tab==='Visão geral'?'◈':tab==='Console'?'>_':tab==='Jogadores'?'♙':'▤'}</span>
           {tab}
@@ -160,7 +161,7 @@
         <h1>Olá, administrador <span class="wave">✦</span></h1>
         <p>Gerencie seu mundo sem abrir o terminal.</p>
       </div>
-      <div class="header-actions"><button class="icon-button">◔</button><button class="help">? <span>Ajuda</span></button></div>
+      <div class="header-actions"><button class="icon-button" aria-label="Tema" title="Tema">◔</button><button class="help" aria-label="Ajuda" title="Ajuda">? <span>Ajuda</span></button></div>
     </header>
 
     {#if notice}<div class="notice">{notice}</div>{/if}
@@ -176,7 +177,7 @@
           <label>Mod loader<select bind:value={server.e4all.loader}><option value="fabric">Fabric</option><option value="forge">Forge</option><option value="neoforge">NeoForge</option><option value="quilt">Quilt</option></select></label>
           <label>Versão do Minecraft<input bind:value={server.e4all.minecraft_version} placeholder="1.21.1"></label>
           <label>Pasta mods<input bind:value={server.e4all.install_path}></label>
-          <label>Domínio público e4all<input bind:value={server.e4all.public_address} placeholder="exemplo.e4mc.link"><button class="copy-field" on:click={() => navigator.clipboard?.writeText(server.e4all.public_address)}>Copiar</button></label>
+          <label>Domínio público e4all<input bind:value={server.e4all.public_address} placeholder="exemplo.e4mc.link"><button class="copy-field" aria-label="Copiar domínio público" on:click={() => navigator.clipboard?.writeText(server.e4all.public_address)}>Copiar</button></label>
           <label class="check-label"><span><input type="checkbox" bind:checked={server.e4all.android_variant}> Variante Android</span><small>Use o JAR maior com sufixo -android</small></label>
         </div>
         <div class="toggle-grid">
@@ -258,7 +259,7 @@
           <button class="secondary" on:click={() => activeTab='Configurações'}>⚙ Configurar</button>
         </div>
         <div class="hero-meta">
-          <div><span>ENDEREÇO PARA COMPARTILHAR</span><b>{server.address}</b><button class="copy" on:click={() => navigator.clipboard?.writeText(server.address)}>⧉</button></div>
+          <div><span>ENDEREÇO PARA COMPARTILHAR</span><b>{server.address}</b><button class="copy" aria-label="Copiar endereço" title="Copiar endereço" on:click={() => navigator.clipboard?.writeText(server.address)}>⧉</button></div>
           <div class="divider"></div>
           <div><span>UPTIME</span><b>{uptime(server.uptime_seconds)}</b></div>
         </div>
@@ -289,7 +290,7 @@
         <section class="quick-card">
           <div class="card-head"><div><h3>Ações rápidas</h3><p>Atalhos de administração</p></div><button class="more">•••</button></div>
           <button class="quick" on:click={restartServer} disabled={loading}><span class="q-icon">↻</span><div><b>Reiniciar servidor</b><small>Parar com segurança e iniciar novamente</small></div><span>›</span></button>
-          <button class="quick"><span class="q-icon">↓</span><div><b>Fazer backup</b><small>Último backup: nunca</small></div><span>›</span></button>
+          <button class="quick" disabled title="Backup automático será disponibilizado em breve"><span class="q-icon">↓</span><div><b>Fazer backup</b><small>Disponível em uma próxima versão</small></div><span>›</span></button>
           <button class="quick" on:click={() => activeTab='Configurações'}><span class="q-icon">⚙</span><div><b>Abrir configurações</b><small>Editar memória e versão</small></div><span>›</span></button>
           <div class="tip"><span>✦</span><div><b>Dica do ShadowPainel</b><p>Seus dados ficam locais e o painel não exige conta ou terminal.</p></div></div>
         </section>
@@ -297,7 +298,7 @@
     {/if}
 
     <footer>
-      <span>SHADOWPAINEL <b>v0.6.4</b></span>
+      <span>SHADOWPAINEL <b>v{APP_VERSION}</b></span>
       <span>RUST CORE · MULTIPLATAFORMA <i>●</i></span>
     </footer>
   </main>

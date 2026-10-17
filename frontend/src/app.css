@@ -320,3 +320,44 @@ footer i { color: var(--green); font-style: normal; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* Responsividade e acessibilidade */
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.quick:disabled { opacity: 0.55; cursor: not-allowed; }
+@media (max-width: 1100px) {
+  .sidebar { width: 220px; }
+  header, .settings-card, .hero, .metrics, .content-grid, .notice { margin-left: 24px; margin-right: 24px; }
+  header { padding-left: 0; padding-right: 0; }
+  .hero, .settings-card { padding-left: 24px; padding-right: 24px; }
+  .hero-actions { left: 24px; }
+  .hero-meta { right: 24px; }
+  .metrics { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  body, .shell { overflow: auto; }
+  .shell { display: block; min-height: 100vh; }
+  .sidebar { width: 100%; padding: 14px 0; border-right: 0; border-bottom: 1px solid var(--border); }
+  .brand { padding: 0 16px 14px; margin-bottom: 8px; }
+  .workspace { margin: 0 16px 8px; }
+  .sidebar nav { flex-direction: row; overflow-x: auto; padding: 0 8px; }
+  .sidebar nav button { padding: 10px 12px; white-space: nowrap; }
+  .nav-label, .settings-label, .sidebar-footer { display: none; }
+  header { padding: 24px 16px 18px; }
+  header h1 { font-size: 26px; }
+  .header-actions { display: none; }
+  .hero, .settings-card, .metrics, .content-grid, .notice { margin-left: 16px; margin-right: 16px; }
+  .hero { min-height: 430px; padding: 24px; padding-bottom: 170px; }
+  .hero-copy { max-width: 100%; }
+  .orb { top: 110px; right: 24px; opacity: 0.7; }
+  .hero-actions { left: 24px; right: 24px; bottom: 96px; flex-direction: column; }
+  .hero-actions button { justify-content: center; }
+  .hero-meta { left: 24px; right: 24px; bottom: 24px; justify-content: space-between; gap: 12px; padding: 12px 16px; }
+  .hero-meta b { font-size: 12px; }
+  .content-grid, .form-grid, .toggle-grid { grid-template-columns: 1fr; }
+  .settings-card { padding: 20px; }
+  .settings-card .card-head { gap: 12px; flex-direction: column; }
+  footer { margin: 0 16px; padding: 20px 0; gap: 12px; flex-direction: column; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
