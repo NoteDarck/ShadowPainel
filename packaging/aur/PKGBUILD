@@ -37,7 +37,8 @@ build() {
 
 package() {
   cd "$srcdir/ShadowPainel"
-  install -Dm755 backend/target/release/shadowpainel "$pkgdir/usr/bin/shadowpainel"
+  install -Dm755 backend/target/release/shadowpainel "$pkgdir/usr/lib/shadowpainel/shadowpainel-core"
+  install -Dm755 packaging/shadowpainel-launcher.sh "$pkgdir/usr/bin/shadowpainel"
   install -Dm644 packaging/aur/shadowpainel.desktop "$pkgdir/usr/share/applications/shadowpainel.desktop"
   install -Dm644 packaging/shadowpainel.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/shadowpainel.svg"
   install -dm755 "$pkgdir/usr/share/shadowpainel/frontend"

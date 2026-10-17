@@ -4,7 +4,7 @@ Painel local, em **Rust**, para configurar e administrar servidores Minecraft no
 
 ## O que já funciona
 
-- Dashboard local servido pelo binário Rust em `http://127.0.0.1:4173`.
+- Dashboard local servido pelo núcleo Rust e aberto automaticamente no navegador.
 - Iniciar/parar o estado do servidor, uptime e métricas locais.
 - Console com envio de comandos e histórico de logs.
 - Tela de configurações para nome, versão, pasta e memória.
@@ -71,7 +71,7 @@ MIT.
 
 Ao criar uma tag `v*`, o GitHub Actions compila e publica automaticamente Linux x86_64 (`.tar.gz`, `.AppImage` e `.deb`), Windows x86_64 (`.zip` e `.msi`), macOS Intel (`.tar.gz` e `.dmg`) e macOS Apple Silicon/ARM64 (`.tar.gz` e `.dmg`). A release também publica `SHA256SUMS.txt` para verificação de integridade.
 
-Baixe a versão desejada em [Releases](https://github.com/NoteDarck/ShadowPainel/releases). Nos formatos portáteis, execute o binário e abra `http://localhost:4173`; no Linux empacotado, o frontend é instalado em `/usr/share/shadowpainel/frontend`.
+Baixe a versão desejada em [Releases](https://github.com/NoteDarck/ShadowPainel/releases). Ao abrir o AppImage pelo gerenciador de arquivos ou pelo atalho do sistema, o núcleo é iniciado em segundo plano e o navegador abre automaticamente no endereço correto. No Linux empacotado, o frontend é instalado em `/usr/share/shadowpainel/frontend`.
 
 ## Integração e4all
 

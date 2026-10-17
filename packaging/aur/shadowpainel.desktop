@@ -2,7 +2,7 @@
 Name=ShadowPainel
 Comment=Painel local para servidores Minecraft
 Exec=shadowpainel
-Icon=applications-games
-Terminal=true
+Icon=shadowpainel
+Terminal=false
 Type=Application
-Categories=Game;Utility;
+Categories=Utility;

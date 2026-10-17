@@ -113,9 +113,24 @@ jobs:
           sed -i 's/^Categories=.*/Categories=Utility;/; s/^Exec=.*/Exec=AppRun/; s/^Icon=.*/Icon=shadowpainel/' "$APPDIR/shadowpainel.desktop"
           cat > "$APPDIR/AppRun" <<'EOF'
           #!/bin/sh
+          set -eu
           HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
           export SHADOWPAINEL_FRONTEND_DIR="$HERE/usr/share/shadowpainel/frontend"
-          exec "$HERE/usr/bin/shadowpainel" "$@"
+          LOG="${XDG_CACHE_HOME:-$HOME/.cache}/shadowpainel.log"
+          mkdir -p "$(dirname "$LOG")"
+          : > "$LOG"
+          "$HERE/usr/bin/shadowpainel" "$@" >>"$LOG" 2>&1 &
+          PID=$!
+          URL=""
+          for _ in $(seq 1 50); do
+            URL=$(sed -n 's/.*ShadowPainel disponível em //p' "$LOG" | tail -n 1 || true)
+            [ -n "$URL" ] && break
+            sleep 0.1
+          done
+          if [ -n "$URL" ] && command -v xdg-open >/dev/null 2>&1; then
+            xdg-open "$URL" >/dev/null 2>&1 || true
+          fi
+          wait "$PID"
           EOF
           chmod +x "$APPDIR/AppRun" "$APPDIR/usr/bin/shadowpainel"
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
@@ -124,17 +139,18 @@ jobs:
 
           # ---------- .deb (árvore separada) ----------
           DEBDIR="$ROOT.deb-root"
-          mkdir -p "$DEBDIR/DEBIAN" "$DEBDIR/usr/bin" \
+          mkdir -p "$DEBDIR/DEBIAN" "$DEBDIR/usr/bin" "$DEBDIR/usr/lib/shadowpainel" \
             "$DEBDIR/usr/share/shadowpainel/frontend" \
             "$DEBDIR/usr/share/applications" \
             "$DEBDIR/usr/share/icons/hicolor/scalable/apps" \
             "$DEBDIR/usr/share/doc/shadowpainel"
-          cp "backend/target/release/${{ matrix.binary }}" "$DEBDIR/usr/bin/shadowpainel"
+          cp "backend/target/release/${{ matrix.binary }}" "$DEBDIR/usr/lib/shadowpainel/shadowpainel-core"
+          cp packaging/shadowpainel-launcher.sh "$DEBDIR/usr/bin/shadowpainel"
           cp -r frontend/dist/. "$DEBDIR/usr/share/shadowpainel/frontend/"
           cp packaging/aur/shadowpainel.desktop "$DEBDIR/usr/share/applications/shadowpainel.desktop"
           cp packaging/shadowpainel.svg "$DEBDIR/usr/share/icons/hicolor/scalable/apps/shadowpainel.svg"
           cp README.md "$DEBDIR/usr/share/doc/shadowpainel/README.md"
-          chmod 755 "$DEBDIR/usr/bin/shadowpainel"
+          chmod 755 "$DEBDIR/usr/bin/shadowpainel" "$DEBDIR/usr/lib/shadowpainel/shadowpainel-core"
           cat > "$DEBDIR/DEBIAN/control" <<EOF
           Package: shadowpainel
           Version: ${PKG_VERSION}
