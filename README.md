@@ -64,3 +64,21 @@ git push origin main
 ## Licença
 
 MIT.
+
+## Releases multiplataforma
+
+Ao criar uma tag `v*`, o GitHub Actions compila e publica automaticamente pacotes para:
+
+- Linux x86_64 (`.tar.gz`)
+- Windows x86_64 (`.zip`)
+- macOS Intel (`.tar.gz`)
+- macOS Apple Silicon/ARM64 (`.tar.gz`)
+
+Baixe a versão desejada em [Releases](https://github.com/NoteDarck/ShadowPainel/releases), extraia o arquivo e execute o binário dentro da pasta `backend`:
+
+```bash
+cd ShadowPainel-v0.1.0-linux-x86_64/backend
+./shadowpainel
+```
+
+No Windows, execute `shadowpainel.exe` dentro da pasta `backend`. O navegador deve ser aberto em `http://localhost:4173`.
