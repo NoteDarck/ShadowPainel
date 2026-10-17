@@ -80,6 +80,14 @@ fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // O WebKitGTK usado pelo wry precisa de um handle X11 no Linux.
+    // Em sessões Wayland, o XWayland fornece essa compatibilidade.
+    #[cfg(target_os = "linux")]
+    {
+        env::set_var("GDK_BACKEND", "x11");
+        env::set_var("WINIT_UNIX_BACKEND", "x11");
+    }
+
     let exe_dir = env::current_exe()?
         .parent()
         .ok_or_else(|| io::Error::other("diretório do aplicativo inválido"))?
