@@ -544,3 +544,18 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 @media (max-width:900px) { .catalog-grid { grid-template-columns:1fr; } }
 @media (max-width:760px) { .modal { max-height:92vh; } .catalog-grid { padding:14px 16px 18px; } .catalog-search-container { padding:14px 16px 6px; } .catalog-search { flex-direction:column; } .catalog-advanced-filters { flex-direction: column; } .catalog-advanced-filters label { max-width: 100%; } }
+/* Reforço: card instalado fica cinza e não clicável */
+.catalog-card.installed {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--panel);
+  pointer-events: none;
+}
+.catalog-card.installed:hover {
+  border-color: var(--border);
+  background: var(--panel);
+  transform: none;
+}
+.catalog-card.installed .installed-badge {
+  display: inline-block;
+}

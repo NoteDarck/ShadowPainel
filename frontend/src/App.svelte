@@ -93,7 +93,7 @@
   let catalogCategory = 'all';
   let showCatalogFilters = false;
   
-  // ── NOVO: Seleção múltipla no catálogo e versão ──
+  // ── Seleção múltipla no catálogo e versão ──
   let catalogSelected: Set<string> = new Set();
   let modVersions: ModVersion[] = [];
   let selectedModVersion = '';
@@ -235,10 +235,12 @@
       const version = contentVersion || server.version;
       await api('/content/install', json({
         project_id, kind:contentKind, loader:contentLoader, version,
-        version_id, // Envia a versão específica
+        version_id,
       }));
       notice = 'Conteúdo instalado.';
       await loadContent();
+      // Atualiza o catálogo para refletir "installed"
+      await runCatalogSearch();
     } catch(e) {
       notice = e instanceof Error ? e.message : 'Falha ao instalar conteúdo.';
     }
@@ -254,9 +256,11 @@
     for (const projectId of catalogSelected) {
       try {
         const version = contentVersion || server.version;
+        // Garante que a versão do mod foi carregada (se não, usa fallback)
+        const versionId = selectedModVersions[projectId] || undefined;
         await api('/content/install', json({
           project_id: projectId, kind: contentKind, loader: contentLoader, version,
-          version_id: selectedModVersions[projectId] || selectedModVersion,
+          version_id: versionId,
         }));
         success++;
       } catch (e) {
@@ -272,6 +276,8 @@
       catalogSelected.clear();
     }
     await loadContent();
+    // Atualiza o catálogo para refletir "installed"
+    await runCatalogSearch();
   }
 
   async function deleteSelectedContent() {
@@ -317,6 +323,7 @@
     catalogOpen = true;
     catalogDetail = null;
     catalogSelected.clear();
+    selectedModVersions = {};
     await runCatalogSearch();
   }
   async function runCatalogSearch() {
@@ -343,7 +350,7 @@
     if (catalogOpen) runCatalogSearch();
   }
 
-  // ── NOVO: Carregar versões do mod selecionado ──
+  // ── Carregar versões do mod selecionado ──
   async function loadModVersions(projectId: string) {
     modVersions = [];
     selectedModVersion = '';
@@ -756,7 +763,6 @@
             {:else}
               <div class="catalog-grid">
                 {#each results as item}
-                  <!-- Card com checkbox para seleção múltipla e classe 'installed' -->
                   <div class="catalog-card" 
                        class:selected={catalogSelected.has(item.project_id)}
                        class:installed={isInstalled(item.project_id)}
@@ -796,7 +802,6 @@
               </div>
             {/if}
 
-            <!-- Painel de Detalhes com seleção de versão e botões de ação -->
             {#if catalogDetail}
               <div class="detail-sheet">
                 <div class="detail-head">
@@ -818,7 +823,6 @@
                 </div>
                 <p>{catalogDetail.description || 'Sem descrição fornecida.'}</p>
                 
-                <!-- NOVO: Seleção de versão específica do mod -->
                 {#if modVersions.length > 0}
                   <div class="version-picker">
                     <label for="content-version-select">Selecionar versão do mod</label>
@@ -848,7 +852,6 @@
               </div>
             {/if}
 
-            <!-- NOVO: Botão de instalação em lote no rodapé do modal -->
             <div class="modal-footer-batch">
               <span>{catalogSelected.size} mod(s) selecionado(s)</span>
               <button class="primary" on:click={installBatch} disabled={catalogSelected.size === 0 || installingBatch}>
