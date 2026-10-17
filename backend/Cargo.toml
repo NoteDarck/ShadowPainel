@@ -17,7 +17,8 @@ chrono = { version = "0.4", features = ["serde"] }
 sysinfo = "0.37"
 anyhow = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
-urlencoding = "2.1" # NOVO
+urlencoding = "2.1"
+zip = "2.2"
 
 [profile.release]
 lto = "thin"

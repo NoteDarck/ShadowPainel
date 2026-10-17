@@ -14,11 +14,15 @@
   let loading = false; 
   let notice = ''; 
   let saved = false;
-  
-  // Variáveis para Mods
-  let modQuery = '';
-  let modResults: any[] = [];
-  let modLoading = false;
+
+  // Modal de Mods/Plugins/Datapacks
+  let showModBrowser = false;
+  let browserType = 'mod'; // 'mod', 'plugin', 'datapack'
+  let searchQuery = '';
+  let searchResults: any[] = [];
+  let isSearching = false;
+  let selectedMod: any = null;
+  let installingMod = false;
 
   const api = async <T = unknown>(path:string, options?:RequestInit):Promise<T> => { 
     const r = await fetch(`/api${path}`, options); 
@@ -74,7 +78,7 @@
     } catch { notice='Console disponível quando online.'; } 
   }
 
-  // --- FUNÇÕES DE INSTALAÇÃO E MODS ---
+  // --- INSTALAÇÃO E MODS ---
   async function downloadServer() {
     loading = true; notice = '';
     try {
@@ -98,23 +102,65 @@
     loading = false;
   }
 
-  async function searchMods() {
-    if (!modQuery.trim()) return;
-    modLoading = true; notice = '';
-    try {
-      modResults = await api<any>('/mods/search', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ query: modQuery, loader: server.e4all.loader, version: server.version }) });
-      // @ts-ignore
-      modResults = modResults.hits || []; 
-    } catch(e) { notice = e instanceof Error ? e.message : 'Falha na busca.'; }
-    modLoading = false;
+  async function openBrowser(type: string) {
+    browserType = type;
+    showModBrowser = true;
+    searchQuery = '';
+    searchResults = [];
+    await doSearch();
   }
 
-  async function installMod(projectId: string) {
-    notice = '';
+  async function doSearch() {
+    isSearching = true;
     try {
-      await api('/mods/install', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ project_id: projectId, loader: server.e4all.loader, version: server.version }) });
-      notice = 'Mod instalado com sucesso!';
-    } catch(e) { notice = e instanceof Error ? e.message : 'Falha ao instalar mod.'; }
+      let loader = 'fabric';
+      if (browserType === 'plugin') loader = 'paper';
+      if (browserType === 'datapack') loader = 'datapack';
+
+      const data = await api<any>('/mods/search', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          query: searchQuery,
+          loader: loader,
+          version: server.version,
+          project_type: browserType
+        })
+      });
+      searchResults = data.hits || [];
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha na busca.';
+    }
+    isSearching = false;
+  }
+
+  async function confirmInstall() {
+    if (!selectedMod) return;
+    installingMod = true;
+    notice = 'Instalando...';
+    
+    let loader = 'fabric';
+    if (browserType === 'plugin') loader = 'paper';
+    if (browserType === 'datapack') loader = 'datapack';
+
+    try {
+      await api('/mods/install', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          project_id: selectedMod.project_id,
+          loader: loader,
+          version: server.version,
+          project_type: browserType
+        })
+      });
+      notice = `${selectedMod.title} instalado com sucesso!`;
+      showModBrowser = false;
+      selectedMod = null;
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao instalar.';
+    }
+    installingMod = false;
   }
 
   function uptime(sec:number) { 
@@ -219,31 +265,27 @@
 
       <section class="settings-card" style="margin-top: 24px;">
         <div class="card-head">
-          <div><h3>Loja de Mods (Modrinth)</h3><p>Baixe mods diretamente para o seu servidor</p></div>
-          <span class="mod-badge">MODRINTH API</span>
-        </div>
-        <div style="display: flex; gap: 12px; margin-bottom: 16px;">
-          <input bind:value={modQuery} placeholder="Nome do mod (ex: sodium, lithium, e4all)" style="flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; color: var(--text); font-family: 'Inter'; font-size: 13px;" />
-          <button class="primary" on:click={searchMods} disabled={modLoading}>Buscar</button>
-        </div>
-        {#if modResults.length > 0}
-          <div style="display: flex; flex-direction: column; gap: 12px;">
-            {#each modResults as mod}
-              <div style="display: flex; justify-content: space-between; align-items: center; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 16px;">
-                <div style="display: flex; align-items: center; gap: 16px;">
-                  {#if mod.icon_url}
-                    <img src={mod.icon_url} alt="Icon" style="width: 40px; height: 40px; border-radius: 6px;" />
-                  {/if}
-                  <div>
-                    <b style="display: block; color: #fff; font-size: 14px;">{mod.title}</b>
-                    <small style="color: var(--muted); font-size: 11px;">{mod.description}</small>
-                  </div>
-                </div>
-                <button class="secondary" on:click={() => installMod(mod.project_id)}>Instalar</button>
-              </div>
-            {/each}
+          <div>
+            <h3>Gerenciador de Conteúdo</h3>
+            <p>Instale mods, plugins ou datapacks diretamente do Modrinth</p>
           </div>
-        {/if}
+          <span class="mod-badge">MODRINTH</span>
+        </div>
+        
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;">
+          <button class="quick" on:click={() => openBrowser('mod')} style="justify-content: center;">
+            <span class="q-icon">🧩</span>
+            <div style="text-align: center;"><b>Instalar Mods</b><small>Fabric / Forge</small></div>
+          </button>
+          <button class="quick" on:click={() => openBrowser('plugin')} style="justify-content: center;">
+            <span class="q-icon">🔌</span>
+            <div style="text-align: center;"><b>Instalar Plugins</b><small>Bukkit / Spigot / Paper</small></div>
+          </button>
+          <button class="quick" on:click={() => openBrowser('datapack')} style="justify-content: center;">
+            <span class="q-icon">📦</span>
+            <div style="text-align: center;"><b>Instalar Datapacks</b><small>Para o mundo</small></div>
+          </button>
+        </div>
       </section>
 
     {:else if activeTab === 'Visão geral'}
@@ -303,3 +345,69 @@
     </footer>
   </main>
 </div>
+
+<!-- MODAL DE BUSCA (Estilo Prism Launcher) -->
+{#if showModBrowser}
+  <div class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Baixar {browserType === 'mod' ? 'Mods' : browserType === 'plugin' ? 'Plugins' : 'Datapacks'}</h2>
+        <button class="close-btn" on:click={() => showModBrowser = false}>✕</button>
+      </div>
+      
+      <div class="modal-body">
+        <div class="search-bar">
+          <input bind:value={searchQuery} on:keydown={(e) => e.key === 'Enter' && doSearch()} placeholder="Procure por {browserType}s..." />
+          <button class="primary" on:click={doSearch} disabled={isSearching}>
+            {isSearching ? 'Buscando...' : 'Buscar'}
+          </button>
+        </div>
+
+        <div class="results-layout">
+          <div class="results-list">
+            {#if isSearching}
+              <p style="padding: 20px; text-align: center; color: var(--muted);">Buscando no Modrinth...</p>
+            {:else if searchResults.length === 0}
+              <p style="padding: 20px; text-align: center; color: var(--muted);">Nenhum resultado encontrado.</p>
+            {:else}
+              {#each searchResults as mod}
+                <div class="result-item" class:selected={selectedMod?.project_id === mod.project_id} on:click={() => selectedMod = mod}>
+                  {#if mod.icon_url}
+                    <img src={mod.icon_url} alt="Icon" />
+                  {:else}
+                    <div class="icon-placeholder">?</div>
+                  {/if}
+                  <div class="result-info">
+                    <b>{mod.title}</b>
+                    <small>{mod.description}</small>
+                  </div>
+                </div>
+              {/each}
+            {/if}
+          </div>
+
+          <div class="details-panel">
+            {#if selectedMod}
+              <h3>{selectedMod.title}</h3>
+              <p class="author">Por {selectedMod.author}</p>
+              <div class="tags">
+                <span class="tag">{selectedMod.downloads} downloads</span>
+                <span class="tag">Versão: {server.version}</span>
+              </div>
+              
+              <div class="actions">
+                <button class="primary" on:click={confirmInstall} disabled={installingMod}>
+                  {installingMod ? 'Instalando...' : 'Instalar'}
+                </button>
+              </div>
+            {:else}
+              <div class="empty-state">
+                <p>Selecione um item para ver os detalhes</p>
+              </div>
+            {/if}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
