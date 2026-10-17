@@ -26,18 +26,22 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-22.04
             binary: shadowpainel
+            desktop_binary: shadowpainel-desktop
             archive: tar.gz
           - name: windows-x86_64
             os: windows-2022
             binary: shadowpainel.exe
+            desktop_binary: shadowpainel-desktop.exe
             archive: zip
           - name: macos-x86_64
             os: macos-15-intel
             binary: shadowpainel
+            desktop_binary: shadowpainel-desktop
             archive: tar.gz
           - name: macos-aarch64
             os: macos-14
             binary: shadowpainel
+            desktop_binary: shadowpainel-desktop
             archive: tar.gz
 
     steps:
@@ -58,7 +62,13 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: backend
+          workspaces: |
+            backend
+            desktop
+
+      - name: Dependências WebView Linux
+        if: matrix.name == 'linux-x86_64'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Node.js 22
         uses: actions/setup-node@v4
@@ -78,13 +88,18 @@ jobs:
         working-directory: backend
         run: cargo build --release --locked
 
+      - name: Build desktop nativo
+        working-directory: desktop
+        run: cargo build --release --locked
+
       - name: Assemble package
         shell: bash
         run: |
           set -e
           ROOT="${{ env.RELEASE_NAME }}-${{ matrix.name }}"
           mkdir -p "$ROOT/backend" "$ROOT/frontend/dist"
-          cp "backend/target/release/${{ matrix.binary }}" "$ROOT/backend/"
+          cp "backend/target/release/${{ matrix.binary }}" "$ROOT/backend/shadowpainel-core${{ endsWith(matrix.binary, '.exe') && '.exe' || '' }}"
+          cp "desktop/target/release/${{ matrix.desktop_binary }}" "$ROOT/"
           cp -r frontend/dist/. "$ROOT/frontend/dist/"
           cp README.md "$ROOT/"
           cp -r packaging "$ROOT/"
@@ -105,34 +120,19 @@ jobs:
 
           # ---------- AppImage ----------
           APPDIR="$ROOT.AppDir"
-          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/shadowpainel/frontend"
-          cp "backend/target/release/${{ matrix.binary }}" "$APPDIR/usr/bin/shadowpainel"
+          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib/shadowpainel" "$APPDIR/usr/share/shadowpainel/frontend"
+          cp "desktop/target/release/${{ matrix.desktop_binary }}" "$APPDIR/usr/bin/shadowpainel-desktop"
+          cp "backend/target/release/${{ matrix.binary }}" "$APPDIR/usr/lib/shadowpainel/shadowpainel-core"
           cp -r frontend/dist/. "$APPDIR/usr/share/shadowpainel/frontend/"
           cp packaging/aur/shadowpainel.desktop "$APPDIR/shadowpainel.desktop"
           cp packaging/shadowpainel.svg "$APPDIR/shadowpainel.svg"
           sed -i 's/^Categories=.*/Categories=Utility;/; s/^Exec=.*/Exec=AppRun/; s/^Icon=.*/Icon=shadowpainel/' "$APPDIR/shadowpainel.desktop"
           cat > "$APPDIR/AppRun" <<'EOF'
           #!/bin/sh
-          set -eu
           HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-          export SHADOWPAINEL_FRONTEND_DIR="$HERE/usr/share/shadowpainel/frontend"
-          LOG="${XDG_CACHE_HOME:-$HOME/.cache}/shadowpainel.log"
-          mkdir -p "$(dirname "$LOG")"
-          : > "$LOG"
-          "$HERE/usr/bin/shadowpainel" "$@" >>"$LOG" 2>&1 &
-          PID=$!
-          URL=""
-          for _ in $(seq 1 50); do
-            URL=$(sed -n 's/.*ShadowPainel disponível em //p' "$LOG" | tail -n 1 || true)
-            [ -n "$URL" ] && break
-            sleep 0.1
-          done
-          if [ -n "$URL" ] && command -v xdg-open >/dev/null 2>&1; then
-            xdg-open "$URL" >/dev/null 2>&1 || true
-          fi
-          wait "$PID"
+          exec "$HERE/usr/bin/shadowpainel-desktop" "$@"
           EOF
-          chmod +x "$APPDIR/AppRun" "$APPDIR/usr/bin/shadowpainel"
+          chmod +x "$APPDIR/AppRun" "$APPDIR/usr/bin/shadowpainel-desktop" "$APPDIR/usr/lib/shadowpainel/shadowpainel-core"
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
           chmod +x appimagetool
           ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$APPDIR" "${ROOT}.AppImage"
@@ -144,13 +144,13 @@ jobs:
             "$DEBDIR/usr/share/applications" \
             "$DEBDIR/usr/share/icons/hicolor/scalable/apps" \
             "$DEBDIR/usr/share/doc/shadowpainel"
+          cp "desktop/target/release/${{ matrix.desktop_binary }}" "$DEBDIR/usr/bin/shadowpainel-desktop"
           cp "backend/target/release/${{ matrix.binary }}" "$DEBDIR/usr/lib/shadowpainel/shadowpainel-core"
-          cp packaging/shadowpainel-launcher.sh "$DEBDIR/usr/bin/shadowpainel"
           cp -r frontend/dist/. "$DEBDIR/usr/share/shadowpainel/frontend/"
           cp packaging/aur/shadowpainel.desktop "$DEBDIR/usr/share/applications/shadowpainel.desktop"
           cp packaging/shadowpainel.svg "$DEBDIR/usr/share/icons/hicolor/scalable/apps/shadowpainel.svg"
           cp README.md "$DEBDIR/usr/share/doc/shadowpainel/README.md"
-          chmod 755 "$DEBDIR/usr/bin/shadowpainel" "$DEBDIR/usr/lib/shadowpainel/shadowpainel-core"
+          chmod 755 "$DEBDIR/usr/bin/shadowpainel-desktop" "$DEBDIR/usr/lib/shadowpainel/shadowpainel-core"
           cat > "$DEBDIR/DEBIAN/control" <<EOF
           Package: shadowpainel
           Version: ${PKG_VERSION}
@@ -182,7 +182,8 @@ jobs:
           export PATH="$PATH:/c/Program Files (x86)/WiX Toolset v3.14/bin:/c/Program Files (x86)/WiX Toolset v3.11/bin"
           ROOT="${{ env.RELEASE_NAME }}-${{ matrix.name }}"
           mkdir -p "$ROOT/backend" "$ROOT/frontend/dist"
-          cp "backend/target/release/${{ matrix.binary }}" "$ROOT/backend/"
+          cp "backend/target/release/${{ matrix.binary }}" "$ROOT/backend/shadowpainel-core.exe"
+          cp "desktop/target/release/${{ matrix.desktop_binary }}" "$ROOT/shadowpainel-desktop.exe"
           cp -r frontend/dist/. "$ROOT/frontend/dist/"
           cp README.md "$ROOT/"
           cat > installer.wxs <<'EOF'
