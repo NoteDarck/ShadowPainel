@@ -49,8 +49,8 @@
 
   // ── Assistente ──
   let setup = {
-    server_name:'Meu servidor',
-    server_dir:'~/Minecraft/MeuServidor',
+    server_name:'Meu Servidor Minecraft',
+    server_dir:'~/Minecraft/Servidor',
     memory_limit_gb:4,
     loader:'vanilla',
   };
@@ -716,11 +716,19 @@
         </div>
 
         <div class="form-grid">
-          <label>Nome do servidor
+          <label>
+            Nome do servidor
             <input bind:value={setup.server_name} placeholder="Sobrevivência principal"/>
+            <small style="color: var(--faint); font-size: 11px; margin-top: 4px;">
+              Este nome aparece no painel. Pode ser alterado depois.
+            </small>
           </label>
-          <label>Pasta do servidor
+          <label>
+            Pasta do servidor
             <input bind:value={setup.server_dir}/>
+            <small style="color: var(--faint); font-size: 11px; margin-top: 4px;">
+              Onde os arquivos do mundo serão salvos. Use o caminho completo.
+            </small>
           </label>
           <label>
             Versão do Minecraft
@@ -730,17 +738,20 @@
               {/each}
             </select>
             <small class="selected-version">
-              Selecionada: {setupVersion || 'carregando versões...'}
+              Selecione a versão que você joga. Mods e plugins dependem dela.
             </small>
           </label>
           <label>
             Tipo / modloader
             <select bind:value={setup.loader}>
-              <option value="vanilla">Vanilla — server.jar oficial</option>
-              <option value="fabric">Fabric — mods</option>
-              <option value="paper">Paper — plugins</option>
-              <option value="purpur">Purpur — plugins</option>
+              <option value="vanilla">Vanilla — servidor oficial (recomendado para iniciantes)</option>
+              <option value="fabric">Fabric — para usar mods</option>
+              <option value="paper">Paper — para usar plugins (melhor desempenho)</option>
+              <option value="purpur">Purpur — plugins + customizações</option>
             </select>
+            <small class="selected-version">
+              Se não for usar mods ou plugins, escolha Vanilla.
+            </small>
           </label>
           <label>Memória inicial (GB)
             <input type="number" min="1" max="64" bind:value={setup.memory_limit_gb}/>
@@ -755,7 +766,12 @@
         <button class="primary"
           on:click={createServer}
           disabled={loading || !setupVersion}>
-          {loading?'INSTALANDO...':'INSTALAR E ABRIR PAINEL'} <span>→</span>
+          {#if loading}
+            <span class="spinner" style="width: 14px; height: 14px; border-width: 2px; margin-right: 8px;"></span>
+            BAIXANDO ARQUIVOS...
+          {:else}
+            INSTALAR E ABRIR PAINEL <span>→</span>
+          {/if}
         </button>
       </section>
     {/if}
