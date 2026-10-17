@@ -107,7 +107,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_title("ShadowPainel — Minecraft Server Control")
         .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 900.0))
         .build(&event_loop)?;
-    let _webview = WebViewBuilder::new().with_url(&url).build(&window)?;
+    // Carregamos uma tela mínima primeiro e navegamos para o núcleo depois
+    // que a janela já existe. Isso evita uma corrida do WebKitGTK em algumas
+    // sessões Wayland/XWayland, que antes deixava a janela completamente vazia.
+    let loading_page = format!(
+        r#"<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>ShadowPainel</title><style>html,body{{margin:0;width:100%;height:100%;background:#080a10;color:#b9a9ff;font:16px sans-serif;display:grid;place-items:center}}main{{text-align:center}}small{{display:block;margin-top:10px;color:#79809a;font-size:12px}}</style></head><body><main><strong>ShadowPainel</strong><small>Carregando painel local…</small></main></body></html>"#
+    );
+    let webview = WebViewBuilder::new()
+        .with_html(&loading_page)
+        .build(&window)?;
+    webview.load_url(&url)?;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
