@@ -560,7 +560,7 @@
       </section>
 
       {#if catalogOpen}
-        <div class="modal-overlay" on:click|self={()=>{catalogOpen=false;catalogDetail=null;}}>
+        <div class="modal-overlay" role="presentation" on:click|self={()=>{catalogOpen=false;catalogDetail=null;}} on:keydown={(e)=>e.key==='Escape'&&(catalogOpen=false,catalogDetail=null)}>
           <div class="modal catalog-modal">
             <div class="modal-head">
               <div>
@@ -761,7 +761,7 @@
     {/if}
 
     {#if deleteOpen}
-      <div class="modal-overlay" on:click|self={closeDelete}>
+      <div class="modal-overlay" role="presentation" on:click|self={closeDelete} on:keydown={(e)=>e.key==='Escape'&&closeDelete()}>
         <div class="modal danger-modal">
           <div class="modal-head">
             <div>

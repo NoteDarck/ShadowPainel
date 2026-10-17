@@ -21,7 +21,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-const APP_VERSION: &str = "0.7.0";
+const APP_VERSION: &str = "0.7.1";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -238,7 +238,7 @@ struct View {
     server_dir: String,
     java_path: String,
     java_detected: bool,
-    installed: bool,          // NOVO
+    installed: bool, // NOVO
     e4all: E4allConfig,
     logs: Vec<LogLine>,
 }
@@ -258,8 +258,8 @@ fn view(i: &mut Inner) -> View {
         }
     }
     let dir = expand(&i.cfg.server_dir);
-    let installed = dir.join("server.jar").is_file()
-        || dir.join("fabric-server-launch.jar").is_file();
+    let installed =
+        dir.join("server.jar").is_file() || dir.join("fabric-server-launch.jar").is_file();
     let uptime_seconds = i
         .started
         .map(|s| (Utc::now() - s).num_seconds().max(0) as u64)
@@ -278,7 +278,7 @@ fn view(i: &mut Inner) -> View {
         server_dir: i.cfg.server_dir.clone(),
         java_path: i.cfg.java_path.clone(),
         java_detected: i.java_detected,
-        installed,            // NOVO
+        installed, // NOVO
         e4all: i.cfg.e4all.clone(),
         logs: i.logs.iter().cloned().collect(),
     }
