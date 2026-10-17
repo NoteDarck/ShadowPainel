@@ -47,7 +47,6 @@ fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
             &format!("../../../backend/target/release/shadowpainel{suffix}"),
         ],
     ))?;
-    eprintln!("[desktop] backend encontrado em: {}", core.display());
 
     let frontend = find_file(candidates(
         exe_dir,
@@ -58,8 +57,6 @@ fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
             "../../../frontend/dist/index.html",
         ],
     ))?;
-    eprintln!("[desktop] frontend encontrado em: {}", frontend.display());
-
     let frontend_dir = frontend
         .parent()
         .ok_or_else(|| io::Error::other("pasta do frontend inválida"))?;
@@ -81,8 +78,7 @@ fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
 
-    // Tenta por até 10 segundos (100 x 100ms)
-    for attempt in 0..100 {
+    for _ in 0..100 {
         line.clear();
         let n = reader.read_line(&mut line)?;
         if n == 0 {
@@ -91,37 +87,21 @@ fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
         }
 
         let trimmed = line.trim();
-        eprintln!("[desktop] backend disse: {trimmed}");
-
         if let Some(value) = trimmed.strip_prefix("ShadowPainel disponível em ") {
-            // O backend imprime "http://127.0.0.1:PORTA" (com http:// já incluso)
-            // ou "127.0.0.1:PORTA". Normaliza os dois casos.
             let address = value.trim();
             let url = if address.starts_with("http://") || address.starts_with("https://") {
                 address.to_string()
             } else {
                 format!("http://{address}")
             };
-
-            // Validação rígida: precisa ter host e porta
             if url.contains("://") && url.contains(':') && !url.ends_with(':') {
-                eprintln!("[desktop] URL final: {url}");
                 return Ok((child, url));
-            } else {
-                eprintln!("[desktop] AVISO: endereço inválido recebido: {address:?}");
             }
-        }
-
-        if attempt == 99 {
-            break;
         }
     }
 
     let _ = child.kill();
-    Err(io::Error::other(
-        "o núcleo não informou uma porta disponível (veja as linhas [desktop] acima)",
-    )
-    .into())
+    Err(io::Error::other("o núcleo não informou uma porta disponível").into())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -129,16 +109,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         .parent()
         .ok_or_else(|| io::Error::other("diretório do aplicativo inválido"))?
         .to_path_buf();
-    eprintln!("[desktop] diretório do executável: {}", exe_dir.display());
 
     let (mut core, url) = start_core(&exe_dir)?;
-    eprintln!("[desktop] carregando URL na janela: {url}");
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("ShadowPainel — Minecraft Server Control")
         .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 900.0))
         .build(&event_loop)?;
+
+    // Abre em tela cheia
+    window.set_maximized(true);
 
     let builder = WebViewBuilder::new().with_url(&url);
 
