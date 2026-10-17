@@ -886,6 +886,601 @@ async fn install_fabric(State(app): State<AppState>) -> Result<Json<Value>, ApiE
     Ok(Json(json!({ "ok": true })))
 }
 
+// ───────────────────────── Instalação e conteúdo ─────────────────────────
+
+#[derive(Serialize)]
+struct MinecraftVersion {
+    id: String,
+    kind: String,
+    release_time: String,
+}
+
+async fn minecraft_versions() -> Result<Json<Value>, ApiErr> {
+    let client = reqwest::Client::new();
+    let manifest: Value = client
+        .get("https://launchermeta.mojang.com/mc/game/version_manifest.json")
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Falha ao consultar versões: {e}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Mojang retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Manifesto de versões inválido: {e}"),
+            )
+        })?;
+    let versions: Vec<MinecraftVersion> = manifest["versions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            Some(MinecraftVersion {
+                id: v["id"].as_str()?.to_string(),
+                kind: v["type"].as_str().unwrap_or("release").to_string(),
+                release_time: v["releaseTime"].as_str().unwrap_or("").to_string(),
+            })
+        })
+        .collect();
+    Ok(Json(
+        json!({"latest": manifest["latest"], "versions": versions}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct CreateServerRequest {
+    server_name: String,
+    version: String,
+    loader: String,
+    server_dir: String,
+    memory_limit_gb: u64,
+}
+
+fn valid_loader(loader: &str) -> bool {
+    matches!(loader, "vanilla" | "fabric" | "paper" | "purpur")
+}
+
+async fn download_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, ApiErr> {
+    client
+        .get(url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Falha no download: {e}")))?
+        .error_for_status()
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Falha ao ler download: {e}"),
+            )
+        })
+}
+
+async fn create_server(
+    State(app): State<AppState>,
+    Json(req): Json<CreateServerRequest>,
+) -> ApiResult {
+    if req.server_name.trim().is_empty()
+        || req.version.trim().is_empty()
+        || req.server_dir.trim().is_empty()
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Nome, versão e pasta são obrigatórios.",
+        ));
+    }
+    if !valid_loader(&req.loader) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Loader não suportado nesta versão. Use Vanilla, Fabric, Paper ou Purpur.",
+        ));
+    }
+    if !(1..=64).contains(&req.memory_limit_gb) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Memória deve ficar entre 1 e 64 GB.",
+        ));
+    }
+    let dir = expand(&req.server_dir);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao criar pasta: {e}"),
+        )
+    })?;
+    let client = reqwest::Client::new();
+    let jar_path = dir.join("server.jar");
+    if jar_path.exists() || dir.join("fabric-server-launch.jar").exists() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Esta pasta já possui uma instalação de servidor.",
+        ));
+    }
+
+    match req.loader.as_str() {
+        "vanilla" => {
+            let manifest: Value = client
+                .get("https://launchermeta.mojang.com/mc/game/version_manifest.json")
+                .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+                .send()
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Falha ao consultar Mojang: {e}"),
+                    )
+                })?
+                .error_for_status()
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Mojang retornou erro: {e}"),
+                    )
+                })?
+                .json()
+                .await
+                .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Manifesto inválido: {e}")))?;
+            let metadata_url = manifest["versions"]
+                .as_array()
+                .and_then(|list| list.iter().find(|v| v["id"] == req.version))
+                .and_then(|v| v["url"].as_str())
+                .ok_or_else(|| err(StatusCode::NOT_FOUND, "Versão Minecraft não encontrada."))?;
+            let metadata: Value = client
+                .get(metadata_url)
+                .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+                .send()
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Falha ao consultar versão: {e}"),
+                    )
+                })?
+                .error_for_status()
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Mojang retornou erro: {e}"),
+                    )
+                })?
+                .json()
+                .await
+                .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Metadados inválidos: {e}")))?;
+            let url = metadata["downloads"]["server"]["url"]
+                .as_str()
+                .ok_or_else(|| {
+                    err(
+                        StatusCode::NOT_FOUND,
+                        "Esta versão não oferece server.jar oficial.",
+                    )
+                })?;
+            tokio::fs::write(&jar_path, download_bytes(&client, url).await?)
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Falha ao salvar server.jar: {e}"),
+                    )
+                })?;
+        }
+        "fabric" => {
+            let loaders: Vec<Value> = client
+                .get(format!(
+                    "https://meta.fabricmc.net/v2/versions/loader/{}",
+                    req.version
+                ))
+                .send()
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Falha ao consultar Fabric: {e}"),
+                    )
+                })?
+                .error_for_status()
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Fabric retornou erro: {e}"),
+                    )
+                })?
+                .json()
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Resposta Fabric inválida: {e}"),
+                    )
+                })?;
+            let loader = loaders
+                .first()
+                .and_then(|v| v["loader"]["version"].as_str())
+                .ok_or_else(|| {
+                    err(
+                        StatusCode::NOT_FOUND,
+                        "Fabric não possui loader para esta versão.",
+                    )
+                })?;
+            let installer: Vec<Value> = client
+                .get("https://meta.fabricmc.net/v2/versions/installer")
+                .send()
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Falha ao consultar instalador Fabric: {e}"),
+                    )
+                })?
+                .error_for_status()
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Fabric retornou erro: {e}"),
+                    )
+                })?
+                .json()
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Instalador Fabric inválido: {e}"),
+                    )
+                })?;
+            let installer_version = installer
+                .first()
+                .and_then(|v| v["version"].as_str())
+                .ok_or_else(|| err(StatusCode::NOT_FOUND, "Instalador Fabric não encontrado."))?;
+            let url = format!("https://meta.fabricmc.net/v2/versions/loader/{}/{loader}/{installer_version}/server/jar", req.version);
+            tokio::fs::write(
+                &dir.join("fabric-server-launch.jar"),
+                download_bytes(&client, &url).await?,
+            )
+            .await
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Falha ao salvar servidor Fabric: {e}"),
+                )
+            })?;
+        }
+        "paper" | "purpur" => {
+            let url = if req.loader == "paper" {
+                let builds: Value = client
+                    .get(format!(
+                        "https://api.papermc.io/v2/projects/paper/versions/{}",
+                        req.version
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        err(
+                            StatusCode::BAD_GATEWAY,
+                            format!("Falha ao consultar Paper: {e}"),
+                        )
+                    })?
+                    .error_for_status()
+                    .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Paper retornou erro: {e}")))?
+                    .json()
+                    .await
+                    .map_err(|e| {
+                        err(
+                            StatusCode::BAD_GATEWAY,
+                            format!("Resposta Paper inválida: {e}"),
+                        )
+                    })?;
+                let build = builds["builds"]
+                    .as_array()
+                    .and_then(|b| b.last())
+                    .and_then(|b| b.as_i64())
+                    .ok_or_else(|| err(StatusCode::NOT_FOUND, "Build Paper não encontrada."))?;
+                format!("https://api.papermc.io/v2/projects/paper/versions/{}/builds/{}/downloads/paper-{}-{}.jar", req.version, build, req.version, build)
+            } else {
+                let builds: Value = client
+                    .get(format!(
+                        "https://api.purpurmc.org/v2/purpur/{}",
+                        req.version
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        err(
+                            StatusCode::BAD_GATEWAY,
+                            format!("Falha ao consultar Purpur: {e}"),
+                        )
+                    })?
+                    .error_for_status()
+                    .map_err(|e| {
+                        err(
+                            StatusCode::BAD_GATEWAY,
+                            format!("Purpur retornou erro: {e}"),
+                        )
+                    })?
+                    .json()
+                    .await
+                    .map_err(|e| {
+                        err(
+                            StatusCode::BAD_GATEWAY,
+                            format!("Resposta Purpur inválida: {e}"),
+                        )
+                    })?;
+                let build = builds["builds"]
+                    .as_array()
+                    .and_then(|b| b.last())
+                    .and_then(|b| b.as_str())
+                    .ok_or_else(|| err(StatusCode::NOT_FOUND, "Build Purpur não encontrada."))?;
+                format!(
+                    "https://api.purpurmc.org/v2/purpur/{}/{}/download",
+                    req.version, build
+                )
+            };
+            tokio::fs::write(&jar_path, download_bytes(&client, &url).await?)
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Falha ao salvar servidor: {e}"),
+                    )
+                })?;
+        }
+        _ => unreachable!(),
+    }
+    let mut i = app.0.lock().await;
+    i.cfg.server_name = req.server_name.trim().into();
+    i.cfg.version = req.version.trim().into();
+    i.cfg.server_dir = req.server_dir.trim().into();
+    i.cfg.memory_limit_gb = req.memory_limit_gb;
+    i.persist().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar configuração: {e}"),
+        )
+    })?;
+    i.push(
+        format!("Servidor {} {} instalado.", req.loader, req.version),
+        "success",
+    );
+    Ok(Json(view(&mut i)))
+}
+
+#[derive(Deserialize)]
+struct ContentQuery {
+    kind: Option<String>,
+}
+
+fn content_dir(base: &std::path::Path, kind: &str) -> Option<PathBuf> {
+    match kind {
+        "mods" | "plugins" | "datapacks" => Some(base.join(kind)),
+        _ => None,
+    }
+}
+
+#[derive(Serialize)]
+struct ContentItem {
+    filename: String,
+    size: u64,
+    kind: String,
+}
+
+async fn list_content(
+    State(app): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ContentQuery>,
+) -> Result<Json<Value>, ApiErr> {
+    let kind = query.kind.unwrap_or_else(|| "mods".into());
+    let i = app.0.lock().await;
+    let base = expand(&i.cfg.server_dir);
+    let dir = content_dir(&base, &kind)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
+    drop(i);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha na pasta: {e}"),
+        )
+    })?;
+    let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao listar conteúdo: {e}"),
+        )
+    })?;
+    let mut items = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao ler conteúdo: {e}"),
+        )
+    })? {
+        let metadata = entry.metadata().await.ok();
+        if metadata.as_ref().is_some_and(|m| m.is_file()) {
+            items.push(ContentItem {
+                filename: entry.file_name().to_string_lossy().into_owned(),
+                size: metadata.unwrap().len(),
+                kind: kind.clone(),
+            });
+        }
+    }
+    items.sort_by_key(|a| a.filename.to_lowercase());
+    Ok(Json(json!({"items": items})))
+}
+
+#[derive(Deserialize)]
+struct ContentDeleteRequest {
+    kind: String,
+    filename: String,
+}
+
+async fn delete_content(
+    State(app): State<AppState>,
+    Json(req): Json<ContentDeleteRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let filename = std::path::Path::new(&req.filename)
+        .file_name()
+        .and_then(|x| x.to_str())
+        .filter(|x| *x == req.filename && !x.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de arquivo inválido."))?;
+    let i = app.0.lock().await;
+    let dir = content_dir(&expand(&i.cfg.server_dir), &req.kind)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
+    drop(i);
+    tokio::fs::remove_file(dir.join(filename))
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("Não foi possível excluir: {e}"),
+            )
+        })?;
+    Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct ContentSearchRequest {
+    query: String,
+    kind: String,
+    loader: String,
+    version: String,
+}
+
+async fn search_content(Json(req): Json<ContentSearchRequest>) -> Result<Json<Value>, ApiErr> {
+    let _loader = req.loader;
+    let project_type = match req.kind.as_str() {
+        "plugins" => "plugin",
+        "datapacks" => "datapack",
+        _ => "mod",
+    };
+    let facets = format!(
+        r#"[["project_type:{}"],["versions:{}"]]"#,
+        project_type, req.version
+    );
+    let url = format!(
+        "https://api.modrinth.com/v2/search?query={}&facets={}&limit=12",
+        urlencoding::encode(&req.query),
+        urlencoding::encode(&facets)
+    );
+    let data: Value = reqwest::Client::new()
+        .get(url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Falha na busca: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Modrinth retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
+    Ok(Json(data))
+}
+
+#[derive(Deserialize)]
+struct ContentInstallRequest {
+    project_id: String,
+    kind: String,
+    loader: String,
+    version: String,
+}
+
+async fn install_content(
+    State(app): State<AppState>,
+    Json(req): Json<ContentInstallRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let i = app.0.lock().await;
+    let base = expand(&i.cfg.server_dir);
+    let dir = content_dir(&base, &req.kind)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
+    drop(i);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha na pasta: {e}"),
+        )
+    })?;
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
+        urlencoding::encode(&req.project_id),
+        urlencoding::encode(&req.loader),
+        urlencoding::encode(&req.version)
+    );
+    let versions: Vec<Value> = client
+        .get(url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Falha ao consultar projeto: {e}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Modrinth retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
+    let file = versions
+        .first()
+        .and_then(|v| v["files"].as_array())
+        .and_then(|files| {
+            files
+                .iter()
+                .find(|f| f["primary"].as_bool().unwrap_or(false))
+                .or_else(|| files.first())
+        })
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "Nenhum arquivo compatível encontrado.",
+            )
+        })?;
+    let filename = file["filename"]
+        .as_str()
+        .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Nome de arquivo ausente."))?;
+    let safe = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|x| x.to_str())
+        .filter(|x| *x == filename)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de arquivo inválido."))?;
+    let download = file["url"]
+        .as_str()
+        .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "URL de download ausente."))?;
+    tokio::fs::write(dir.join(safe), download_bytes(&client, download).await?)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao salvar conteúdo: {e}"),
+            )
+        })?;
+    Ok(Json(json!({"ok": true, "filename": safe})))
+}
+
 // ───────────────────────── Infra ─────────────────────────
 
 async fn host_guard(req: Request, next: Next) -> Response {
@@ -995,6 +1590,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/server/download", post(download_server))
         .route("/api/server/eula", post(accept_eula))
         .route("/api/server/install-fabric", post(install_fabric))
+        .route("/api/minecraft/versions", get(minecraft_versions))
+        .route("/api/server/create", post(create_server))
+        .route("/api/content", get(list_content))
+        .route("/api/content/delete", post(delete_content))
+        .route("/api/content/search", post(search_content))
+        .route("/api/content/install", post(install_content))
         .route("/api/mods/search", post(search_mods))
         .route("/api/mods/install", post(install_mod))
         .route("/api/config", post(save_config))
