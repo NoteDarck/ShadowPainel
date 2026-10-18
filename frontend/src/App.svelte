@@ -49,6 +49,7 @@
     server_name:string; version:string; server_dir:string; java_path:string;
     java_detected:boolean; installed:boolean; e4all:E4all; logs:Log[];
   };
+  type ServerSummary = { server_name:string; version:string; server_dir:string; installed:boolean; active:boolean; status:string };
 
   // ── Estado principal ──
   let server:Server = {
@@ -65,6 +66,8 @@
     logs:[]
   };
   let versions:Version[] = [];
+  let serverProfiles:ServerSummary[] = [];
+  let switchingServer = false;
   let activeTab:'overview'|'content'|'config'|'setup' = 'overview';
 
   // ── Aba de conteúdo ──
@@ -170,6 +173,33 @@
     }
   }
 
+  async function loadServers() {
+    try {
+      const data = await api<{servers:ServerSummary[]}>('/servers');
+      serverProfiles = data.servers || [];
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Não foi possível carregar os servidores.';
+    }
+  }
+
+  async function switchServer(server_dir:string) {
+    if (!server_dir || server_dir === server.server_dir) return;
+    switchingServer = true;
+    try {
+      server = await api<Server>('/servers/switch', json({server_dir}));
+      contentVersion = server.version || contentVersion;
+      contentLoader = server.e4all?.loader || contentLoader;
+      activeTab = server.installed ? 'overview' : 'setup';
+      notice = `Servidor ativo: ${server.server_name}.`;
+      await loadServers();
+      await loadContent();
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Não foi possível trocar de servidor.';
+      await loadServers();
+    }
+    switchingServer = false;
+  }
+
   async function loadVersions() {
     try {
       const data = await api<{versions:Version[]}>('/minecraft/versions');
@@ -210,6 +240,7 @@
       activeTab = 'overview';
       notice = 'Servidor instalado. Aceite a EULA antes de iniciar.';
       await loadContent();
+      await loadServers();
     } catch(e) {
       notice = e instanceof Error ? e.message : 'Falha na instalação.';
     }
@@ -453,6 +484,7 @@
       deleteOpen = false;
       activeTab = 'setup';
       notice = 'Servidor excluído. Crie uma nova instalação.';
+      await loadServers();
     } catch (e) {
       notice = e instanceof Error ? e.message : 'Falha ao excluir servidor.';
     }
@@ -478,8 +510,9 @@
 
   onMount(() => {
     refresh();
+    loadServers();
     loadVersions();
-    const timer = setInterval(refresh, 3000);
+    const timer = setInterval(() => { refresh(); loadServers(); }, 3000);
     return ()=>clearInterval(timer);
   });
 </script>
@@ -492,11 +525,17 @@
     </div>
     <div class="workspace">
       <div class="server-avatar">☾</div>
-      <div>
-        <b>{server.server_name}</b>
-        <small>{server.installed ? (server.version || 'INSTALADO') : 'SEM SERVIDOR'}</small>
+      <div class="workspace-picker">
+        <small class="workspace-caption">SERVIDOR ATIVO</small>
+        <select aria-label="Selecionar servidor" value={server.server_dir} disabled={switchingServer || server.status !== 'offline'} on:change={(e)=>switchServer((e.currentTarget as HTMLSelectElement).value)}>
+          {#if serverProfiles.length === 0}<option value={server.server_dir}>{server.server_name}</option>{/if}
+          {#each serverProfiles as profile}
+            <option value={profile.server_dir}>{profile.server_name} · {profile.version || 'sem versão'}{profile.status === 'online' ? ' · online' : ''}</option>
+          {/each}
+        </select>
+        <small>{serverProfiles.length} servidor(es) cadastrado(s)</small>
       </div>
-      <button class="dots">•••</button>
+      <button class="dots" title="Atualizar lista" on:click={loadServers}>↻</button>
     </div>
     <nav>
       <div class="nav-label">SERVIDOR</div>

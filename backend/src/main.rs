@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
     time::Duration,
@@ -141,6 +141,34 @@ async fn load_config(path: &PathBuf) -> Config {
     }
 }
 
+fn profiles_path(cfg_path: &Path) -> PathBuf {
+    cfg_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("servers.json")
+}
+
+async fn load_profiles(cfg_path: &Path, current: &Config) -> Vec<Config> {
+    let path = profiles_path(cfg_path);
+    if let Ok(data) = tokio::fs::read_to_string(path).await {
+        if let Ok(items) = serde_json::from_str::<Vec<Config>>(&data) {
+            if !items.is_empty() {
+                return items;
+            }
+        }
+    }
+    let current_dir = expand(&current.server_dir);
+    if current_dir.join("server.jar").is_file()
+        || current_dir.join("fabric-server-launch.jar").is_file()
+        || current_dir.join("server.properties").is_file()
+        || current_dir.join("eula.txt").is_file()
+    {
+        vec![current.clone()]
+    } else {
+        Vec::new()
+    }
+}
+
 async fn detect_java(path: &str) -> bool {
     Command::new(path)
         .arg("-version")
@@ -171,6 +199,7 @@ struct LogLine {
 
 struct Inner {
     cfg: Config,
+    profiles: Vec<Config>,
     cfg_path: PathBuf,
     java_detected: bool,
     status: Status,
@@ -184,9 +213,10 @@ struct Inner {
 }
 
 impl Inner {
-    fn new(cfg: Config, cfg_path: PathBuf, java_detected: bool) -> Self {
+    fn new(cfg: Config, profiles: Vec<Config>, cfg_path: PathBuf, java_detected: bool) -> Self {
         let mut s = Self {
             cfg,
+            profiles,
             cfg_path,
             java_detected,
             status: Status::Offline,
@@ -213,14 +243,34 @@ impl Inner {
         });
     }
 
-    async fn persist(&self) -> std::io::Result<()> {
+    async fn persist(&mut self) -> std::io::Result<()> {
         if let Some(parent) = self.cfg_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
+        }
+        let current_dir = self.cfg.server_dir.clone();
+        if let Some(existing) = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.server_dir == current_dir)
+        {
+            *existing = self.cfg.clone();
+        } else if self.cfg.server_name != Config::default().server_name
+            || expand(&self.cfg.server_dir).join("server.jar").is_file()
+            || expand(&self.cfg.server_dir)
+                .join("fabric-server-launch.jar")
+                .is_file()
+        {
+            self.profiles.push(self.cfg.clone());
         }
         let data = serde_json::to_vec_pretty(&self.cfg).map_err(std::io::Error::other)?;
         let temp = self.cfg_path.with_extension("json.tmp");
         tokio::fs::write(&temp, data).await?;
-        tokio::fs::rename(temp, &self.cfg_path).await
+        tokio::fs::rename(temp, &self.cfg_path).await?;
+        let profiles = serde_json::to_vec_pretty(&self.profiles).map_err(std::io::Error::other)?;
+        let path = profiles_path(&self.cfg_path);
+        let profiles_temp = path.with_extension("json.tmp");
+        tokio::fs::write(&profiles_temp, profiles).await?;
+        tokio::fs::rename(profiles_temp, path).await
     }
 }
 
@@ -346,6 +396,96 @@ async fn send_line(i: &mut Inner, line: &str) -> bool {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+#[derive(Serialize)]
+struct ServerSummary {
+    server_name: String,
+    version: String,
+    server_dir: String,
+    installed: bool,
+    active: bool,
+    status: Status,
+}
+
+fn summary(profile: &Config, active_dir: &str, active_status: Status) -> ServerSummary {
+    let dir = expand(&profile.server_dir);
+    ServerSummary {
+        server_name: profile.server_name.clone(),
+        version: profile.version.clone(),
+        server_dir: profile.server_dir.clone(),
+        installed: dir.join("server.jar").is_file()
+            || dir.join("fabric-server-launch.jar").is_file()
+            || dir.join("server.properties").is_file(),
+        active: profile.server_dir == active_dir,
+        status: if profile.server_dir == active_dir {
+            active_status
+        } else {
+            Status::Offline
+        },
+    }
+}
+
+async fn servers(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    let i = app.0.lock().await;
+    let active_dir = i.cfg.server_dir.clone();
+    let active_status = i.status;
+    let items: Vec<ServerSummary> = i
+        .profiles
+        .iter()
+        .map(|profile| summary(profile, &active_dir, active_status))
+        .collect();
+    Ok(Json(json!({"servers": items})))
+}
+
+#[derive(Deserialize)]
+struct SwitchServerRequest {
+    server_dir: String,
+}
+
+async fn switch_server(
+    State(app): State<AppState>,
+    Json(req): Json<SwitchServerRequest>,
+) -> ApiResult {
+    let selected = {
+        let i = app.0.lock().await;
+        if i.status != Status::Offline {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Pare o servidor atual antes de trocar de servidor.",
+            ));
+        }
+        i.profiles
+            .iter()
+            .find(|profile| profile.server_dir == req.server_dir)
+            .cloned()
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "Servidor não encontrado."))?
+    };
+    let java_detected = detect_java(&selected.java_path).await;
+    let mut i = app.0.lock().await;
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor atual antes de trocar de servidor.",
+        ));
+    }
+    i.cfg = selected;
+    i.java_detected = java_detected;
+    i.logs.clear();
+    i.players = 0;
+    i.started = None;
+    i.pid = None;
+    i.stdin = None;
+    i.kill_tx = None;
+    let active_name = i.cfg.server_name.clone();
+    i.push(format!("Servidor ativo: {active_name}"), "success");
+    i.persist().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao trocar de servidor: {e}"),
+        )
+    })?;
+    Ok(Json(view(&mut i)))
 }
 
 async fn state(State(app): State<AppState>) -> Json<View> {
@@ -743,6 +883,9 @@ async fn delete_server(
         })?;
     }
 
+    let deleted_dir = i.cfg.server_dir.clone();
+    i.profiles
+        .retain(|profile| profile.server_dir != deleted_dir);
     i.cfg = Config::default();
     i.status = Status::Offline;
     i.players = 0;
@@ -1987,9 +2130,11 @@ async fn shutdown_server(app: &AppState) {
 async fn main() -> anyhow::Result<()> {
     let cfg_path = config_path();
     let cfg = load_config(&cfg_path).await;
+    let profiles = load_profiles(&cfg_path, &cfg).await;
     let java_detected = detect_java(&cfg.java_path).await;
     let app_state = AppState(Arc::new(Mutex::new(Inner::new(
         cfg,
+        profiles,
         cfg_path,
         java_detected,
     ))));
@@ -2018,6 +2163,8 @@ async fn main() -> anyhow::Result<()> {
     let api = Router::new()
         .route("/api/health", get(health))
         .route("/api/state", get(state))
+        .route("/api/servers", get(servers))
+        .route("/api/servers/switch", post(switch_server))
         .route("/api/server/start", post(start))
         .route("/api/server/stop", post(stop))
         .route("/api/server/delete", post(delete_server))

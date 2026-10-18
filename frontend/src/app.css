@@ -696,3 +696,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   }
 }
 .prop-label { display:block; font-family:'DM Mono'; font-size:11px; color:var(--muted); }
+
+.workspace-picker { min-width:0; display:flex; flex:1; flex-direction:column; gap:3px; }
+.workspace-caption { color:var(--faint); font:9px 'DM Mono'; letter-spacing:.08em; }
+.workspace-picker select { width:100%; min-width:0; border:0; padding:0; background:transparent; color:var(--text); font:600 12px 'Inter'; outline:none; cursor:pointer; text-overflow:ellipsis; }
+.workspace-picker select:disabled { opacity:.75; cursor:not-allowed; }
+.workspace-picker > small:last-child { color:var(--faint); font-size:9px; }
