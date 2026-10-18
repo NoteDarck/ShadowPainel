@@ -26,6 +26,8 @@ aplicativo**, sem navegador externo.
 | 🚀 | **Criar o servidor do zero** | Baixe o `server.jar` da versão desejada e aceite a EULA direto pelo painel. |
 | 🧩 | **Instalar mods do Modrinth** | Busque, filtre por versão/loader e instale mods direto na pasta `mods`. |
 | 📦 | **Instalar em lote** | Selecione vários projetos e instale todos de uma vez com um clique. |
+| 🖱️ | **Seleção por duplo clique** | Dê duplo clique no nome de um projeto ou arquivo instalado para selecioná-lo; o item fica destacado para ações em lote. |
+| ♾️ | **Catálogo com scroll infinito** | Ao chegar ao fim da janela de resultados, mais mods, plugins ou datapacks são carregados automaticamente. |
 | 🎯 | **Escolher a versão do mod** | Diferente da versão do Minecraft: escolha a build exata que o servidor vai rodar. |
 | 🔌 | **Plugins e datapacks** | Suporte a Paper, Purpur e datapacks no mesmo catálogo. |
 | 🧵 | **Instalar o Fabric** | Pronto para rodar mods e o e4all. |

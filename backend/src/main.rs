@@ -25,7 +25,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-const APP_VERSION: &str = "0.7.4";
+const APP_VERSION: &str = "0.7.5";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1846,6 +1846,14 @@ struct ContentSearchRequest {
     loader: String,
     version: String,
     category: Option<String>,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_content_limit")]
+    limit: usize,
+}
+
+fn default_content_limit() -> usize {
+    12
 }
 
 async fn search_content(
@@ -1873,10 +1881,13 @@ async fn search_content(
         project_type, req.version, loader_facet, category_facet
     );
 
+    let limit = req.limit.clamp(1, 24);
     let url = format!(
-        "https://api.modrinth.com/v2/search?query={}&facets={}&limit=12",
+        "https://api.modrinth.com/v2/search?query={}&facets={}&limit={}&offset={}",
         urlencoding::encode(&req.query),
-        urlencoding::encode(&facets)
+        urlencoding::encode(&facets),
+        limit,
+        req.offset
     );
 
     let mut data: Value = reqwest::Client::new()

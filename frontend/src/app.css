@@ -327,6 +327,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   transition: border-color 0.2s;
 }
 .installed-card:hover { border-color: var(--accent); }
+.installed-card.selected { border-color: var(--accent-2); background:rgba(141,93,255,.14); box-shadow:0 0 0 1px rgba(141,93,255,.25); }
+.catalog-sentinel { padding:12px; text-align:center; color:var(--muted); font:11px 'DM Mono'; }
 .installed-meta { flex:1; min-width:0; }
 .installed-meta b { display:block; color:#fff; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .installed-meta small { display:block; color:var(--muted); font-size:11px; margin-top:3px; }

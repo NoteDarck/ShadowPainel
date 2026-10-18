@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
-  const APP_VERSION = '0.7.4';
+  const APP_VERSION = '0.7.5';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -111,6 +111,11 @@
   let catalogQuery = '';
   let catalogCategory = 'all';
   let showCatalogFilters = false;
+  let catalogOffset = 0;
+  let catalogHasMore = true;
+  let catalogLoadingMore = false;
+  let catalogSentinel:HTMLDivElement;
+  let catalogObserver:IntersectionObserver | undefined;
 
   // ── Seleção múltipla no catálogo e versão ──
   let catalogSelected: Set<string> = new Set();
@@ -416,10 +421,14 @@
     catalogDetail = null;
     catalogSelected.clear();
     selectedModVersions = {};
+    catalogOffset = 0;
+    catalogHasMore = true;
     await runCatalogSearch();
   }
-  async function runCatalogSearch() {
-    catalogLoading = true;
+  async function runCatalogSearch(loadMore = false) {
+    if (catalogLoading || catalogLoadingMore || (loadMore && !catalogHasMore)) return;
+    if (loadMore) catalogLoadingMore = true;
+    else { catalogLoading = true; catalogOffset = 0; catalogHasMore = true; }
     catalogError = '';
     try {
       const version = contentVersion || server.version;
@@ -428,13 +437,28 @@
         kind: contentKind,
         loader: contentLoader,
         version,
-        category: catalogCategory
+        category: catalogCategory,
+        offset: catalogOffset,
+        limit: 12
       }));
-      results = data.hits || [];
+      const hits = data.hits || [];
+      results = loadMore ? [...results, ...hits] : hits;
+      catalogOffset += hits.length;
+      catalogHasMore = hits.length === 12;
     } catch (e) {
       catalogError = e instanceof Error ? e.message : 'Falha na busca.';
     }
     catalogLoading = false;
+    catalogLoadingMore = false;
+  }
+  function observeCatalog(node:HTMLDivElement) {
+    catalogSentinel = node;
+    catalogObserver?.disconnect();
+    catalogObserver = new IntersectionObserver(entries => {
+      if (entries[0]?.isIntersecting) runCatalogSearch(true);
+    }, {rootMargin:'260px'});
+    catalogObserver.observe(node);
+    return { destroy() { catalogObserver?.disconnect(); } };
   }
   function pickCategory(kind:'mods'|'plugins'|'datapacks') {
     contentKind = kind;
@@ -462,6 +486,14 @@
 
   function isInstalled(projectId: string) {
     return results.some(item => item.project_id === projectId && item.installed === true);
+  }
+
+  async function toggleCatalogSelection(item: ContentResult) {
+    if (isInstalled(item.project_id)) return;
+    if (!selectedModVersions[item.project_id]) await loadModVersions(item.project_id);
+    if (catalogSelected.has(item.project_id)) catalogSelected.delete(item.project_id);
+    else catalogSelected.add(item.project_id);
+    catalogSelected = catalogSelected;
   }
 
   // ── Exclusão do servidor ──
@@ -513,7 +545,7 @@
     loadServers();
     loadVersions();
     const timer = setInterval(() => { refresh(); loadServers(); }, 3000);
-    return ()=>clearInterval(timer);
+    return ()=>{ clearInterval(timer); catalogObserver?.disconnect(); };
   });
 </script>
 
@@ -769,7 +801,12 @@
         {:else}
           <div class="installed-grid">
             {#each content as file}
-              <div class="installed-card">
+              <div class="installed-card"
+                   class:selected={selectedItems.has(file.filename)}
+                   role="button" tabindex="0"
+                   title="Duplo clique para selecionar"
+                   on:dblclick={() => toggleSelection(file.filename)}
+                   on:keydown={(event) => (event.key === 'Enter' || event.key === ' ') && toggleSelection(file.filename)}>
                 <input type="checkbox" class="item-checkbox"
                        checked={selectedItems.has(file.filename)}
                        on:change={() => toggleSelection(file.filename)} />
@@ -822,7 +859,7 @@
                 <button class="secondary" on:click={() => showCatalogFilters = !showCatalogFilters} title="Filtros Avançados">
                   ⚙ Filtros
                 </button>
-                <button class="primary" on:click={runCatalogSearch}
+                <button class="primary" on:click={() => runCatalogSearch()}
                         disabled={catalogLoading || !contentVersion}>
                   {catalogLoading?'Buscando...':'Buscar'}
                 </button>
@@ -832,7 +869,7 @@
                 <div class="catalog-advanced-filters">
                   <label>
                     Categoria
-                    <select bind:value={catalogCategory} on:change={runCatalogSearch}>
+                    <select bind:value={catalogCategory} on:change={() => runCatalogSearch()}>
                       <option value="all">Todas as categorias</option>
                       <option value="adventure">Aventura</option>
                       <option value="exploration">Exploração</option>
@@ -868,17 +905,13 @@
                        class:disabled={isInstalled(item.project_id)}
                        role="button" tabindex="0"
                        on:click={() => !isInstalled(item.project_id) && (catalogDetail=item, loadModVersions(item.project_id))}
+                       on:dblclick|stopPropagation={() => toggleCatalogSelection(item)}
                        on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&!isInstalled(item.project_id)&&(catalogDetail=item, loadModVersions(item.project_id))}>
 
                     {#if !isInstalled(item.project_id)}
                       <input type="checkbox" class="item-checkbox"
                              checked={catalogSelected.has(item.project_id)}
-                             on:click|stopPropagation={async () => {
-                               if (!selectedModVersions[item.project_id]) await loadModVersions(item.project_id);
-                               if (catalogSelected.has(item.project_id)) catalogSelected.delete(item.project_id);
-                               else catalogSelected.add(item.project_id);
-                               catalogSelected = catalogSelected;
-                             }} />
+                             on:click|stopPropagation={() => toggleCatalogSelection(item)} />
                     {/if}
 
                     <div class="catalog-icon">
@@ -900,6 +933,7 @@
                 {/each}
               </div>
             {/if}
+            {#if catalogHasMore}<div class="catalog-sentinel" use:observeCatalog>{catalogLoadingMore ? 'Carregando mais resultados…' : 'Role para carregar mais'}</div>{/if}
 
             {#if catalogDetail}
               <div class="detail-sheet">
