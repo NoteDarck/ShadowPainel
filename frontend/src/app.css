@@ -19,13 +19,13 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
-body { 
-  background: var(--bg); 
-  color: var(--text); 
-  font-family: 'Inter', sans-serif; 
-  font-size: 14px; 
-  -webkit-font-smoothing: antialiased; 
-  overflow: hidden; 
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
 /* Layout Base */
@@ -81,13 +81,13 @@ header p { color: var(--muted); font-size: 13px; margin-top: 6px; }
 .success-notice { background: rgba(89, 203, 138, 0.1); border-left-color: var(--green); color: var(--green); }
 
 /* HERO SECTION */
-.hero { 
-  margin: 0 40px 24px; 
-  background: linear-gradient(135deg, var(--panel) 0%, #0c0f18 100%); 
-  border: 1px solid var(--border); 
-  border-radius: 16px; 
-  padding: 40px; 
-  position: relative; 
+.hero {
+  margin: 0 40px 24px;
+  background: linear-gradient(135deg, var(--panel) 0%, #0c0f18 100%);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 40px;
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 32px;
@@ -318,12 +318,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .tab-count { display:inline-block; margin-left:6px; background:rgba(141,93,255,.18); color:var(--accent-2); border-radius:10px; padding:1px 8px; font:10px 'DM Mono'; }
 
 .installed-grid { display:flex; flex-direction:column; gap:8px; }
-.installed-card { 
-  display:flex; align-items:center; gap:12px; 
-  padding:12px 14px; 
-  background:var(--panel-2); 
-  border:1px solid var(--border); 
-  border-radius:8px; 
+.installed-card {
+  display:flex; align-items:center; gap:12px;
+  padding:12px 14px;
+  background:var(--panel-2);
+  border:1px solid var(--border);
+  border-radius:8px;
   transition: border-color 0.2s;
 }
 .installed-card:hover { border-color: var(--accent); }
@@ -429,14 +429,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .spinner { width:18px; height:18px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg) } }
 .catalog-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:18px 24px 24px; overflow-y:auto; }
-.catalog-card { 
-  display:flex; align-items:center; gap:12px; 
-  padding:14px; 
-  background:var(--panel-2); 
-  border:1px solid var(--border); 
-  border-radius:10px; 
-  cursor:pointer; 
-  transition:.15s; 
+.catalog-card {
+  display:flex; align-items:center; gap:12px;
+  padding:14px;
+  background:var(--panel-2);
+  border:1px solid var(--border);
+  border-radius:10px;
+  cursor:pointer;
+  transition:.15s;
 }
 .catalog-card:hover { border-color:var(--accent); background:rgba(141,93,255,.06); transform:translateY(-1px); }
 .catalog-card.selected { border-color: var(--accent); background: rgba(141,93,255,.12); box-shadow: 0 0 0 1px var(--accent); }
