@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.7.5';
+  const APP_VERSION = '0.7.6';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -40,6 +40,20 @@
     require_resource_pack: boolean;
     resource_pack: string;
     resource_pack_prompt: string;
+    view_distance: number;
+    simulation_distance: number;
+    pvp: boolean;
+    spawn_monsters: boolean;
+    spawn_animals: boolean;
+    generate_structures: boolean;
+    hardcore: boolean;
+    enable_command_block: boolean;
+    allow_nether: boolean;
+    level_name: string;
+    level_seed: string;
+    level_type: string;
+    server_port: number;
+    icon_exists: boolean;
     timezone: string;
     java_version: string;
   };
@@ -115,7 +129,11 @@
   let catalogHasMore = true;
   let catalogLoadingMore = false;
   let catalogSentinel:HTMLDivElement;
+  let catalogScroll:HTMLDivElement;
   let catalogObserver:IntersectionObserver | undefined;
+  let consoleEl:HTMLDivElement;
+  let consolePinned = true;
+  let iconInput:HTMLInputElement;
 
   // ── Seleção múltipla no catálogo e versão ──
   let catalogSelected: Set<string> = new Set();
@@ -138,11 +156,52 @@
     require_resource_pack: false,
     resource_pack: '',
     resource_pack_prompt: '',
+    view_distance: 10,
+    simulation_distance: 10,
+    pvp: true,
+    spawn_monsters: true,
+    spawn_animals: true,
+    generate_structures: true,
+    hardcore: false,
+    enable_command_block: false,
+    allow_nether: true,
+    level_name: 'world',
+    level_seed: '',
+    level_type: 'minecraft:normal',
+    server_port: 25565,
+    icon_exists: false,
     timezone: 'America/Sao_Paulo',
-    java_version: 'Java 21'
-  };
+    java_version: 'Java 21'   };
   let loadingProps = false;
   let savedProps = false;
+  function handleConsoleScroll() {
+    if (!consoleEl) return;
+    consolePinned = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 48;
+  }
+  afterUpdate(() => {
+    if (consoleEl && consolePinned) consoleEl.scrollTop = consoleEl.scrollHeight;
+  });
+  async function uploadServerIcon(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    if (file.type !== 'image/png') { notice = 'O ícone precisa ser um arquivo PNG.'; return; }
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error('Falha ao ler o ícone.'));
+      reader.readAsDataURL(file);
+    });
+    try {
+      const result = await api<{message?:string}>('/server/icon', json({data_url:dataUrl}));
+      notice = result.message || 'Ícone salvo. Reinicie o servidor para aplicar.';
+      await loadServerProperties();
+    } catch (e) {
+      notice = e instanceof Error ? e.message : 'Falha ao salvar o ícone.';
+    } finally {
+      input.value = '';
+    }
+  }
 
   // ── Helpers de API ──
   const api = async <T=unknown>(path:string, options?:RequestInit):Promise<T> => {
@@ -456,7 +515,7 @@
     catalogObserver?.disconnect();
     catalogObserver = new IntersectionObserver(entries => {
       if (entries[0]?.isIntersecting) runCatalogSearch(true);
-    }, {rootMargin:'260px'});
+    }, {root: catalogScroll, rootMargin:'260px'});
     catalogObserver.observe(node);
     return { destroy() { catalogObserver?.disconnect(); } };
   }
@@ -692,7 +751,7 @@
               <div><h3>Console do servidor</h3><p>Logs em tempo real</p></div>
               <div class="live"><span></span> AO VIVO</div>
             </div>
-            <div class="console">
+            <div class="console" bind:this={consoleEl} on:scroll={handleConsoleScroll}>
               {#each server.logs as log}
                 <div class="log">
                   <span class="time">{log.time}</span>
@@ -897,7 +956,7 @@
                 <br/>Tente outra versão, outro loader, outra categoria ou um termo diferente.
               </div>
             {:else}
-              <div class="catalog-grid">
+              <div class="catalog-grid" bind:this={catalogScroll}>
                 {#each results as item}
                   <div class="catalog-card"
                        class:selected={catalogSelected.has(item.project_id)}
@@ -931,9 +990,9 @@
                     {/if}
                   </div>
                 {/each}
+                {#if catalogHasMore}<div class="catalog-sentinel" use:observeCatalog>{catalogLoadingMore ? 'Carregando mais resultados…' : 'Role para carregar mais'}</div>{/if}
               </div>
             {/if}
-            {#if catalogHasMore}<div class="catalog-sentinel" use:observeCatalog>{catalogLoadingMore ? 'Carregando mais resultados…' : 'Role para carregar mais'}</div>{/if}
 
             {#if catalogDetail}
               <div class="detail-sheet">
@@ -1178,6 +1237,27 @@
           </div>
         </div>
 
+        <div class="settings-subhead"><h4>Mundo, desempenho e rede</h4><p>Essas opções são gravadas no server.properties e normalmente exigem reiniciar o servidor.</p></div>
+        <div class="props-grid">
+          <div class="prop-group"><span class="prop-label">Nome do mundo</span><div class="prop-control"><input bind:value={props.level_name} /></div><small>level-name</small></div>
+          <div class="prop-group"><span class="prop-label">Seed</span><div class="prop-control"><input bind:value={props.level_seed} placeholder="vazio = aleatória" /></div><small>level-seed</small></div>
+          <div class="prop-group"><span class="prop-label">Tipo de mundo</span><div class="prop-control"><select bind:value={props.level_type}><option value="minecraft:normal">Normal</option><option value="minecraft:flat">Plano</option><option value="minecraft:amplified">Amplificado</option><option value="minecraft:large_biomes">Biomas grandes</option></select></div><small>level-type</small></div>
+          <div class="prop-group"><span class="prop-label">Porta do servidor</span><div class="prop-control"><input type="number" min="1" max="65535" bind:value={props.server_port} /></div><small>server-port</small></div>
+          <div class="prop-group"><span class="prop-label">Distância de visão</span><div class="prop-control"><input type="number" min="3" max="32" bind:value={props.view_distance} /></div><small>view-distance</small></div>
+          <div class="prop-group"><span class="prop-label">Distância de simulação</span><div class="prop-control"><input type="number" min="3" max="32" bind:value={props.simulation_distance} /></div><small>simulation-distance</small></div>
+          <div class="prop-group"><span class="prop-label">PvP</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={props.pvp} on:click={() => props.pvp = !props.pvp}>{#if props.pvp}✓{:else}✕{/if}</button></div><small>pvp</small></div>
+          <div class="prop-group"><span class="prop-label">Comandos de bloco</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={props.enable_command_block} on:click={() => props.enable_command_block = !props.enable_command_block}>{#if props.enable_command_block}✓{:else}✕{/if}</button></div><small>enable-command-block</small></div>
+          <div class="prop-group"><span class="prop-label">Monstros</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={props.spawn_monsters} on:click={() => props.spawn_monsters = !props.spawn_monsters}>{#if props.spawn_monsters}✓{:else}✕{/if}</button></div><small>spawn-monsters</small></div>
+          <div class="prop-group"><span class="prop-label">Animais</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={props.spawn_animals} on:click={() => props.spawn_animals = !props.spawn_animals}>{#if props.spawn_animals}✓{:else}✕{/if}</button></div><small>spawn-animals</small></div>
+          <div class="prop-group"><span class="prop-label">Estruturas</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={props.generate_structures} on:click={() => props.generate_structures = !props.generate_structures}>{#if props.generate_structures}✓{:else}✕{/if}</button></div><small>generate-structures</small></div>
+          <div class="prop-group"><span class="prop-label">Nether</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={props.allow_nether} on:click={() => props.allow_nether = !props.allow_nether}>{#if props.allow_nether}✓{:else}✕{/if}</button></div><small>allow-nether</small></div>
+          <div class="prop-group"><span class="prop-label">Hardcore</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={props.hardcore} on:click={() => props.hardcore = !props.hardcore}>{#if props.hardcore}✓{:else}✕{/if}</button></div><small>hardcore</small></div>
+        </div>
+        <div class="settings-subhead"><h4>Ícone do servidor</h4><p>PNG estático de 64×64 pixels salvo como server-icon.png na pasta do servidor.</p></div>
+        <div class="icon-upload-row">
+          <span class:ok={props.icon_exists} class="icon-status">{props.icon_exists ? '✓ Ícone instalado' : '○ Nenhum ícone instalado'}</span>
+          <input bind:this={iconInput} type="file" accept="image/png" on:change={uploadServerIcon} />
+        </div>
         <!-- Footer do Formulário -->
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; margin-top:24px; padding-top:20px; border-top:1px dashed var(--border);">
           <div class="prop-group">
@@ -1206,7 +1286,7 @@
 
       <section class="settings-card">
         <div class="card-head">
-          <div><h3>e4all</h3><p>Configurações complementares do servidor.</p></div>
+          <div><h3>e4all</h3><p>Configuração do mod para abrir um mundo LAN pela internet. O endereço é gerado pelo próprio mod ao iniciar o mundo LAN.</p></div>
         </div>
         <div class="form-grid">
           <label>Loader
@@ -1219,8 +1299,14 @@
           </label>
           <label>Versão Minecraft<input bind:value={server.e4all.minecraft_version}/></label>
           <label>Pasta de instalação<input bind:value={server.e4all.install_path}/></label>
-          <label>Endereço público<input bind:value={server.e4all.public_address}/></label>
+          <label>Endereço público gerado<input bind:value={server.e4all.public_address} placeholder="gerado pelo e4all" readonly /></label>
         </div>
+        <div class="e4all-options">
+          <div class="prop-group"><span class="prop-label">Contas offline</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.offline_accounts} on:click={() => server.e4all.offline_accounts = !server.e4all.offline_accounts}>{#if server.e4all.offline_accounts}✓{:else}✕{/if}</button></div><small>Permite o modo offline no menu Abrir para LAN.</small></div>
+          <div class="prop-group"><span class="prop-label">Simple Voice Chat P2P</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.voice_chat} on:click={() => server.e4all.voice_chat = !server.e4all.voice_chat}>{#if server.e4all.voice_chat}✓{:else}✕{/if}</button></div><small>Os dois jogadores precisam do e4all e SVC; P2P pode falhar em NAT restritivo.</small></div>
+          <div class="prop-group"><span class="prop-label">Variante Android</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.android_variant} on:click={() => server.e4all.android_variant = !server.e4all.android_variant}>{#if server.e4all.android_variant}✓{:else}✕{/if}</button></div><small>Usa o JAR do e4all com sufixo -android.</small></div>
+        </div>
+        <div class="e4all-note">O ShadowPainel salva essas preferências, mas o JAR do e4all precisa estar instalado em <b>mods/</b>. Para o Android, use o arquivo <b>-android</b>; o endereço público só aparece quando o mundo é aberto para LAN.</div>
         <button class="primary"
           on:click={async()=>{
             try {

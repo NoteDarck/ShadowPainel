@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -25,7 +26,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-const APP_VERSION: &str = "0.7.5";
+const APP_VERSION: &str = "0.7.6";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -338,25 +339,60 @@ fn view(i: &mut Inner) -> View {
 
 // ───────────────────────── Processo do servidor ─────────────────────────
 
+fn strip_ansi(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for code in chars.by_ref() {
+                    if ('@'..='~').contains(&code) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn log_kind(line: &str) -> &'static str {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("fatal")
+        || lower.contains("error")
+        || lower.contains("exception")
+        || lower.contains("failed")
+        || lower.contains("can't")
+        || lower.contains("cannot")
+    {
+        "error"
+    } else if lower.contains("warn") || lower.contains("deprecated") {
+        "warning"
+    } else if lower.contains("done (")
+        || lower.contains("started")
+        || lower.contains("stopping")
+        || lower.contains("success")
+    {
+        "success"
+    } else {
+        "info"
+    }
+}
+
 async fn pump<R: AsyncRead + Unpin>(app: AppState, reader: R) {
     let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    while let Ok(Some(raw_line)) = lines.next_line().await {
+        let line = strip_ansi(&raw_line);
         let mut i = app.0.lock().await;
         if line.contains(" joined the game") {
             i.players += 1;
         } else if line.contains(" left the game") {
             i.players = i.players.saturating_sub(1);
         }
-        let kind = if line.contains("ERROR") {
-            "error"
-        } else if line.contains("WARN") {
-            "warning"
-        } else if line.contains("Done (") {
-            "success"
-        } else {
-            "info"
-        };
-        i.push(line, kind);
+        i.push(line.clone(), log_kind(&line));
     }
 }
 
@@ -955,6 +991,20 @@ struct ServerProperties {
     require_resource_pack: bool,
     resource_pack: String,
     resource_pack_prompt: String,
+    view_distance: u32,
+    simulation_distance: u32,
+    pvp: bool,
+    spawn_monsters: bool,
+    spawn_animals: bool,
+    generate_structures: bool,
+    hardcore: bool,
+    enable_command_block: bool,
+    allow_nether: bool,
+    level_name: String,
+    level_seed: String,
+    level_type: String,
+    server_port: u16,
+    icon_exists: bool,
     timezone: String,
     java_version: String,
 }
@@ -974,6 +1024,20 @@ impl Default for ServerProperties {
             require_resource_pack: false,
             resource_pack: "".into(),
             resource_pack_prompt: "".into(),
+            view_distance: 10,
+            simulation_distance: 10,
+            pvp: true,
+            spawn_monsters: true,
+            spawn_animals: true,
+            generate_structures: true,
+            hardcore: false,
+            enable_command_block: false,
+            allow_nether: true,
+            level_name: "world".into(),
+            level_seed: "".into(),
+            level_type: "minecraft:normal".into(),
+            server_port: 25565,
+            icon_exists: false,
             timezone: "America/Sao_Paulo".into(),
             java_version: "Java 21".into(),
         }
@@ -1038,6 +1102,49 @@ async fn get_server_properties(
             props.resource_pack_prompt = v.clone();
         }
 
+        if let Some(v) = map.get("view-distance") {
+            props.view_distance = v.parse().unwrap_or(10);
+        }
+        if let Some(v) = map.get("view-distance") {
+            props.view_distance = v.parse().unwrap_or(10);
+        }
+        if let Some(v) = map.get("simulation-distance") {
+            props.simulation_distance = v.parse().unwrap_or(10);
+        }
+        if let Some(v) = map.get("pvp") {
+            props.pvp = v == "true";
+        }
+        if let Some(v) = map.get("spawn-monsters") {
+            props.spawn_monsters = v == "true";
+        }
+        if let Some(v) = map.get("spawn-animals") {
+            props.spawn_animals = v == "true";
+        }
+        if let Some(v) = map.get("generate-structures") {
+            props.generate_structures = v == "true";
+        }
+        if let Some(v) = map.get("hardcore") {
+            props.hardcore = v == "true";
+        }
+        if let Some(v) = map.get("enable-command-block") {
+            props.enable_command_block = v == "true";
+        }
+        if let Some(v) = map.get("allow-nether") {
+            props.allow_nether = v == "true";
+        }
+        if let Some(v) = map.get("level-name") {
+            props.level_name = v.clone();
+        }
+        if let Some(v) = map.get("level-seed") {
+            props.level_seed = v.clone();
+        }
+        if let Some(v) = map.get("level-type") {
+            props.level_type = v.clone();
+        }
+        if let Some(v) = map.get("server-port") {
+            props.server_port = v.parse().unwrap_or(25565);
+        }
+        props.icon_exists = dir.join("server-icon.png").is_file();
         // Campos extras do ShadowPainel (custom)
         if let Some(v) = map.get("shadowpainel-timezone") {
             props.timezone = v.clone();
@@ -1097,6 +1204,28 @@ async fn save_server_properties(
     );
     map.insert("resource-pack".into(), req.resource_pack);
     map.insert("resource-pack-prompt".into(), req.resource_pack_prompt);
+    map.insert("view-distance".into(), req.view_distance.to_string());
+    map.insert(
+        "simulation-distance".into(),
+        req.simulation_distance.to_string(),
+    );
+    map.insert("pvp".into(), req.pvp.to_string());
+    map.insert("spawn-monsters".into(), req.spawn_monsters.to_string());
+    map.insert("spawn-animals".into(), req.spawn_animals.to_string());
+    map.insert(
+        "generate-structures".into(),
+        req.generate_structures.to_string(),
+    );
+    map.insert("hardcore".into(), req.hardcore.to_string());
+    map.insert(
+        "enable-command-block".into(),
+        req.enable_command_block.to_string(),
+    );
+    map.insert("allow-nether".into(), req.allow_nether.to_string());
+    map.insert("level-name".into(), req.level_name);
+    map.insert("level-seed".into(), req.level_seed);
+    map.insert("level-type".into(), req.level_type);
+    map.insert("server-port".into(), req.server_port.to_string());
     map.insert("shadowpainel-timezone".into(), req.timezone);
     map.insert("shadowpainel-java-version".into(), req.java_version);
 
@@ -1127,6 +1256,61 @@ async fn save_server_properties(
     })?;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ServerIconRequest {
+    data_url: String,
+}
+
+async fn save_server_icon(
+    State(app): State<AppState>,
+    Json(req): Json<ServerIconRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let encoded = req
+        .data_url
+        .split_once(',')
+        .map(|(_, value)| value)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Imagem inválida."))?;
+    let bytes = BASE64
+        .decode(encoded)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "A imagem não está em PNG válido."))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "O ícone não pode passar de 1 MB.",
+        ));
+    }
+    if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return Err(err(StatusCode::BAD_REQUEST, "O ícone precisa ser um PNG."));
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+    if width != 64 || height != 64 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "O ícone precisa ter exatamente 64×64 pixels.",
+        ));
+    }
+    let i = app.0.lock().await;
+    let dir = expand(&i.cfg.server_dir);
+    if !dir.exists() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "A pasta do servidor não existe.",
+        ));
+    }
+    tokio::fs::write(dir.join("server-icon.png"), bytes)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao salvar o ícone: {e}"),
+            )
+        })?;
+    Ok(Json(
+        json!({ "ok": true, "message": "server-icon.png salvo. Reinicie o servidor para aplicar." }),
+    ))
 }
 
 // --- FUNÇÕES PARA MODS E FABRIC ---
@@ -2186,6 +2370,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/server/properties",
             get(get_server_properties).post(save_server_properties),
         )
+        .route("/api/server/icon", post(save_server_icon))
         .route("/api/minecraft/versions", get(minecraft_versions))
         .route("/api/server/create", post(create_server))
         .route("/api/content", get(list_content))
