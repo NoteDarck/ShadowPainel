@@ -10,7 +10,11 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::VecDeque, net::SocketAddr, path::PathBuf, process::Stdio, sync::Arc,
+    collections::{HashMap, VecDeque},
+    net::SocketAddr,
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 use sysinfo::{Pid, ProcessesToUpdate, System};
@@ -692,6 +696,7 @@ async fn save_e4all(State(app): State<AppState>, Json(req): Json<E4allRequest>) 
     i.push("Configuração do e4all salva.", "success");
     Ok(Json(view(&mut i)))
 }
+
 #[derive(Deserialize)]
 struct DeleteServerRequest {
     confirm_name: String,
@@ -720,7 +725,6 @@ async fn delete_server(
 
     let dir = expand(&i.cfg.server_dir);
     if dir.exists() {
-        // Segurança: só remove se a pasta realmente contém um servidor
         let looks_like_server = dir.join("server.jar").is_file()
             || dir.join("fabric-server-launch.jar").is_file()
             || dir.join("server.properties").is_file()
@@ -739,7 +743,6 @@ async fn delete_server(
         })?;
     }
 
-    // Reseta estado
     i.cfg = Config::default();
     i.status = Status::Offline;
     i.players = 0;
@@ -790,6 +793,155 @@ async fn command(
         ));
     }
     i.push(format!("> {cmd}"), "command");
+    Ok(Json(json!({ "ok": true })))
+}
+
+// --- NOVO: server.properties ---
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ServerProperties {
+    motd: String,
+    max_players: u32,
+    gamemode: String,
+    difficulty: String,
+    white_list: bool,
+    online_mode: bool,
+    allow_flight: bool,
+    force_gamemode: bool,
+    spawn_protection: u32,
+    require_resource_pack: bool,
+    resource_pack: String,
+    resource_pack_prompt: String,
+    timezone: String,
+    java_version: String,
+}
+
+impl Default for ServerProperties {
+    fn default() -> Self {
+        Self {
+            motd: "Servidor ShadowPainel".into(),
+            max_players: 20,
+            gamemode: "survival".into(),
+            difficulty: "easy".into(),
+            white_list: false,
+            online_mode: true,
+            allow_flight: false,
+            force_gamemode: false,
+            spawn_protection: 0,
+            require_resource_pack: false,
+            resource_pack: "".into(),
+            resource_pack_prompt: "".into(),
+            timezone: "America/Sao_Paulo".into(),
+            java_version: "Java 21".into(),
+        }
+    }
+}
+
+async fn get_server_properties(State(app): State<AppState>) -> Result<Json<ServerProperties>, ApiErr> {
+    let i = app.0.lock().await;
+    let dir = expand(&i.cfg.server_dir);
+    let path = dir.join("server.properties");
+    
+    let mut props = ServerProperties::default();
+    
+    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+        let mut map = HashMap::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            if let Some((key, value)) = line.split_once('=') {
+                map.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+        
+        if let Some(v) = map.get("motd") { props.motd = v.clone(); }
+        if let Some(v) = map.get("max-players") { props.max_players = v.parse().unwrap_or(20); }
+        if let Some(v) = map.get("gamemode") { props.gamemode = v.clone(); }
+        if let Some(v) = map.get("difficulty") { props.difficulty = v.clone(); }
+        if let Some(v) = map.get("white-list") { props.white_list = v == "true"; }
+        if let Some(v) = map.get("online-mode") { props.online_mode = v == "true"; }
+        if let Some(v) = map.get("allow-flight") { props.allow_flight = v == "true"; }
+        if let Some(v) = map.get("force-gamemode") { props.force_gamemode = v == "true"; }
+        if let Some(v) = map.get("spawn-protection") { props.spawn_protection = v.parse().unwrap_or(0); }
+        if let Some(v) = map.get("require-resource-pack") { props.require_resource_pack = v == "true"; }
+        if let Some(v) = map.get("resource-pack") { props.resource_pack = v.clone(); }
+        if let Some(v) = map.get("resource-pack-prompt") { props.resource_pack_prompt = v.clone(); }
+        
+        // Campos extras do ShadowPainel (custom)
+        if let Some(v) = map.get("shadowpainel-timezone") { props.timezone = v.clone(); }
+        if let Some(v) = map.get("shadowpainel-java-version") { props.java_version = v.clone(); }
+    }
+    
+    Ok(Json(props))
+}
+
+async fn save_server_properties(
+    State(app): State<AppState>,
+    Json(req): Json<ServerProperties>,
+) -> Result<Json<Value>, ApiErr> {
+    let i = app.0.lock().await;
+    let dir = expand(&i.cfg.server_dir);
+    
+    if !dir.exists() {
+        return Err(err(StatusCode::BAD_REQUEST, "A pasta do servidor não existe."));
+    }
+    
+    let path = dir.join("server.properties");
+    
+    // Lê o arquivo atual para preservar propriedades não mapeadas
+    let mut lines = Vec::new();
+    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+        lines = content.lines().map(|s| s.to_string()).collect();
+    } else {
+        lines.push("#Minecraft server properties".into());
+    }
+    
+    let mut map: HashMap<String, String> = HashMap::new();
+    for line in &lines {
+        if let Some((k, v)) = line.trim().split_once('=') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    
+    // Atualiza os valores
+    map.insert("motd".into(), req.motd);
+    map.insert("max-players".into(), req.max_players.to_string());
+    map.insert("gamemode".into(), req.gamemode);
+    map.insert("difficulty".into(), req.difficulty);
+    map.insert("white-list".into(), req.white_list.to_string());
+    map.insert("online-mode".into(), req.online_mode.to_string());
+    map.insert("allow-flight".into(), req.allow_flight.to_string());
+    map.insert("force-gamemode".into(), req.force_gamemode.to_string());
+    map.insert("spawn-protection".into(), req.spawn_protection.to_string());
+    map.insert("require-resource-pack".into(), req.require_resource_pack.to_string());
+    map.insert("resource-pack".into(), req.resource_pack);
+    map.insert("resource-pack-prompt".into(), req.resource_pack_prompt);
+    map.insert("shadowpainel-timezone".into(), req.timezone);
+    map.insert("shadowpainel-java-version".into(), req.java_version);
+
+    // Reconstrói o arquivo
+    let mut out = String::new();
+    // Mantém comentários originais e valores
+    for line in lines {
+        if line.trim().starts_with('#') || line.trim().is_empty() {
+            out.push_str(&line);
+            out.push('\n');
+        } else if let Some((k, _)) = line.trim().split_once('=') {
+            let key = k.trim();
+            if let Some(val) = map.remove(key) {
+                out.push_str(&format!("{}={}\n", key, val));
+            }
+        }
+    }
+    // Adiciona chaves novas que não estavam no arquivo
+    for (k, v) in map {
+        out.push_str(&format!("{}={}\n", k, v));
+    }
+    
+    tokio::fs::write(&path, out).await.map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao salvar server.properties: {e}"))
+    })?;
+    
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1581,7 +1733,6 @@ async fn search_content(
     Ok(Json(data))
 }
 
-// NOVO: Rota para buscar todas as versões de um mod específico
 async fn get_content_versions(
     axum::extract::Query(query): axum::extract::Query<ContentSearchRequest>,
 ) -> Result<Json<Value>, ApiErr> {
@@ -1623,7 +1774,7 @@ struct ContentInstallRequest {
     kind: String,
     loader: String,
     version: String,
-    version_id: Option<String>, // NOVO: versão específica do mod escolhida
+    version_id: Option<String>,
 }
 
 async fn install_content(
@@ -1832,12 +1983,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/server/download", post(download_server))
         .route("/api/server/eula", post(accept_eula))
         .route("/api/server/install-fabric", post(install_fabric))
+        .route("/api/server/properties", get(get_server_properties).post(save_server_properties))
         .route("/api/minecraft/versions", get(minecraft_versions))
         .route("/api/server/create", post(create_server))
         .route("/api/content", get(list_content))
         .route("/api/content/delete", post(delete_content))
         .route("/api/content/search", post(search_content))
-        .route("/api/content/versions", get(get_content_versions)) // NOVO
+        .route("/api/content/versions", get(get_content_versions))
         .route("/api/content/install", post(install_content))
         .route("/api/mods/search", post(search_mods))
         .route("/api/mods/install", post(install_mod))

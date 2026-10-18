@@ -1,18 +1,43 @@
-# ShadowPainel
+<div align="center">
 
-Painel **desktop** em Rust para criar, configurar e administrar servidores Minecraft no seu computador pessoal. A interface é Svelte, o núcleo é Rust (Axum + Tokio) e a janela é nativa via WebView. Desde a série `0.6.x`, o frontend é hospedado dentro do próprio aplicativo — **sem navegador externo**.
+<img src="https://img.shields.io/badge/version-0.7.2-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
+<img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
+<img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
+<img src="https://img.shields.io/badge/licença-MIT-59cb8a?style=flat-square&labelColor=080a10" alt="MIT"/>
 
-## ✨ O que você pode fazer com o ShadowPainel
+# ☾ ShadowPainel
 
-- **Criar o servidor do zero** — baixe o `server.jar` da versão desejada e aceite a EULA direto pelo painel.
-- **Instalar mods do Modrinth** — busque e instale mods na pasta `mods` do servidor.
-- **Instalar modpacks** — baixe modpacks `.mrpack` e prepare o servidor para receber os mods.
-- **Instalar o Fabric** — para rodar mods e o e4all.
-- **Configurar o e4all** — registre o domínio público gerado pelo mod e compartilhe com os jogadores.
-- **Gerenciar o servidor** — iniciar, parar, reiniciar, enviar comandos e acompanhar logs e métricas (CPU, memória, jogadores).
-- **Abrir em tela cheia** — a janela já abre maximizada para uma experiência de software dedicado.
+**Servidores Minecraft, sem abrir o terminal.**
+
+Painel desktop em Rust para criar, configurar e administrar servidores Minecraft
+no seu computador — com interface Svelte, núcleo Axum + Tokio e janela nativa
+via WebView. Desde a série `0.6.x`, o frontend é servido **de dentro do próprio
+aplicativo**, sem navegador externo.
+
+</div>
+
+---
+
+## ✨ O que você pode fazer
+
+| | Recurso | Descrição |
+|---|---|---|
+| 🚀 | **Criar o servidor do zero** | Baixe o `server.jar` da versão desejada e aceite a EULA direto pelo painel. |
+| 🧩 | **Instalar mods do Modrinth** | Busque, filtre por versão/loader e instale mods direto na pasta `mods`. |
+| 📦 | **Instalar em lote** | Selecione vários projetos e instale todos de uma vez com um clique. |
+| 🎯 | **Escolher a versão do mod** | Diferente da versão do Minecraft: escolha a build exata que o servidor vai rodar. |
+| 🔌 | **Plugins e datapacks** | Suporte a Paper, Purpur e datapacks no mesmo catálogo. |
+| 🧵 | **Instalar o Fabric** | Pronto para rodar mods e o e4all. |
+| 🌐 | **Configurar o e4all** | Registre o domínio público gerado pelo mod e compartilhe com os jogadores. |
+| 🎛️ | **Gerenciar o servidor** | Iniciar, parar, reiniciar, enviar comandos e acompanhar logs e métricas (CPU, memória, jogadores). |
+| 🖥️ | **Abrir em tela cheia** | A janela já abre maximizada, como um software dedicado. |
+| 🔒 | **Execução local** | Tudo roda na sua máquina — seus dados não saem do PC. |
+
+---
 
 ## 🏗️ Arquitetura
+
 
 - `backend/` — núcleo Rust responsável pelo processo Java, console, métricas, downloads, persistência e API local.
 - `desktop/` — shell Rust/WebView multiplataforma; inicia o núcleo em uma porta loopback efêmera e encerra o processo ao fechar a janela.

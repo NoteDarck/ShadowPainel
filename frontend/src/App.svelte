@@ -27,6 +27,22 @@
     offline_accounts:boolean; voice_chat:boolean; install_path:string;
     public_address:string;
   };
+  type ServerProperties = {
+    motd: string;
+    max_players: number;
+    gamemode: string;
+    difficulty: string;
+    white_list: boolean;
+    online_mode: boolean;
+    allow_flight: boolean;
+    force_gamemode: boolean;
+    spawn_protection: number;
+    require_resource_pack: boolean;
+    resource_pack: string;
+    resource_pack_prompt: string;
+    timezone: string;
+    java_version: string;
+  };
   type Server = {
     status:string; address:string; players:number; memory_mb:number;
     memory_limit_gb:number; cpu_percent:number; uptime_seconds:number;
@@ -99,6 +115,26 @@
   let selectedModVersion = '';
   let selectedModVersions:Record<string,string> = {};
   let installingBatch = false;
+
+  // ── NOVO: server.properties ──
+  let props: ServerProperties = {
+    motd: 'Servidor ShadowPainel',
+    max_players: 20,
+    gamemode: 'survival',
+    difficulty: 'easy',
+    white_list: false,
+    online_mode: true,
+    allow_flight: false,
+    force_gamemode: false,
+    spawn_protection: 0,
+    require_resource_pack: false,
+    resource_pack: '',
+    resource_pack_prompt: '',
+    timezone: 'America/Sao_Paulo',
+    java_version: 'Java 21'
+  };
+  let loadingProps = false;
+  let savedProps = false;
 
   // ── Helpers de API ──
   const api = async <T=unknown>(path:string, options?:RequestInit):Promise<T> => {
@@ -229,6 +265,34 @@
     }
   }
 
+  // ── NOVO: Load/Save Props ──
+  $: if (activeTab === 'config') loadServerProperties();
+
+  async function loadServerProperties() {
+    try {
+      loadingProps = true;
+      const data = await api<ServerProperties>('/server/properties');
+      if (data) props = { ...props, ...data };
+    } catch (e) {
+      console.error('Falha ao carregar server.properties', e);
+    } finally {
+      loadingProps = false;
+    }
+  }
+
+  async function saveServerProperties() {
+    try {
+      loadingProps = true;
+      await api('/server/properties', json(props));
+      savedProps = true;
+      setTimeout(() => savedProps = false, 2200);
+    } catch (e) {
+      notice = e instanceof Error ? e.message : 'Falha ao salvar server.properties.';
+    } finally {
+      loadingProps = false;
+    }
+  }
+
   // ── Conteúdo ──
   async function installContent(project_id:string, version_id?: string) {
     try {
@@ -239,7 +303,6 @@
       }));
       notice = 'Conteúdo instalado.';
       await loadContent();
-      // Atualiza o catálogo para refletir "installed"
       await runCatalogSearch();
     } catch(e) {
       notice = e instanceof Error ? e.message : 'Falha ao instalar conteúdo.';
@@ -256,7 +319,6 @@
     for (const projectId of catalogSelected) {
       try {
         const version = contentVersion || server.version;
-        // Garante que a versão do mod foi carregada (se não, usa fallback)
         const versionId = selectedModVersions[projectId] || undefined;
         await api('/content/install', json({
           project_id: projectId, kind: contentKind, loader: contentLoader, version,
@@ -276,7 +338,6 @@
       catalogSelected.clear();
     }
     await loadContent();
-    // Atualiza o catálogo para refletir "installed"
     await runCatalogSearch();
   }
 
@@ -350,7 +411,6 @@
     if (catalogOpen) runCatalogSearch();
   }
 
-  // ── Carregar versões do mod selecionado ──
   async function loadModVersions(projectId: string) {
     modVersions = [];
     selectedModVersion = '';
@@ -884,6 +944,191 @@
           </div>
         </div>
         <button class="primary" on:click={saveConfig}>SALVAR CONFIGURAÇÃO <span>→</span></button>
+      </section>
+
+      <!-- NOVO: server.properties -->
+      <section class="settings-card">
+        <div class="card-head" style="padding-bottom: 16px;">
+          <div>
+            <h3 style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:20px; color:var(--accent);">📄</span> server.properties
+            </h3>
+          </div>
+          <div style="display:flex; gap:10px; align-items:center;">
+            {#if savedProps}
+              <span style="color:var(--green); font-size:12px; font-family:'DM Mono';">✓ Salvo</span>
+            {/if}
+            <button class="secondary" on:click={saveServerProperties} disabled={loadingProps}>
+              {loadingProps ? 'Salvando...' : 'Salvar Alterações'}
+            </button>
+          </div>
+        </div>
+
+        <div class="props-grid">
+          <!-- MOTD -->
+          <div class="prop-group" style="grid-column: 1 / 2;">
+            <label>MOTD (Mensagem do dia)</label>
+            <div class="prop-control">
+              <input bind:value={props.motd} placeholder="Servidor ShadowPainel" />
+            </div>
+            <small>motd=Servidor ShadowPainel</small>
+          </div>
+
+          <!-- Max Players -->
+          <div class="prop-group" style="grid-column: 2 / 3;">
+            <label>Vagas</label>
+            <div class="prop-control">
+              <input type="number" bind:value={props.max_players} min="1" max="1000" />
+            </div>
+            <small>max-players=20</small>
+          </div>
+
+          <!-- Modo de Jogo -->
+          <div class="prop-group">
+            <label>Modo de jogo</label>
+            <div class="prop-control">
+              <select bind:value={props.gamemode}>
+                <option value="survival">Sobrevivência</option>
+                <option value="creative">Criativo</option>
+                <option value="adventure">Aventura</option>
+                <option value="spectator">Espectador</option>
+              </select>
+            </div>
+            <small>gamemode=survival</small>
+          </div>
+
+          <!-- Dificuldade -->
+          <div class="prop-group">
+            <label>Dificuldade</label>
+            <div class="prop-control">
+              <select bind:value={props.difficulty}>
+                <option value="peaceful">Pacífico</option>
+                <option value="easy">Fácil</option>
+                <option value="normal">Normal</option>
+                <option value="hard">Difícil</option>
+              </select>
+            </div>
+            <small>difficulty=easy</small>
+          </div>
+
+          <!-- Whitelist -->
+          <div class="prop-group">
+            <label>Whitelist</label>
+            <div class="prop-control toggle-control">
+              <button class="toggle-btn" class:active={props.white_list} on:click={() => props.white_list = !props.white_list}>
+                {#if props.white_list}✓{:else}✕{/if}
+              </button>
+            </div>
+            <small>white-list=false</small>
+          </div>
+
+          <!-- Pirata -->
+          <div class="prop-group">
+            <label>Pirata (Offline Mode)</label>
+            <div class="prop-control toggle-control">
+              <button class="toggle-btn" class:active={!props.online_mode} on:click={() => props.online_mode = !props.online_mode}>
+                {#if !props.online_mode}✓{:else}✕{/if}
+              </button>
+            </div>
+            <small>online-mode=true</small>
+          </div>
+
+          <!-- Voar -->
+          <div class="prop-group">
+            <label>Voar</label>
+            <div class="prop-control toggle-control">
+              <button class="toggle-btn" class:active={props.allow_flight} on:click={() => props.allow_flight = !props.allow_flight}>
+                {#if props.allow_flight}✓{:else}✕{/if}
+              </button>
+            </div>
+            <small>allow-flight=true</small>
+          </div>
+
+          <!-- Forçar Gamemode -->
+          <div class="prop-group">
+            <label>Forçar o Gamemode</label>
+            <div class="prop-control toggle-control">
+              <button class="toggle-btn" class:active={props.force_gamemode} on:click={() => props.force_gamemode = !props.force_gamemode}>
+                {#if props.force_gamemode}✓{:else}✕{/if}
+              </button>
+            </div>
+            <small>force-gamemode=false</small>
+          </div>
+
+          <!-- Spawn Protection -->
+          <div class="prop-group">
+            <label>Proteção no Spawn</label>
+            <div class="prop-control">
+              <div class="number-input">
+                <span>🛡️</span>
+                <input type="number" bind:value={props.spawn_protection} min="0" max="1000" style="text-align:center; border:none; background:transparent;" />
+                <div class="num-buttons">
+                  <button on:click={() => props.spawn_protection++}>+</button>
+                  <button on:click={() => props.spawn_protection = Math.max(0, props.spawn_protection - 1)}>-</button>
+                </div>
+              </div>
+            </div>
+            <small>spawn-protection=0</small>
+          </div>
+
+          <!-- Requer Pacote -->
+          <div class="prop-group">
+            <label>É necessário um pacote de recursos</label>
+            <div class="prop-control toggle-control">
+              <button class="toggle-btn" class:active={props.require_resource_pack} on:click={() => props.require_resource_pack = !props.require_resource_pack}>
+                {#if props.require_resource_pack}✓{:else}✕{/if}
+              </button>
+            </div>
+            <small>require-resource-pack=false</small>
+          </div>
+
+          <!-- Pacote de Recursos -->
+          <div class="prop-group" style="grid-column: 1 / -1;">
+            <label>Pacote de recursos</label>
+            <div class="prop-control" style="position:relative;">
+              <input bind:value={props.resource_pack} placeholder="https://exemplo.com/pacote.zip" style="padding-left:36px;" />
+              <span style="position:absolute; left:12px; top:50%; transform:translateY(-50%); opacity:0.5;">🔗</span>
+              <button class="icon-btn" title="Testar link" style="position:absolute; right:8px; top:50%; transform:translateY(-50%); background:rgba(89, 155, 255, 0.2); color:#599bff; border:none; border-radius:4px; padding:4px 8px; cursor:pointer;">
+                ✓
+              </button>
+            </div>
+            <small>resource-pack=</small>
+          </div>
+
+          <!-- Solicitação do Pacote -->
+          <div class="prop-group" style="grid-column: 1 / -1;">
+            <label>Solicitação do pacote de recursos</label>
+            <div class="prop-control">
+              <input bind:value={props.resource_pack_prompt} placeholder="Você precisa baixar o pacote para jogar!" />
+            </div>
+            <small>resource-pack-prompt=</small>
+          </div>
+        </div>
+
+        <!-- Footer do Formulário -->
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; margin-top:24px; padding-top:20px; border-top:1px dashed var(--border);">
+          <div class="prop-group">
+            <label>Fuso horário</label>
+            <div class="prop-control">
+              <select bind:value={props.timezone}>
+                <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+                <option value="America/New_York">America/New_York</option>
+                <option value="Europe/London">Europe/London</option>
+                <option value="UTC">UTC</option>
+              </select>
+            </div>
+          </div>
+          <div class="prop-group">
+            <label>Ambiente</label>
+            <div class="prop-control">
+              <select bind:value={props.java_version}>
+                <option value="Java 17">Java 17</option>
+                <option value="Java 21">Java 21</option>
+                <option value="Java 25">Java 25</option>
+              </select>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="settings-card">

@@ -441,11 +441,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .catalog-card:hover { border-color:var(--accent); background:rgba(141,93,255,.06); transform:translateY(-1px); }
 .catalog-card.selected { border-color: var(--accent); background: rgba(141,93,255,.12); box-shadow: 0 0 0 1px var(--accent); }
 
-/* NOVO: Classe para mods já instalados (cinza) */
+/* Mods já instalados (cinza) */
 .catalog-card.installed {
   opacity: 0.5;
   cursor: not-allowed;
   background: var(--panel);
+  pointer-events: none;
 }
 .catalog-card.installed:hover {
   border-color: var(--border);
@@ -480,7 +481,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .detail-sheet p { color:var(--text); font-size:12px; line-height:1.6; }
 .detail-actions { display:flex; gap:10px; justify-content:flex-end; padding-top:12px; border-top:1px dashed var(--border); }
 
-/* NOVO: Seletor de versão do mod */
+/* Seletor de versão do mod */
 .version-picker {
   display: flex;
   flex-direction: column;
@@ -514,7 +515,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 }
 .version-picker select option { background: var(--panel); color: var(--text); }
 
-/* NOVO: Rodapé do modal para instalação em lote */
+/* Rodapé do modal para instalação em lote */
 .modal-footer-batch {
   display: flex;
   justify-content: space-between;
@@ -544,18 +545,153 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 @media (max-width:900px) { .catalog-grid { grid-template-columns:1fr; } }
 @media (max-width:760px) { .modal { max-height:92vh; } .catalog-grid { padding:14px 16px 18px; } .catalog-search-container { padding:14px 16px 6px; } .catalog-search { flex-direction:column; } .catalog-advanced-filters { flex-direction: column; } .catalog-advanced-filters label { max-width: 100%; } }
-/* Reforço: card instalado fica cinza e não clicável */
-.catalog-card.installed {
-  opacity: 0.5;
-  cursor: not-allowed;
-  background: var(--panel);
-  pointer-events: none;
+
+/* ── Server Properties (Estilo Painel) ── */
+.props-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px 24px;
 }
-.catalog-card.installed:hover {
-  border-color: var(--border);
-  background: var(--panel);
-  transform: none;
+
+.prop-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
-.catalog-card.installed .installed-badge {
-  display: inline-block;
+
+.prop-group label {
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.prop-group small {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: var(--faint);
+  margin-top: 2px;
+}
+
+.prop-control {
+  position: relative;
+  display: flex;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  height: 38px;
+  align-items: center;
+}
+
+.prop-control input,
+.prop-control select {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  padding: 0 12px;
+  height: 100%;
+  outline: none;
+}
+
+.prop-control select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238d96aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px;
+  padding-right: 40px;
+  cursor: pointer;
+}
+
+.toggle-control {
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
+.toggle-btn {
+  width: 100%;
+  height: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--red);
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toggle-btn.active {
+  background: rgba(89, 203, 138, 0.1);
+  border-color: rgba(89, 203, 138, 0.4);
+  color: var(--green);
+}
+
+.toggle-btn:hover {
+  border-color: var(--muted);
+}
+
+.number-input {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding-left: 12px;
+}
+
+.number-input span {
+  font-size: 14px;
+  margin-right: 8px;
+  opacity: 0.8;
+}
+
+.number-input input {
+  flex: 1;
+  padding: 0;
+}
+
+.num-buttons {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 32px;
+  border-left: 1px solid var(--border);
+}
+
+.num-buttons button {
+  flex: 1;
+  background: var(--panel);
+  border: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: 0.2s;
+}
+
+.num-buttons button:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.num-buttons button:first-child {
+  border-bottom: 1px solid var(--border);
+}
+
+@media (max-width: 760px) {
+  .props-grid {
+    grid-template-columns: 1fr;
+  }
+  .prop-group {
+    grid-column: 1 / -1 !important;
+  }
 }
