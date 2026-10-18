@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
-  const APP_VERSION = '0.7.1';
+  const APP_VERSION = '0.7.3';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -967,7 +967,7 @@
         <div class="props-grid">
           <!-- MOTD -->
           <div class="prop-group" style="grid-column: 1 / 2;">
-            <label>MOTD (Mensagem do dia)</label>
+            <span class="prop-label">MOTD (Mensagem do dia)</span>
             <div class="prop-control">
               <input bind:value={props.motd} placeholder="Servidor ShadowPainel" />
             </div>
@@ -976,7 +976,7 @@
 
           <!-- Max Players -->
           <div class="prop-group" style="grid-column: 2 / 3;">
-            <label>Vagas</label>
+            <span class="prop-label">Vagas</span>
             <div class="prop-control">
               <input type="number" bind:value={props.max_players} min="1" max="1000" />
             </div>
@@ -985,7 +985,7 @@
 
           <!-- Modo de Jogo -->
           <div class="prop-group">
-            <label>Modo de jogo</label>
+            <span class="prop-label">Modo de jogo</span>
             <div class="prop-control">
               <select bind:value={props.gamemode}>
                 <option value="survival">Sobrevivência</option>
@@ -999,7 +999,7 @@
 
           <!-- Dificuldade -->
           <div class="prop-group">
-            <label>Dificuldade</label>
+            <span class="prop-label">Dificuldade</span>
             <div class="prop-control">
               <select bind:value={props.difficulty}>
                 <option value="peaceful">Pacífico</option>
@@ -1013,7 +1013,7 @@
 
           <!-- Whitelist -->
           <div class="prop-group">
-            <label>Whitelist</label>
+            <span class="prop-label">Whitelist</span>
             <div class="prop-control toggle-control">
               <button class="toggle-btn" class:active={props.white_list} on:click={() => props.white_list = !props.white_list}>
                 {#if props.white_list}✓{:else}✕{/if}
@@ -1024,7 +1024,7 @@
 
           <!-- Pirata -->
           <div class="prop-group">
-            <label>Pirata (Offline Mode)</label>
+            <span class="prop-label">Pirata (Offline Mode)</span>
             <div class="prop-control toggle-control">
               <button class="toggle-btn" class:active={!props.online_mode} on:click={() => props.online_mode = !props.online_mode}>
                 {#if !props.online_mode}✓{:else}✕{/if}
@@ -1035,7 +1035,7 @@
 
           <!-- Voar -->
           <div class="prop-group">
-            <label>Voar</label>
+            <span class="prop-label">Voar</span>
             <div class="prop-control toggle-control">
               <button class="toggle-btn" class:active={props.allow_flight} on:click={() => props.allow_flight = !props.allow_flight}>
                 {#if props.allow_flight}✓{:else}✕{/if}
@@ -1046,7 +1046,7 @@
 
           <!-- Forçar Gamemode -->
           <div class="prop-group">
-            <label>Forçar o Gamemode</label>
+            <span class="prop-label">Forçar o Gamemode</span>
             <div class="prop-control toggle-control">
               <button class="toggle-btn" class:active={props.force_gamemode} on:click={() => props.force_gamemode = !props.force_gamemode}>
                 {#if props.force_gamemode}✓{:else}✕{/if}
@@ -1057,7 +1057,7 @@
 
           <!-- Spawn Protection -->
           <div class="prop-group">
-            <label>Proteção no Spawn</label>
+            <span class="prop-label">Proteção no Spawn</span>
             <div class="prop-control">
               <div class="number-input">
                 <span>🛡️</span>
@@ -1073,7 +1073,7 @@
 
           <!-- Requer Pacote -->
           <div class="prop-group">
-            <label>É necessário um pacote de recursos</label>
+            <span class="prop-label">É necessário um pacote de recursos</span>
             <div class="prop-control toggle-control">
               <button class="toggle-btn" class:active={props.require_resource_pack} on:click={() => props.require_resource_pack = !props.require_resource_pack}>
                 {#if props.require_resource_pack}✓{:else}✕{/if}
@@ -1084,7 +1084,7 @@
 
           <!-- Pacote de Recursos -->
           <div class="prop-group" style="grid-column: 1 / -1;">
-            <label>Pacote de recursos</label>
+            <span class="prop-label">Pacote de recursos</span>
             <div class="prop-control" style="position:relative;">
               <input bind:value={props.resource_pack} placeholder="https://exemplo.com/pacote.zip" style="padding-left:36px;" />
               <span style="position:absolute; left:12px; top:50%; transform:translateY(-50%); opacity:0.5;">🔗</span>
@@ -1097,7 +1097,7 @@
 
           <!-- Solicitação do Pacote -->
           <div class="prop-group" style="grid-column: 1 / -1;">
-            <label>Solicitação do pacote de recursos</label>
+            <span class="prop-label">Solicitação do pacote de recursos</span>
             <div class="prop-control">
               <input bind:value={props.resource_pack_prompt} placeholder="Você precisa baixar o pacote para jogar!" />
             </div>
@@ -1108,7 +1108,7 @@
         <!-- Footer do Formulário -->
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; margin-top:24px; padding-top:20px; border-top:1px dashed var(--border);">
           <div class="prop-group">
-            <label>Fuso horário</label>
+            <span class="prop-label">Fuso horário</span>
             <div class="prop-control">
               <select bind:value={props.timezone}>
                 <option value="America/Sao_Paulo">America/Sao_Paulo</option>
@@ -1119,7 +1119,7 @@
             </div>
           </div>
           <div class="prop-group">
-            <label>Ambiente</label>
+            <span class="prop-label">Ambiente</span>
             <div class="prop-control">
               <select bind:value={props.java_version}>
                 <option value="Java 17">Java 17</option>

@@ -25,7 +25,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-const APP_VERSION: &str = "0.7.2";
+const APP_VERSION: &str = "0.7.3";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -837,41 +837,73 @@ impl Default for ServerProperties {
     }
 }
 
-async fn get_server_properties(State(app): State<AppState>) -> Result<Json<ServerProperties>, ApiErr> {
+async fn get_server_properties(
+    State(app): State<AppState>,
+) -> Result<Json<ServerProperties>, ApiErr> {
     let i = app.0.lock().await;
     let dir = expand(&i.cfg.server_dir);
     let path = dir.join("server.properties");
-    
+
     let mut props = ServerProperties::default();
-    
+
     if let Ok(content) = tokio::fs::read_to_string(&path).await {
         let mut map = HashMap::new();
         for line in content.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
             if let Some((key, value)) = line.split_once('=') {
                 map.insert(key.trim().to_string(), value.trim().to_string());
             }
         }
-        
-        if let Some(v) = map.get("motd") { props.motd = v.clone(); }
-        if let Some(v) = map.get("max-players") { props.max_players = v.parse().unwrap_or(20); }
-        if let Some(v) = map.get("gamemode") { props.gamemode = v.clone(); }
-        if let Some(v) = map.get("difficulty") { props.difficulty = v.clone(); }
-        if let Some(v) = map.get("white-list") { props.white_list = v == "true"; }
-        if let Some(v) = map.get("online-mode") { props.online_mode = v == "true"; }
-        if let Some(v) = map.get("allow-flight") { props.allow_flight = v == "true"; }
-        if let Some(v) = map.get("force-gamemode") { props.force_gamemode = v == "true"; }
-        if let Some(v) = map.get("spawn-protection") { props.spawn_protection = v.parse().unwrap_or(0); }
-        if let Some(v) = map.get("require-resource-pack") { props.require_resource_pack = v == "true"; }
-        if let Some(v) = map.get("resource-pack") { props.resource_pack = v.clone(); }
-        if let Some(v) = map.get("resource-pack-prompt") { props.resource_pack_prompt = v.clone(); }
-        
+
+        if let Some(v) = map.get("motd") {
+            props.motd = v.clone();
+        }
+        if let Some(v) = map.get("max-players") {
+            props.max_players = v.parse().unwrap_or(20);
+        }
+        if let Some(v) = map.get("gamemode") {
+            props.gamemode = v.clone();
+        }
+        if let Some(v) = map.get("difficulty") {
+            props.difficulty = v.clone();
+        }
+        if let Some(v) = map.get("white-list") {
+            props.white_list = v == "true";
+        }
+        if let Some(v) = map.get("online-mode") {
+            props.online_mode = v == "true";
+        }
+        if let Some(v) = map.get("allow-flight") {
+            props.allow_flight = v == "true";
+        }
+        if let Some(v) = map.get("force-gamemode") {
+            props.force_gamemode = v == "true";
+        }
+        if let Some(v) = map.get("spawn-protection") {
+            props.spawn_protection = v.parse().unwrap_or(0);
+        }
+        if let Some(v) = map.get("require-resource-pack") {
+            props.require_resource_pack = v == "true";
+        }
+        if let Some(v) = map.get("resource-pack") {
+            props.resource_pack = v.clone();
+        }
+        if let Some(v) = map.get("resource-pack-prompt") {
+            props.resource_pack_prompt = v.clone();
+        }
+
         // Campos extras do ShadowPainel (custom)
-        if let Some(v) = map.get("shadowpainel-timezone") { props.timezone = v.clone(); }
-        if let Some(v) = map.get("shadowpainel-java-version") { props.java_version = v.clone(); }
+        if let Some(v) = map.get("shadowpainel-timezone") {
+            props.timezone = v.clone();
+        }
+        if let Some(v) = map.get("shadowpainel-java-version") {
+            props.java_version = v.clone();
+        }
     }
-    
+
     Ok(Json(props))
 }
 
@@ -881,13 +913,16 @@ async fn save_server_properties(
 ) -> Result<Json<Value>, ApiErr> {
     let i = app.0.lock().await;
     let dir = expand(&i.cfg.server_dir);
-    
+
     if !dir.exists() {
-        return Err(err(StatusCode::BAD_REQUEST, "A pasta do servidor não existe."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "A pasta do servidor não existe.",
+        ));
     }
-    
+
     let path = dir.join("server.properties");
-    
+
     // Lê o arquivo atual para preservar propriedades não mapeadas
     let mut lines = Vec::new();
     if let Ok(content) = tokio::fs::read_to_string(&path).await {
@@ -895,14 +930,14 @@ async fn save_server_properties(
     } else {
         lines.push("#Minecraft server properties".into());
     }
-    
+
     let mut map: HashMap<String, String> = HashMap::new();
     for line in &lines {
         if let Some((k, v)) = line.trim().split_once('=') {
             map.insert(k.trim().to_string(), v.trim().to_string());
         }
     }
-    
+
     // Atualiza os valores
     map.insert("motd".into(), req.motd);
     map.insert("max-players".into(), req.max_players.to_string());
@@ -913,7 +948,10 @@ async fn save_server_properties(
     map.insert("allow-flight".into(), req.allow_flight.to_string());
     map.insert("force-gamemode".into(), req.force_gamemode.to_string());
     map.insert("spawn-protection".into(), req.spawn_protection.to_string());
-    map.insert("require-resource-pack".into(), req.require_resource_pack.to_string());
+    map.insert(
+        "require-resource-pack".into(),
+        req.require_resource_pack.to_string(),
+    );
     map.insert("resource-pack".into(), req.resource_pack);
     map.insert("resource-pack-prompt".into(), req.resource_pack_prompt);
     map.insert("shadowpainel-timezone".into(), req.timezone);
@@ -937,11 +975,14 @@ async fn save_server_properties(
     for (k, v) in map {
         out.push_str(&format!("{}={}\n", k, v));
     }
-    
+
     tokio::fs::write(&path, out).await.map_err(|e| {
-        err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao salvar server.properties: {e}"))
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar server.properties: {e}"),
+        )
     })?;
-    
+
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1983,7 +2024,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/server/download", post(download_server))
         .route("/api/server/eula", post(accept_eula))
         .route("/api/server/install-fabric", post(install_fabric))
-        .route("/api/server/properties", get(get_server_properties).post(save_server_properties))
+        .route(
+            "/api/server/properties",
+            get(get_server_properties).post(save_server_properties),
+        )
         .route("/api/minecraft/versions", get(minecraft_versions))
         .route("/api/server/create", post(create_server))
         .route("/api/content", get(list_content))

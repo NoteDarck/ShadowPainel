@@ -695,3 +695,4 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
     grid-column: 1 / -1 !important;
   }
 }
+.prop-label { display:block; font-family:'DM Mono'; font-size:11px; color:var(--muted); }
