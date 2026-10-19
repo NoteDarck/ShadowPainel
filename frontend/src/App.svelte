@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.7.6';
+  const APP_VERSION = '0.7.7';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -22,61 +22,60 @@
     loaders: string[];
     date_published: string;
   };
-  type E4all = {
-    loader:string; minecraft_version:string; android_variant:boolean;
-    offline_accounts:boolean; voice_chat:boolean; install_path:string;
-    public_address:string;
+  type E4allConfig = {
+    minecraft_dir:string;
+    use_broker:boolean; broker_url:string; relay_host:string; relay_port:number;
+    restore_dedicated_commands:boolean; use_whitelist:boolean; host_enabled:boolean;
+    prevent_pause_while_hosting:boolean;
+    dialtone_host_enabled:boolean; dialtone_player_enabled:boolean;
+    dialtone_relay_map:string; dialtone_sanitize_ticket:boolean;
+    reconnect_max_attempts:number; reconnect_base_delay_seconds:number;
+    keepalive_interval_seconds:number; login_ready_timeout_ms:number;
+    relay_connect_timeout_ms:number;
+    offline_mode:boolean; hide_domain_in_chat:boolean; voice_p2p_enabled:boolean;
+  };
+  type E4allStatus = {
+    dir_exists:boolean; loader:string; loader_id:string; loader_source:string;
+    installed:boolean; jar:string; config_exists:boolean; config_path:string;
+    level:string; message:string;
+  };
+  type LauncherCandidate = {
+    label: string; path: string; exists: boolean;
+    loader: string; e4all_installed: boolean; config_exists: boolean;
   };
   type ServerProperties = {
-    motd: string;
-    max_players: number;
-    gamemode: string;
-    difficulty: string;
-    white_list: boolean;
-    online_mode: boolean;
-    allow_flight: boolean;
-    force_gamemode: boolean;
-    spawn_protection: number;
-    require_resource_pack: boolean;
-    resource_pack: string;
-    resource_pack_prompt: string;
-    view_distance: number;
-    simulation_distance: number;
-    pvp: boolean;
-    spawn_monsters: boolean;
-    spawn_animals: boolean;
-    generate_structures: boolean;
-    hardcore: boolean;
-    enable_command_block: boolean;
-    allow_nether: boolean;
-    level_name: string;
-    level_seed: string;
-    level_type: string;
-    server_port: number;
-    icon_exists: boolean;
-    timezone: string;
-    java_version: string;
+    motd:string; max_players:number; gamemode:string; difficulty:string;
+    white_list:boolean; online_mode:boolean; allow_flight:boolean; force_gamemode:boolean;
+    spawn_protection:number; require_resource_pack:boolean; resource_pack:string;
+    resource_pack_prompt:string; view_distance:number; simulation_distance:number;
+    pvp:boolean; spawn_monsters:boolean; spawn_animals:boolean; generate_structures:boolean;
+    hardcore:boolean; enable_command_block:boolean; allow_nether:boolean;
+    level_name:string; level_seed:string; level_type:string; server_port:number;
+    icon_exists:boolean; timezone:string; java_version:string;
   };
   type Server = {
     status:string; address:string; players:number; memory_mb:number;
     memory_limit_gb:number; cpu_percent:number; uptime_seconds:number;
     server_name:string; version:string; server_dir:string; java_path:string;
-    java_detected:boolean; installed:boolean; e4all:E4all; logs:Log[];
+    java_detected:boolean; installed:boolean; e4all:E4allConfig; logs:Log[];
   };
   type ServerSummary = { server_name:string; version:string; server_dir:string; installed:boolean; active:boolean; status:string };
 
-  // ── Estado principal ──
+  const E4_DEFAULTS: Omit<E4allConfig, 'minecraft_dir'> = {
+    use_broker:true, broker_url:'https://broker.e4mc.link/getBestRelay', relay_host:'test.e4mc.link', relay_port:25575,
+    restore_dedicated_commands:true, use_whitelist:false, host_enabled:true, prevent_pause_while_hosting:true,
+    dialtone_host_enabled:true, dialtone_player_enabled:true, dialtone_relay_map:'https://natives.e4mc.link/relaymap.json', dialtone_sanitize_ticket:true,
+    reconnect_max_attempts:5, reconnect_base_delay_seconds:2, keepalive_interval_seconds:15,
+    login_ready_timeout_ms:15000, relay_connect_timeout_ms:15000, offline_mode:false, hide_domain_in_chat:false, voice_p2p_enabled:true,
+  };
+
   let server:Server = {
     status:'offline', address:'localhost:25565', players:0, memory_mb:0,
     memory_limit_gb:4, cpu_percent:0, uptime_seconds:0,
     server_name:'Meu servidor', version:'',
     server_dir:'~/Minecraft/MeuServidor', java_path:'java',
     java_detected:false, installed:false,
-    e4all:{
-      loader:'fabric', minecraft_version:'', android_variant:false,
-      offline_accounts:false, voice_chat:true,
-      install_path:'~/Minecraft/MeuServidor/mods', public_address:''
-    },
+    e4all:{ minecraft_dir:'~/.minecraft', ...E4_DEFAULTS },
     logs:[]
   };
   let versions:Version[] = [];
@@ -84,14 +83,12 @@
   let switchingServer = false;
   let activeTab:'overview'|'content'|'config'|'setup' = 'overview';
 
-  // ── Aba de conteúdo ──
   let contentKind = 'mods';
   let contentLoader = 'fabric';
   let contentVersion = '';
   let content:ContentItem[] = [];
   let results:ContentResult[] = [];
 
-  // ── Assistente ──
   let setup = {
     server_name:'Meu Servidor Minecraft',
     server_dir:'~/Minecraft/Servidor',
@@ -100,24 +97,20 @@
   };
   let setupVersion = '';
 
-  // ── Estado de UI ──
   let loading = false;
   let notice = '';
   let saved = false;
   let command = '';
   let booted = false;
 
-  // ── Seleção múltipla de conteúdo ──
   let selectedItems: Set<string> = new Set();
 
-  // ── Exclusão do servidor (2 fatores) ──
   let deleteOpen = false;
   let deleteStep: 1 | 2 = 1;
   let deleteName = '';
   let deleteAck = false;
   let deleting = false;
 
-  // ── Catálogo estilo Prism ──
   let catalogOpen = false;
   let catalogDetail:ContentResult | null = null;
   let catalogLoading = false;
@@ -128,52 +121,37 @@
   let catalogOffset = 0;
   let catalogHasMore = true;
   let catalogLoadingMore = false;
-  let catalogSentinel:HTMLDivElement;
-  let catalogScroll:HTMLDivElement;
+  let catalogSentinel:HTMLDivElement | undefined;
+  let catalogScroll:HTMLDivElement | undefined;
   let catalogObserver:IntersectionObserver | undefined;
-  let consoleEl:HTMLDivElement;
+  let consoleEl:HTMLDivElement | undefined;
   let consolePinned = true;
-  let iconInput:HTMLInputElement;
+  let iconInput:HTMLInputElement | undefined;
 
-  // ── Seleção múltipla no catálogo e versão ──
   let catalogSelected: Set<string> = new Set();
   let modVersions: ModVersion[] = [];
   let selectedModVersion = '';
   let selectedModVersions:Record<string,string> = {};
   let installingBatch = false;
 
-  // ── NOVO: server.properties ──
+  let e4status: E4allStatus | null = null;
+  let checkingE4 = false;
+
+  let launcherCandidates: LauncherCandidate[] = [];
+  let scanningLaunchers = false;
+
   let props: ServerProperties = {
-    motd: 'Servidor ShadowPainel',
-    max_players: 20,
-    gamemode: 'survival',
-    difficulty: 'easy',
-    white_list: false,
-    online_mode: true,
-    allow_flight: false,
-    force_gamemode: false,
-    spawn_protection: 0,
-    require_resource_pack: false,
-    resource_pack: '',
-    resource_pack_prompt: '',
-    view_distance: 10,
-    simulation_distance: 10,
-    pvp: true,
-    spawn_monsters: true,
-    spawn_animals: true,
-    generate_structures: true,
-    hardcore: false,
-    enable_command_block: false,
-    allow_nether: true,
-    level_name: 'world',
-    level_seed: '',
-    level_type: 'minecraft:normal',
-    server_port: 25565,
-    icon_exists: false,
-    timezone: 'America/Sao_Paulo',
-    java_version: 'Java 21'   };
+    motd:'Servidor ShadowPainel', max_players:20, gamemode:'survival', difficulty:'easy',
+    white_list:false, online_mode:true, allow_flight:false, force_gamemode:false,
+    spawn_protection:0, require_resource_pack:false, resource_pack:'', resource_pack_prompt:'',
+    view_distance:10, simulation_distance:10, pvp:true, spawn_monsters:true,
+    spawn_animals:true, generate_structures:true, hardcore:false, enable_command_block:false,
+    allow_nether:true, level_name:'world', level_seed:'', level_type:'minecraft:normal',
+    server_port:25565, icon_exists:false, timezone:'America/Sao_Paulo', java_version:'Java 21',
+  };
   let loadingProps = false;
   let savedProps = false;
+
   function handleConsoleScroll() {
     if (!consoleEl) return;
     consolePinned = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 48;
@@ -181,6 +159,7 @@
   afterUpdate(() => {
     if (consoleEl && consolePinned) consoleEl.scrollTop = consoleEl.scrollHeight;
   });
+
   async function uploadServerIcon(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
@@ -203,7 +182,6 @@
     }
   }
 
-  // ── Helpers de API ──
   const api = async <T=unknown>(path:string, options?:RequestInit):Promise<T> => {
     const response = await fetch(`/api${path}`, options);
     const text = await response.text();
@@ -221,7 +199,6 @@
     body:JSON.stringify(value)
   });
 
-  // ── Refresh / loaders ──
   async function refresh() {
     try {
       const fresh = await api<Server>('/state');
@@ -231,7 +208,6 @@
         if (!fresh.installed) activeTab = 'setup';
       }
       if (!contentVersion && fresh.version) contentVersion = fresh.version;
-      if (fresh.e4all?.loader) contentLoader = fresh.e4all.loader;
     } catch {
       notice = 'Núcleo Rust offline ou ainda iniciando.';
     }
@@ -252,7 +228,6 @@
     try {
       server = await api<Server>('/servers/switch', json({server_dir}));
       contentVersion = server.version || contentVersion;
-      contentLoader = server.e4all?.loader || contentLoader;
       activeTab = server.installed ? 'overview' : 'setup';
       notice = `Servidor ativo: ${server.server_name}.`;
       await loadServers();
@@ -289,7 +264,6 @@
     }
   }
 
-  // ── Ações do servidor ──
   async function createServer() {
     loading = true;
     notice = '';
@@ -360,7 +334,6 @@
     }
   }
 
-  // ── NOVO: Load/Save Props ──
   $: if (activeTab === 'config') loadServerProperties();
 
   async function loadServerProperties() {
@@ -388,7 +361,6 @@
     }
   }
 
-  // ── Conteúdo ──
   async function installContent(project_id:string, version_id?: string) {
     try {
       const version = contentVersion || server.version;
@@ -444,7 +416,6 @@
         kind: contentKind,
         filenames: Array.from(selectedItems)
       }));
-
       if (result.ok) {
         notice = `${result.deleted?.length || 0} arquivo(s) removido(s).`;
       } else {
@@ -457,24 +428,17 @@
   }
 
   function toggleSelection(filename: string) {
-    if (selectedItems.has(filename)) {
-      selectedItems.delete(filename);
-    } else {
-      selectedItems.add(filename);
-    }
+    if (selectedItems.has(filename)) selectedItems.delete(filename);
+    else selectedItems.add(filename);
     selectedItems = selectedItems;
   }
 
   function selectAll() {
-    if (selectedItems.size === content.length) {
-      selectedItems.clear();
-    } else {
-      content.forEach(c => selectedItems.add(c.filename));
-    }
+    if (selectedItems.size === content.length) selectedItems.clear();
+    else content.forEach(c => selectedItems.add(c.filename));
     selectedItems = selectedItems;
   }
 
-  // ── Catálogo ──
   async function openCatalog() {
     catalogOpen = true;
     catalogDetail = null;
@@ -529,7 +493,6 @@
     modVersions = [];
     selectedModVersion = '';
     if (!projectId) return;
-
     try {
       const version = contentVersion || server.version;
       const data = await api<ModVersion[]>(`/content/versions?query=${projectId}&loader=${contentLoader}&version=${version}`);
@@ -555,7 +518,6 @@
     catalogSelected = catalogSelected;
   }
 
-  // ── Exclusão do servidor ──
   function openDelete() {
     deleteOpen = true;
     deleteStep = 1;
@@ -582,7 +544,58 @@
     deleting = false;
   }
 
-  // ── Utilidades ──
+  async function checkE4all() {
+    checkingE4 = true;
+    try {
+      e4status = await api<E4allStatus>('/e4all/status', json({ minecraft_dir: server.e4all.minecraft_dir }));
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Não foi possível verificar o e4all.';
+    }
+    checkingE4 = false;
+  }
+  async function loadE4allFromFile() {
+    try {
+      server.e4all = await api<E4allConfig>('/e4all/load', json({ minecraft_dir: server.e4all.minecraft_dir }));
+      await checkE4all();
+      saved = true; setTimeout(()=>saved=false, 2200);
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao ler o e4all.toml';
+    }
+  }
+  async function saveE4all() {
+    notice = '';
+    try {
+      server = await api<Server>('/e4all/config', json(server.e4all));
+      await checkE4all();
+      saved = true; setTimeout(()=>saved=false, 2200);
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao salvar e4all';
+    }
+  }
+  function resetE4allDefaults() {
+    server.e4all = { minecraft_dir: server.e4all.minecraft_dir, ...E4_DEFAULTS };
+  }
+  function loaderName(l:string) {
+    return ({ fabric:'Fabric', forge:'Forge', neoforge:'NeoForge', quilt:'Quilt', none:'Nenhum (sem mod loader)' } as Record<string,string>)[l] ?? l;
+  }
+
+  async function scanLaunchers() {
+    scanningLaunchers = true;
+    try {
+      launcherCandidates = await api<LauncherCandidate[]>('/e4all/scan');
+      if (launcherCandidates.length === 0) notice = 'Nenhum launcher encontrado automaticamente.';
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao procurar launchers.';
+    } finally {
+      scanningLaunchers = false;
+    }
+  }
+
+  function pickLauncherPath(path: string) {
+    server.e4all.minecraft_dir = path;
+    checkE4all();
+  }
+
   function formatBytes(n:number) {
     return n < 1024*1024
       ? `${Math.max(1,Math.round(n/1024))} KB`
@@ -595,9 +608,9 @@
     return `${h}:${m}:${s}`;
   }
 
-  // ── Reatividade ──
   $: if (activeTab === 'content') loadContent();
   $: if (contentKind || contentVersion || contentLoader) results = [];
+  $: if (activeTab === 'config' && !e4status) checkE4all();
 
   onMount(() => {
     refresh();
@@ -807,7 +820,7 @@
         </div>
 
         <div class="content-tabs">
-          {#each [['mods','Mods'],['plugins','Plugins'],['datapacks','Datapacks']] as item}
+          {#each ([['mods','Mods'],['plugins','Plugins'],['datapacks','Datapacks']] as [string,string][]) as item}
             <button class:active={contentKind===item[0]}
                     on:click={()=>pickCategory(item[0] as 'mods'|'plugins'|'datapacks')}>
               {item[1]}
@@ -863,13 +876,11 @@
               <div class="installed-card"
                    class:selected={selectedItems.has(file.filename)}
                    role="button" tabindex="0"
-                   title="Duplo clique para selecionar"
                    on:dblclick={() => toggleSelection(file.filename)}
                    on:keydown={(event) => (event.key === 'Enter' || event.key === ' ') && toggleSelection(file.filename)}>
                 <input type="checkbox" class="item-checkbox"
                        checked={selectedItems.has(file.filename)}
                        on:change={() => toggleSelection(file.filename)} />
-
                 <div class="catalog-icon" style="width:36px; height:36px; font-size:14px;">
                   {#if file.icon_url}
                     <img src={file.icon_url} alt=""/>
@@ -877,13 +888,9 @@
                     <span>{contentKind==='mods'?'◆':contentKind==='plugins'?'⬡':'◇'}</span>
                   {/if}
                 </div>
-
                 <div class="installed-meta">
                   <b>{file.filename}</b>
-                  <small>
-                    {formatBytes(file.size)}
-                    {#if file.installed_version}· Versão: {file.installed_version}{/if}
-                  </small>
+                  <small>{formatBytes(file.size)}{#if file.installed_version} · Versão: {file.installed_version}{/if}</small>
                 </div>
               </div>
             {/each}
@@ -915,11 +922,8 @@
                 <input bind:value={catalogQuery}
                        placeholder="Pesquisar no Modrinth (ex.: sodium, worldedit)..."
                        on:keydown={(e)=>e.key==='Enter'&&runCatalogSearch()}/>
-                <button class="secondary" on:click={() => showCatalogFilters = !showCatalogFilters} title="Filtros Avançados">
-                  ⚙ Filtros
-                </button>
-                <button class="primary" on:click={() => runCatalogSearch()}
-                        disabled={catalogLoading || !contentVersion}>
+                <button class="secondary" on:click={() => showCatalogFilters = !showCatalogFilters} title="Filtros Avançados">⚙ Filtros</button>
+                <button class="primary" on:click={() => runCatalogSearch()} disabled={catalogLoading || !contentVersion}>
                   {catalogLoading?'Buscando...':'Buscar'}
                 </button>
               </div>
@@ -932,7 +936,7 @@
                       <option value="all">Todas as categorias</option>
                       <option value="adventure">Aventura</option>
                       <option value="exploration">Exploração</option>
-                      <option value="worldgen">Geração de Mundo (Estruturas)</option>
+                      <option value="worldgen">Geração de Mundo</option>
                       <option value="magic">Magia</option>
                       <option value="technology">Tecnologia</option>
                       <option value="decoration">Decoração</option>
@@ -951,34 +955,25 @@
             {#if catalogLoading}
               <div class="catalog-loading"><div class="spinner"></div> Consultando Modrinth…</div>
             {:else if results.length===0}
-              <div class="empty">
-                Nenhum resultado para <b>{contentVersion}</b> em <b>{contentLoader}</b>.
-                <br/>Tente outra versão, outro loader, outra categoria ou um termo diferente.
-              </div>
+              <div class="empty">Nenhum resultado para <b>{contentVersion}</b> em <b>{contentLoader}</b>.</div>
             {:else}
               <div class="catalog-grid" bind:this={catalogScroll}>
                 {#each results as item}
                   <div class="catalog-card"
                        class:selected={catalogSelected.has(item.project_id)}
                        class:installed={isInstalled(item.project_id)}
-                       class:disabled={isInstalled(item.project_id)}
                        role="button" tabindex="0"
                        on:click={() => !isInstalled(item.project_id) && (catalogDetail=item, loadModVersions(item.project_id))}
                        on:dblclick|stopPropagation={() => toggleCatalogSelection(item)}
                        on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&!isInstalled(item.project_id)&&(catalogDetail=item, loadModVersions(item.project_id))}>
-
                     {#if !isInstalled(item.project_id)}
                       <input type="checkbox" class="item-checkbox"
                              checked={catalogSelected.has(item.project_id)}
                              on:click|stopPropagation={() => toggleCatalogSelection(item)} />
                     {/if}
-
                     <div class="catalog-icon">
-                      {#if item.icon_url}
-                        <img src={item.icon_url} alt="" loading="lazy"/>
-                      {:else}
-                        <span>{item.title.slice(0,1).toUpperCase()}</span>
-                      {/if}
+                      {#if item.icon_url}<img src={item.icon_url} alt="" loading="lazy"/>
+                      {:else}<span>{item.title.slice(0,1).toUpperCase()}</span>{/if}
                     </div>
                     <div class="catalog-text">
                       <b>{item.title}</b>
@@ -998,17 +993,12 @@
               <div class="detail-sheet">
                 <div class="detail-head">
                   <div class="catalog-icon big">
-                    {#if catalogDetail.icon_url}
-                      <img src={catalogDetail.icon_url} alt=""/>
-                    {:else}
-                      <span>{catalogDetail.title.slice(0,1).toUpperCase()}</span>
-                    {/if}
+                    {#if catalogDetail.icon_url}<img src={catalogDetail.icon_url} alt=""/>
+                    {:else}<span>{catalogDetail.title.slice(0,1).toUpperCase()}</span>{/if}
                   </div>
                   <div>
                     <h4>{catalogDetail.title}</h4>
-                    {#if catalogDetail.version_number}
-                      <small class="version-tag">Versão: {catalogDetail.version_number}</small>
-                    {/if}
+                    {#if catalogDetail.version_number}<small class="version-tag">Versão: {catalogDetail.version_number}</small>{/if}
                     <small>{catalogDetail.downloads.toLocaleString('pt-BR')} downloads</small>
                   </div>
                   <button class="modal-close" on:click={()=>{catalogDetail=null; modVersions=[];}}>✕</button>
@@ -1027,9 +1017,7 @@
                 {/if}
 
                 <div class="detail-actions">
-                  <button class="secondary" on:click={()=>{catalogDetail=null; modVersions=[];}}>
-                    Cancelar
-                  </button>
+                  <button class="secondary" on:click={()=>{catalogDetail=null; modVersions=[];}}>Cancelar</button>
                   <button class="primary"
                           on:click={async () => {
                             if (catalogDetail) {
@@ -1078,18 +1066,11 @@
         <button class="primary" on:click={saveConfig}>SALVAR CONFIGURAÇÃO <span>→</span></button>
       </section>
 
-      <!-- NOVO: server.properties -->
       <section class="settings-card">
         <div class="card-head" style="padding-bottom: 16px;">
-          <div>
-            <h3 style="display:flex; align-items:center; gap:8px;">
-              <span style="font-size:20px; color:var(--accent);">📄</span> server.properties
-            </h3>
-          </div>
+          <div><h3 style="display:flex; align-items:center; gap:8px;"><span style="font-size:20px; color:var(--accent);">📄</span> server.properties</h3></div>
           <div style="display:flex; gap:10px; align-items:center;">
-            {#if savedProps}
-              <span style="color:var(--green); font-size:12px; font-family:'DM Mono';">✓ Salvo</span>
-            {/if}
+            {#if savedProps}<span style="color:var(--green); font-size:12px; font-family:'DM Mono';">✓ Salvo</span>{/if}
             <button class="secondary" on:click={saveServerProperties} disabled={loadingProps}>
               {loadingProps ? 'Salvando...' : 'Salvar Alterações'}
             </button>
@@ -1097,25 +1078,16 @@
         </div>
 
         <div class="props-grid">
-          <!-- MOTD -->
           <div class="prop-group" style="grid-column: 1 / 2;">
             <span class="prop-label">MOTD (Mensagem do dia)</span>
-            <div class="prop-control">
-              <input bind:value={props.motd} placeholder="Servidor ShadowPainel" />
-            </div>
+            <div class="prop-control"><input bind:value={props.motd} placeholder="Servidor ShadowPainel" /></div>
             <small>motd=Servidor ShadowPainel</small>
           </div>
-
-          <!-- Max Players -->
           <div class="prop-group" style="grid-column: 2 / 3;">
             <span class="prop-label">Vagas</span>
-            <div class="prop-control">
-              <input type="number" bind:value={props.max_players} min="1" max="1000" />
-            </div>
+            <div class="prop-control"><input type="number" bind:value={props.max_players} min="1" max="1000" /></div>
             <small>max-players=20</small>
           </div>
-
-          <!-- Modo de Jogo -->
           <div class="prop-group">
             <span class="prop-label">Modo de jogo</span>
             <div class="prop-control">
@@ -1128,8 +1100,6 @@
             </div>
             <small>gamemode=survival</small>
           </div>
-
-          <!-- Dificuldade -->
           <div class="prop-group">
             <span class="prop-label">Dificuldade</span>
             <div class="prop-control">
@@ -1142,8 +1112,6 @@
             </div>
             <small>difficulty=easy</small>
           </div>
-
-          <!-- Whitelist -->
           <div class="prop-group">
             <span class="prop-label">Whitelist</span>
             <div class="prop-control toggle-control">
@@ -1153,8 +1121,6 @@
             </div>
             <small>white-list=false</small>
           </div>
-
-          <!-- Pirata -->
           <div class="prop-group">
             <span class="prop-label">Pirata (Offline Mode)</span>
             <div class="prop-control toggle-control">
@@ -1164,8 +1130,6 @@
             </div>
             <small>online-mode=true</small>
           </div>
-
-          <!-- Voar -->
           <div class="prop-group">
             <span class="prop-label">Voar</span>
             <div class="prop-control toggle-control">
@@ -1175,8 +1139,6 @@
             </div>
             <small>allow-flight=true</small>
           </div>
-
-          <!-- Forçar Gamemode -->
           <div class="prop-group">
             <span class="prop-label">Forçar o Gamemode</span>
             <div class="prop-control toggle-control">
@@ -1186,8 +1148,6 @@
             </div>
             <small>force-gamemode=false</small>
           </div>
-
-          <!-- Spawn Protection -->
           <div class="prop-group">
             <span class="prop-label">Proteção no Spawn</span>
             <div class="prop-control">
@@ -1202,8 +1162,6 @@
             </div>
             <small>spawn-protection=0</small>
           </div>
-
-          <!-- Requer Pacote -->
           <div class="prop-group">
             <span class="prop-label">É necessário um pacote de recursos</span>
             <div class="prop-control toggle-control">
@@ -1213,26 +1171,14 @@
             </div>
             <small>require-resource-pack=false</small>
           </div>
-
-          <!-- Pacote de Recursos -->
           <div class="prop-group" style="grid-column: 1 / -1;">
             <span class="prop-label">Pacote de recursos</span>
-            <div class="prop-control" style="position:relative;">
-              <input bind:value={props.resource_pack} placeholder="https://exemplo.com/pacote.zip" style="padding-left:36px;" />
-              <span style="position:absolute; left:12px; top:50%; transform:translateY(-50%); opacity:0.5;">🔗</span>
-              <button class="icon-btn" title="Testar link" style="position:absolute; right:8px; top:50%; transform:translateY(-50%); background:rgba(89, 155, 255, 0.2); color:#599bff; border:none; border-radius:4px; padding:4px 8px; cursor:pointer;">
-                ✓
-              </button>
-            </div>
+            <div class="prop-control"><input bind:value={props.resource_pack} placeholder="https://exemplo.com/pacote.zip" /></div>
             <small>resource-pack=</small>
           </div>
-
-          <!-- Solicitação do Pacote -->
           <div class="prop-group" style="grid-column: 1 / -1;">
             <span class="prop-label">Solicitação do pacote de recursos</span>
-            <div class="prop-control">
-              <input bind:value={props.resource_pack_prompt} placeholder="Você precisa baixar o pacote para jogar!" />
-            </div>
+            <div class="prop-control"><input bind:value={props.resource_pack_prompt} placeholder="Você precisa baixar o pacote para jogar!" /></div>
             <small>resource-pack-prompt=</small>
           </div>
         </div>
@@ -1258,7 +1204,6 @@
           <span class:ok={props.icon_exists} class="icon-status">{props.icon_exists ? '✓ Ícone instalado' : '○ Nenhum ícone instalado'}</span>
           <input bind:this={iconInput} type="file" accept="image/png" on:change={uploadServerIcon} />
         </div>
-        <!-- Footer do Formulário -->
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; margin-top:24px; padding-top:20px; border-top:1px dashed var(--border);">
           <div class="prop-group">
             <span class="prop-label">Fuso horário</span>
@@ -1286,38 +1231,122 @@
 
       <section class="settings-card">
         <div class="card-head">
-          <div><h3>e4all</h3><p>Configuração do mod para abrir um mundo LAN pela internet. O endereço é gerado pelo próprio mod ao iniciar o mundo LAN.</p></div>
+          <div><h3>e4all</h3><p>Configuração do mod para abrir um mundo LAN pela internet.</p></div>
+          <span class="mod-badge">MODRINTH · e4all</span>
+        </div>
+
+        <div class="e4-folder" style="display:grid;grid-template-columns:1fr auto auto;gap:10px;margin-bottom:16px;">
+          <label style="display:flex;flex-direction:column;gap:8px;color:var(--muted);font:500 10px 'DM Mono';letter-spacing:.7px;">
+            Pasta do Minecraft
+            <input bind:value={server.e4all.minecraft_dir} placeholder="~/.minecraft"
+                   style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:11px;color:var(--text);font:12px 'DM Mono';outline:none"/>
+          </label>
+          <button class="secondary" on:click={checkE4all} disabled={checkingE4}>
+            {checkingE4 ? 'Verificando...' : 'Verificar'}
+          </button>
+          <button class="secondary" on:click={loadE4allFromFile}>Ler do arquivo</button>
+        </div>
+
+        <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap; margin-top: 16px;">
+          <button class="secondary" on:click={scanLaunchers} disabled={scanningLaunchers}>
+            {scanningLaunchers ? 'Procurando...' : '🔍 Procurar launchers'}
+          </button>
+        </div>
+
+        {#if launcherCandidates.length > 0}
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:20px;">
+            {#each launcherCandidates as c}
+              <button
+                style="text-align:left;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;padding:12px;cursor:pointer;color:var(--text);transition:0.2s;"
+                on:mouseenter={(e) => (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--accent)'}
+                on:mouseleave={(e) => (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--border)'}
+                on:click={() => pickLauncherPath(c.path)}>
+                <b style="display:block;font-size:12px;color:#fff;">{c.label}</b>
+                <small style="display:block;color:var(--muted);font-size:10px;margin-top:4px;word-break:break-all;">{c.path}</small>
+                <small style="display:block;margin-top:8px;font-family:'DM Mono';font-size:10px;">
+                  loader: <span class:yes={c.loader !== 'none' && c.loader !== 'quilt'} class:no={c.loader === 'none'} class:maybe={c.loader === 'quilt'}>{c.loader}</span>
+                  · e4all: <span class:yes={c.e4all_installed} class:no={!c.e4all_installed}>{c.e4all_installed ? 'Sim' : 'Não'}</span>
+                  · toml: <span class:yes={c.config_exists} class:maybe={!c.config_exists}>{c.config_exists ? 'Sim' : 'Não'}</span>
+                </small>
+              </button>
+            {/each}
+          </div>
+        {/if}
+
+        {#if e4status}
+          {#if e4status.dir_exists}
+            <div class="e4-rows" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px;">
+              <div class="e4-row" style="background:var(--panel-2);border-radius:7px;padding:12px 14px;">
+                <span style="display:block;color:var(--faint);font:500 9px 'DM Mono';">MOD LOADER</span>
+                <b class:yes={e4status.loader!=='none' && e4status.loader!=='quilt'} class:no={e4status.loader==='none'} class:maybe={e4status.loader==='quilt'} style="display:block;margin-top:6px;font-size:13px;">{loaderName(e4status.loader)}</b>
+                <small style="display:block;color:var(--faint);font-size:9px;margin-top:4px;">{e4status.loader_id ? e4status.loader_id + ' · ' : ''}{e4status.loader_source}</small>
+              </div>
+              <div class="e4-row" style="background:var(--panel-2);border-radius:7px;padding:12px 14px;">
+                <span style="display:block;color:var(--faint);font:500 9px 'DM Mono';">e4all INSTALADO</span>
+                <b class:yes={e4status.installed} class:no={!e4status.installed} style="display:block;margin-top:6px;font-size:13px;">{e4status.installed ? 'Sim' : 'Não'}</b>
+                <small style="display:block;color:var(--faint);font-size:9px;margin-top:4px;">{e4status.installed ? e4status.jar : 'Nenhum JAR do e4all na pasta mods'}</small>
+              </div>
+              <div class="e4-row" style="background:var(--panel-2);border-radius:7px;padding:12px 14px;">
+                <span style="display:block;color:var(--faint);font:500 9px 'DM Mono';">ARQUIVO e4all.toml</span>
+                <b class:yes={e4status.config_exists} class:maybe={!e4status.config_exists} style="display:block;margin-top:6px;font-size:13px;">{e4status.config_exists ? 'Encontrado' : 'Será criado ao salvar'}</b>
+                <small style="display:block;color:var(--faint);font-size:9px;margin-top:4px;word-break:break-all;">{e4status.config_path}</small>
+              </div>
+            </div>
+          {/if}
+          <div class="notice" style="margin:0 0 16px;">{e4status.message}</div>
+        {/if}
+
+        <div class="settings-subhead"><h4>Hospedagem</h4></div>
+        <div class="e4all-options">
+          <div class="prop-group"><span class="prop-label">Compartilhar mundos LAN</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.host_enabled} on:click={() => server.e4all.host_enabled = !server.e4all.host_enabled}>{#if server.e4all.host_enabled}✓{:else}✕{/if}</button></div><small>hostEnabled</small></div>
+          <div class="prop-group"><span class="prop-label">Não pausar enquanto hospeda</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.prevent_pause_while_hosting} on:click={() => server.e4all.prevent_pause_while_hosting = !server.e4all.prevent_pause_while_hosting}>{#if server.e4all.prevent_pause_while_hosting}✓{:else}✕{/if}</button></div><small>preventPauseWhileHosting</small></div>
+          <div class="prop-group"><span class="prop-label">Esconder domínio no chat</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.hide_domain_in_chat} on:click={() => server.e4all.hide_domain_in_chat = !server.e4all.hide_domain_in_chat}>{#if server.e4all.hide_domain_in_chat}✓{:else}✕{/if}</button></div><small>hideDomainInChat</small></div>
+        </div>
+
+        <div class="settings-subhead"><h4>Acesso</h4></div>
+        <div class="e4all-options">
+          <div class="prop-group"><span class="prop-label">Contas offline</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.offline_mode} on:click={() => server.e4all.offline_mode = !server.e4all.offline_mode}>{#if server.e4all.offline_mode}✓{:else}✕{/if}</button></div><small>offlineMode</small></div>
+          <div class="prop-group"><span class="prop-label">Usar whitelist</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.use_whitelist} on:click={() => server.e4all.use_whitelist = !server.e4all.use_whitelist}>{#if server.e4all.use_whitelist}✓{:else}✕{/if}</button></div><small>useWhiteList</small></div>
+          <div class="prop-group"><span class="prop-label">Comandos de servidor dedicado</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.restore_dedicated_commands} on:click={() => server.e4all.restore_dedicated_commands = !server.e4all.restore_dedicated_commands}>{#if server.e4all.restore_dedicated_commands}✓{:else}✕{/if}</button></div><small>restoreDedicatedCommands</small></div>
+        </div>
+
+        <div class="settings-subhead"><h4>Voz e P2P</h4></div>
+        <div class="e4all-options">
+          <div class="prop-group"><span class="prop-label">Simple Voice Chat P2P</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.voice_p2p_enabled} on:click={() => server.e4all.voice_p2p_enabled = !server.e4all.voice_p2p_enabled}>{#if server.e4all.voice_p2p_enabled}✓{:else}✕{/if}</button></div><small>voiceP2PEnabled</small></div>
+          <div class="prop-group"><span class="prop-label">P2P como host</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.dialtone_host_enabled} on:click={() => server.e4all.dialtone_host_enabled = !server.e4all.dialtone_host_enabled}>{#if server.e4all.dialtone_host_enabled}✓{:else}✕{/if}</button></div><small>dialtoneHostEnabled</small></div>
+          <div class="prop-group"><span class="prop-label">P2P como jogador</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.dialtone_player_enabled} on:click={() => server.e4all.dialtone_player_enabled = !server.e4all.dialtone_player_enabled}>{#if server.e4all.dialtone_player_enabled}✓{:else}✕{/if}</button></div><small>dialtonePlayerEnabled</small></div>
+          <div class="prop-group"><span class="prop-label">Ocultar IP direto do relay</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.dialtone_sanitize_ticket} on:click={() => server.e4all.dialtone_sanitize_ticket = !server.e4all.dialtone_sanitize_ticket}>{#if server.e4all.dialtone_sanitize_ticket}✓{:else}✕{/if}</button></div><small>dialtoneSanitizeTicket</small></div>
+        </div>
+
+        <div class="settings-subhead"><h4>Relay</h4></div>
+        <div class="e4all-options">
+          <div class="prop-group"><span class="prop-label">Escolher melhor relay</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.use_broker} on:click={() => server.e4all.use_broker = !server.e4all.use_broker}>{#if server.e4all.use_broker}✓{:else}✕{/if}</button></div><small>useBroker</small></div>
         </div>
         <div class="form-grid">
-          <label>Loader
-            <select bind:value={server.e4all.loader}>
-              <option value="fabric">Fabric</option>
-              <option value="forge">Forge</option>
-              <option value="neoforge">NeoForge</option>
-              <option value="quilt">Quilt</option>
-            </select>
-          </label>
-          <label>Versão Minecraft<input bind:value={server.e4all.minecraft_version}/></label>
-          <label>Pasta de instalação<input bind:value={server.e4all.install_path}/></label>
-          <label>Endereço público gerado<input bind:value={server.e4all.public_address} placeholder="gerado pelo e4all" readonly /></label>
+          <label>URL do broker<input bind:value={server.e4all.broker_url}></label>
+          <label>URL do mapa de relays (P2P)<input bind:value={server.e4all.dialtone_relay_map}></label>
+          <label>Relay fixo (host)<input bind:value={server.e4all.relay_host}></label>
+          <label>Relay fixo (porta)<input type="number" min="1" max="65535" bind:value={server.e4all.relay_port}></label>
         </div>
-        <div class="e4all-options">
-          <div class="prop-group"><span class="prop-label">Contas offline</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.offline_accounts} on:click={() => server.e4all.offline_accounts = !server.e4all.offline_accounts}>{#if server.e4all.offline_accounts}✓{:else}✕{/if}</button></div><small>Permite o modo offline no menu Abrir para LAN.</small></div>
-          <div class="prop-group"><span class="prop-label">Simple Voice Chat P2P</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.voice_chat} on:click={() => server.e4all.voice_chat = !server.e4all.voice_chat}>{#if server.e4all.voice_chat}✓{:else}✕{/if}</button></div><small>Os dois jogadores precisam do e4all e SVC; P2P pode falhar em NAT restritivo.</small></div>
-          <div class="prop-group"><span class="prop-label">Variante Android</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.android_variant} on:click={() => server.e4all.android_variant = !server.e4all.android_variant}>{#if server.e4all.android_variant}✓{:else}✕{/if}</button></div><small>Usa o JAR do e4all com sufixo -android.</small></div>
+
+        <div class="settings-subhead"><h4>Avançado · reconexão e tempos</h4></div>
+        <div class="form-grid">
+          <label>Tentativas de reconexão<input type="number" min="0" max="100" bind:value={server.e4all.reconnect_max_attempts}></label>
+          <label>Atraso inicial (s)<input type="number" min="1" max="3600" bind:value={server.e4all.reconnect_base_delay_seconds}></label>
+          <label>Keepalive (s)<input type="number" min="1" max="3600" bind:value={server.e4all.keepalive_interval_seconds}></label>
+          <label>Espera do login (ms)<input type="number" min="0" max="600000" bind:value={server.e4all.login_ready_timeout_ms}></label>
+          <label>Tempo de conexão ao relay (ms)<input type="number" min="100" max="600000" bind:value={server.e4all.relay_connect_timeout_ms}></label>
         </div>
-        <div class="e4all-note">O ShadowPainel salva essas preferências, mas o JAR do e4all precisa estar instalado em <b>mods/</b>. Para o Android, use o arquivo <b>-android</b>; o endereço público só aparece quando o mundo é aberto para LAN.</div>
-        <button class="primary"
-          on:click={async()=>{
-            try {
-              server = await api<Server>('/e4all/config', json(server.e4all));
-              saved = true; setTimeout(()=>saved=false, 2200);
-            } catch(e) {
-              notice = e instanceof Error ? e.message : 'Falha ao salvar.';
-            }
-          }}>
-          SALVAR e4all <span>→</span>
-        </button>
+
+        <div class="e4all-note" style="margin-top:16px;">
+          <b>Como aplicar</b>
+          <p>O e4all é um mod do cliente: só quem hospeda instala. O domínio é gerado pelo mod ao abrir o mundo em "Abrir para LAN". Salve com o Minecraft fechado e reabra o mundo LAN depois.</p>
+        </div>
+
+        <div style="display:flex;gap:10px;margin-top:16px;">
+          <button class="primary" on:click={saveE4all}>SALVAR NO e4all.toml <span>→</span></button>
+          <button class="secondary" on:click={resetE4allDefaults}>Restaurar padrões</button>
+        </div>
       </section>
 
     {:else if activeTab==='setup'}
@@ -1340,16 +1369,12 @@
           <label>
             Nome do servidor
             <input bind:value={setup.server_name} placeholder="Sobrevivência principal"/>
-            <small style="color: var(--faint); font-size: 11px; margin-top: 4px;">
-              Este nome aparece no painel. Pode ser alterado depois.
-            </small>
+            <small style="color: var(--faint); font-size: 11px; margin-top: 4px;">Este nome aparece no painel. Pode ser alterado depois.</small>
           </label>
           <label>
             Pasta do servidor
             <input bind:value={setup.server_dir}/>
-            <small style="color: var(--faint); font-size: 11px; margin-top: 4px;">
-              Onde os arquivos do mundo serão salvos. Use o caminho completo.
-            </small>
+            <small style="color: var(--faint); font-size: 11px; margin-top: 4px;">Onde os arquivos do mundo serão salvos. Use o caminho completo.</small>
           </label>
           <label>
             Versão do Minecraft
@@ -1358,9 +1383,6 @@
                 <option value={version.id}>{version.id}</option>
               {/each}
             </select>
-            <small class="selected-version">
-              Selecione a versão que você joga. Mods e plugins dependem dela.
-            </small>
           </label>
           <label>
             Tipo / modloader
@@ -1370,9 +1392,6 @@
               <option value="paper">Paper — para usar plugins (melhor desempenho)</option>
               <option value="purpur">Purpur — plugins + customizações</option>
             </select>
-            <small class="selected-version">
-              Se não for usar mods ou plugins, escolha Vanilla.
-            </small>
           </label>
           <label>Memória inicial (GB)
             <input type="number" min="1" max="64" bind:value={setup.memory_limit_gb}/>
@@ -1384,9 +1403,7 @@
           <span>Você poderá administrar mods, plugins e datapacks na área de conteúdo, com busca por versão no Modrinth.</span>
         </div>
 
-        <button class="primary"
-          on:click={createServer}
-          disabled={loading || !setupVersion}>
+        <button class="primary" on:click={createServer} disabled={loading || !setupVersion}>
           {#if loading}
             <span class="spinner" style="width: 14px; height: 14px; border-width: 2px; margin-right: 8px;"></span>
             BAIXANDO ARQUIVOS...
@@ -1415,17 +1432,12 @@
               <div><span>Pasta</span><b class="mono">{server.server_dir}</b></div>
             </div>
             <label class="check-label">
-              <span>
-                <input type="checkbox" bind:checked={deleteAck}/>
-                Entendo que os arquivos serão apagados permanentemente.
-              </span>
+              <span><input type="checkbox" bind:checked={deleteAck}/>Entendo que os arquivos serão apagados permanentemente.</span>
               <small>Não é possível desfazer.</small>
             </label>
             <div class="modal-actions">
               <button class="secondary" on:click={closeDelete}>Cancelar</button>
-              <button class="danger" disabled={!deleteAck} on:click={()=>deleteStep=2}>
-                Continuar
-              </button>
+              <button class="danger" disabled={!deleteAck} on:click={()=>deleteStep=2}>Continuar</button>
             </div>
           {:else}
             <p class="danger-warning">

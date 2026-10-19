@@ -716,3 +716,31 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .e4all-note { margin:0 0 20px; padding:12px 14px; border:1px solid rgba(217,155,87,.28); border-left:2px solid var(--yellow); border-radius:0 8px 8px 0; color:var(--muted); font-size:11px; line-height:1.5; }
 .e4all-note b { color:var(--yellow); }
 @media (max-width:760px) { .e4all-options { grid-template-columns:1fr; } .icon-upload-row { align-items:flex-start; flex-direction:column; } .console { height:280px; max-height:42vh; } }
+/* ── e4all (complemento) ── */
+.yes { color: var(--green); }
+.no { color: var(--red); }
+.maybe { color: var(--yellow); }
+
+.e4-folder input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(141, 93, 255, 0.12);
+}
+
+.ghost {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 11px 14px;
+  font: 500 11px 'DM Mono';
+  cursor: pointer;
+}
+.ghost:hover { border-color: var(--accent); }
+.ghost:disabled { opacity: 0.6; cursor: default; }
+
+.e4-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
