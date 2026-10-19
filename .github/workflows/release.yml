@@ -218,7 +218,7 @@ jobs:
           EOF
           heat dir "$ROOT" -cg AppFiles -dr INSTALLFOLDER -gg -srd -sreg -sfrag -var var.SourceDir -out files.wxs
           candle -arch x64 -dProductVersion="${PKG_VERSION}.0" installer.wxs files.wxs -dSourceDir="$ROOT"
-          light installer.wixobj files.wixobj -out "${ROOT}.msi"
+          light -sice:ICE38 -sice:ICE64 -sice:ICE91 installer.wixobj files.wixobj -out "${ROOT}.msi"
           rm -f installer.wxs files.wxs installer.wixobj files.wixobj WebView2Bootstrapper.exe
           rm -rf "$ROOT"
 
