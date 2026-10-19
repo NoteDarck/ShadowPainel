@@ -219,17 +219,33 @@ fn apply_toml(c: &mut E4allConfig, t: &str) {
     s(t, "brokerUrl", &mut c.broker_url);
     s(t, "relayHost", &mut c.relay_host);
     n(t, "relayPort", &mut c.relay_port);
-    b(t, "restoreDedicatedCommands", &mut c.restore_dedicated_commands);
+    b(
+        t,
+        "restoreDedicatedCommands",
+        &mut c.restore_dedicated_commands,
+    );
     b(t, "useWhiteList", &mut c.use_whitelist);
     b(t, "hostEnabled", &mut c.host_enabled);
-    b(t, "preventPauseWhileHosting", &mut c.prevent_pause_while_hosting);
+    b(
+        t,
+        "preventPauseWhileHosting",
+        &mut c.prevent_pause_while_hosting,
+    );
     b(t, "dialtoneHostEnabled", &mut c.dialtone_host_enabled);
     b(t, "dialtonePlayerEnabled", &mut c.dialtone_player_enabled);
     s(t, "dialtoneRelayMap", &mut c.dialtone_relay_map);
     b(t, "dialtoneSanitizeTicket", &mut c.dialtone_sanitize_ticket);
     n(t, "reconnectMaxAttempts", &mut c.reconnect_max_attempts);
-    n(t, "reconnectBaseDelaySeconds", &mut c.reconnect_base_delay_seconds);
-    n(t, "keepaliveIntervalSeconds", &mut c.keepalive_interval_seconds);
+    n(
+        t,
+        "reconnectBaseDelaySeconds",
+        &mut c.reconnect_base_delay_seconds,
+    );
+    n(
+        t,
+        "keepaliveIntervalSeconds",
+        &mut c.keepalive_interval_seconds,
+    );
     n(t, "loginReadyTimeoutMs", &mut c.login_ready_timeout_ms);
     n(t, "relayConnectTimeoutMs", &mut c.relay_connect_timeout_ms);
     b(t, "offlineMode", &mut c.offline_mode);
@@ -244,19 +260,40 @@ fn toml_pairs(c: &E4allConfig) -> Vec<(&'static str, String)> {
         ("brokerUrl", q(&c.broker_url)),
         ("relayHost", q(&c.relay_host)),
         ("relayPort", c.relay_port.to_string()),
-        ("restoreDedicatedCommands", c.restore_dedicated_commands.to_string()),
+        (
+            "restoreDedicatedCommands",
+            c.restore_dedicated_commands.to_string(),
+        ),
         ("useWhiteList", c.use_whitelist.to_string()),
         ("hostEnabled", c.host_enabled.to_string()),
-        ("preventPauseWhileHosting", c.prevent_pause_while_hosting.to_string()),
+        (
+            "preventPauseWhileHosting",
+            c.prevent_pause_while_hosting.to_string(),
+        ),
         ("dialtoneHostEnabled", c.dialtone_host_enabled.to_string()),
-        ("dialtonePlayerEnabled", c.dialtone_player_enabled.to_string()),
+        (
+            "dialtonePlayerEnabled",
+            c.dialtone_player_enabled.to_string(),
+        ),
         ("dialtoneRelayMap", q(&c.dialtone_relay_map)),
-        ("dialtoneSanitizeTicket", c.dialtone_sanitize_ticket.to_string()),
+        (
+            "dialtoneSanitizeTicket",
+            c.dialtone_sanitize_ticket.to_string(),
+        ),
         ("reconnectMaxAttempts", c.reconnect_max_attempts.to_string()),
-        ("reconnectBaseDelaySeconds", c.reconnect_base_delay_seconds.to_string()),
-        ("keepaliveIntervalSeconds", c.keepalive_interval_seconds.to_string()),
+        (
+            "reconnectBaseDelaySeconds",
+            c.reconnect_base_delay_seconds.to_string(),
+        ),
+        (
+            "keepaliveIntervalSeconds",
+            c.keepalive_interval_seconds.to_string(),
+        ),
         ("loginReadyTimeoutMs", c.login_ready_timeout_ms.to_string()),
-        ("relayConnectTimeoutMs", c.relay_connect_timeout_ms.to_string()),
+        (
+            "relayConnectTimeoutMs",
+            c.relay_connect_timeout_ms.to_string(),
+        ),
         ("offlineMode", c.offline_mode.to_string()),
         ("hideDomainInChat", c.hide_domain_in_chat.to_string()),
         ("voiceP2PEnabled", c.voice_p2p_enabled.to_string()),
@@ -315,10 +352,25 @@ fn validate_e4all_fields(c: &E4allConfig) -> Result<(), String> {
     }
     in_range("Porta do relay", c.relay_port, 1, 65535)?;
     in_range("Tentativas de reconexão", c.reconnect_max_attempts, 0, 100)?;
-    in_range("Atraso inicial de reconexão (s)", c.reconnect_base_delay_seconds, 1, 3600)?;
+    in_range(
+        "Atraso inicial de reconexão (s)",
+        c.reconnect_base_delay_seconds,
+        1,
+        3600,
+    )?;
     in_range("Keepalive (s)", c.keepalive_interval_seconds, 1, 3600)?;
-    in_range("Tempo de espera do login (ms)", c.login_ready_timeout_ms, 0, 600_000)?;
-    in_range("Tempo de conexão ao relay (ms)", c.relay_connect_timeout_ms, 100, 600_000)?;
+    in_range(
+        "Tempo de espera do login (ms)",
+        c.login_ready_timeout_ms,
+        0,
+        600_000,
+    )?;
+    in_range(
+        "Tempo de conexão ao relay (ms)",
+        c.relay_connect_timeout_ms,
+        100,
+        600_000,
+    )?;
     Ok(())
 }
 
@@ -326,11 +378,17 @@ fn validate_e4all_fields(c: &E4allConfig) -> Result<(), String> {
 
 fn classify(id: &str) -> &'static str {
     let l = id.to_lowercase();
-    if l.contains("neoforge") { "neoforge" }
-    else if l.contains("quilt") { "quilt" }
-    else if l.contains("fabric") { "fabric" }
-    else if l.contains("forge") { "forge" }
-    else { "none" }
+    if l.contains("neoforge") {
+        "neoforge"
+    } else if l.contains("quilt") {
+        "quilt"
+    } else if l.contains("fabric") {
+        "fabric"
+    } else if l.contains("forge") {
+        "forge"
+    } else {
+        "none"
+    }
 }
 
 fn detect_loader(dir: &Path) -> (String, String, String) {
@@ -338,11 +396,14 @@ fn detect_loader(dir: &Path) -> (String, String, String) {
     if let Ok(text) = fs::read_to_string(dir.join("launcher_profiles.json")) {
         if let Ok(json) = serde_json::from_str::<Value>(&text) {
             if let Some(profiles) = json.get("profiles").and_then(|p| p.as_object()) {
-                let latest = profiles.values().filter_map(|p| {
-                    let id = p.get("lastVersionId")?.as_str()?;
-                    let used = p.get("lastUsed").and_then(|u| u.as_str()).unwrap_or("");
-                    Some((used.to_string(), id.to_string()))
-                }).max_by(|a, b| a.0.cmp(&b.0));
+                let latest = profiles
+                    .values()
+                    .filter_map(|p| {
+                        let id = p.get("lastVersionId")?.as_str()?;
+                        let used = p.get("lastUsed").and_then(|u| u.as_str()).unwrap_or("");
+                        Some((used.to_string(), id.to_string()))
+                    })
+                    .max_by(|a, b| a.0.cmp(&b.0));
                 if let Some((_, id)) = latest {
                     let c = classify(&id);
                     if c != "none" {
@@ -352,7 +413,7 @@ fn detect_loader(dir: &Path) -> (String, String, String) {
             }
         }
     }
-    
+
     // 2) Pasta versions
     let mut found: Vec<(&'static str, String)> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir.join("versions")) {
@@ -360,7 +421,9 @@ fn detect_loader(dir: &Path) -> (String, String, String) {
             if e.path().is_dir() {
                 let name = e.file_name().to_string_lossy().to_string();
                 let c = classify(&name);
-                if c != "none" { found.push((c, name)); }
+                if c != "none" {
+                    found.push((c, name));
+                }
             }
         }
     }
@@ -369,7 +432,7 @@ fn detect_loader(dir: &Path) -> (String, String, String) {
             return (c.to_string(), n.clone(), "pasta versions".into());
         }
     }
-    
+
     // 3) Pasta libraries (procura em subpastas do net/fabricmc, net/minecraftforge, etc)
     for (rel, name) in [
         ("net/neoforged", "neoforge"),
@@ -381,17 +444,29 @@ fn detect_loader(dir: &Path) -> (String, String, String) {
             return (name.to_string(), String::new(), "pasta libraries".into());
         }
     }
-    
+
     // 4) Fallback: ler o log inteiro (onde o loader sempre se anuncia)
     if let Ok(log) = fs::read_to_string(dir.join("logs").join("latest.log")) {
         let low = log.to_lowercase();
-        if low.contains("neoforge") { return ("neoforge".into(), String::new(), "logs/latest.log".into()); }
-        if low.contains("quilt") { return ("quilt".into(), String::new(), "logs/latest.log".into()); }
-        if low.contains("fabric") { return ("fabric".into(), String::new(), "logs/latest.log".into()); }
-        if low.contains("forge") { return ("forge".into(), String::new(), "logs/latest.log".into()); }
+        if low.contains("neoforge") {
+            return ("neoforge".into(), String::new(), "logs/latest.log".into());
+        }
+        if low.contains("quilt") {
+            return ("quilt".into(), String::new(), "logs/latest.log".into());
+        }
+        if low.contains("fabric") {
+            return ("fabric".into(), String::new(), "logs/latest.log".into());
+        }
+        if low.contains("forge") {
+            return ("forge".into(), String::new(), "logs/latest.log".into());
+        }
     }
-    
-    ("none".into(), String::new(), "nenhum mod loader encontrado".into())
+
+    (
+        "none".into(),
+        String::new(),
+        "nenhum mod loader encontrado".into(),
+    )
 }
 
 #[derive(Serialize, Clone)]
@@ -410,15 +485,23 @@ struct E4allStatus {
 
 /// Procura recursivamente por qualquer .jar que contenha "e4all", "e4mc" ou "dialtone".
 fn find_e4all_jar(dir: &Path) -> Option<PathBuf> {
-    if !dir.is_dir() { return None; }
-    let Ok(entries) = fs::read_dir(dir) else { return None; };
+    if !dir.is_dir() {
+        return None;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return None;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if let Some(found) = find_e4all_jar(&path) { return Some(found); }
+            if let Some(found) = find_e4all_jar(&path) {
+                return Some(found);
+            }
         } else if path.is_file() {
             let name = path.file_name()?.to_string_lossy().to_lowercase();
-            if name.ends_with(".jar") && (name.contains("e4all") || name.contains("e4mc") || name.contains("dialtone")) {
+            if name.ends_with(".jar")
+                && (name.contains("e4all") || name.contains("e4mc") || name.contains("dialtone"))
+            {
                 return Some(path);
             }
         }
@@ -430,7 +513,7 @@ fn detect_status(dir_str: &str) -> E4allStatus {
     let dir = expand(dir_str.trim());
     let cfg_path = dir.join("config").join("e4all.toml");
     let dir_exists = dir.is_dir();
-    
+
     let mut st = E4allStatus {
         dir_exists,
         loader: "none".into(),
@@ -443,12 +526,12 @@ fn detect_status(dir_str: &str) -> E4allStatus {
         level: "error".into(),
         message: String::new(),
     };
-    
+
     if !dir_exists {
         st.message = format!("Pasta '{}' não encontrada. Se usa Prism/MultiMC, aponte para a pasta .minecraft da instância.", dir.display());
         return st;
     }
-    
+
     let (loader, id, source) = detect_loader(&dir);
     st.loader = loader;
     st.loader_id = id;
@@ -456,7 +539,11 @@ fn detect_status(dir_str: &str) -> E4allStatus {
 
     if let Some(jar_path) = find_e4all_jar(&dir.join("mods")) {
         st.installed = true;
-        st.jar = jar_path.strip_prefix(&dir.join("mods")).unwrap_or(&jar_path).display().to_string();
+        st.jar = jar_path
+            .strip_prefix(dir.join("mods"))
+            .unwrap_or(&jar_path)
+            .display()
+            .to_string();
     }
 
     let loader_name = match st.loader.as_str() {
@@ -472,7 +559,8 @@ fn detect_status(dir_str: &str) -> E4allStatus {
         st.message = "Mod loader não detectado. Se você usa um launcher como Prism ou CurseForge, use o botão 'Procurar launchers' para escolher a pasta correta.".into();
     } else if st.loader == "quilt" {
         st.level = "warn".into();
-        st.message = "Quilt detectado. O e4all suporta oficialmente Fabric, Forge e NeoForge.".into();
+        st.message =
+            "Quilt detectado. O e4all suporta oficialmente Fabric, Forge e NeoForge.".into();
     } else if !st.installed {
         st.level = "warn".into();
         st.message = format!("Mod loader ({loader_name}) OK, mas o e4all não foi achado na pasta mods/. Baixe o JAR no Modrinth e coloque lá.");
@@ -498,19 +586,31 @@ struct LauncherCandidate {
 fn known_launcher_dirs() -> Vec<(&'static str, PathBuf)> {
     let mut out = Vec::new();
     let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
-    
+
     // 1. Launcher Oficial
-    if home.join(".minecraft").is_dir() { out.push(("Launcher oficial", home.join(".minecraft"))); }
+    if home.join(".minecraft").is_dir() {
+        out.push(("Launcher oficial", home.join(".minecraft")));
+    }
     if let Ok(appdata) = std::env::var("APPDATA") {
         let p = PathBuf::from(appdata).join(".minecraft");
-        if p.is_dir() { out.push(("Launcher oficial (AppData)", p)); }
+        if p.is_dir() {
+            out.push(("Launcher oficial (AppData)", p));
+        }
     }
 
     // 2. Prism Launcher (instâncias)
     let prism_paths = [
-        home.join(".local").join("share").join("PrismLauncher").join("instances"),
-        home.join("Library").join("Application Support").join("PrismLauncher").join("instances"),
-        PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("PrismLauncher").join("instances"),
+        home.join(".local")
+            .join("share")
+            .join("PrismLauncher")
+            .join("instances"),
+        home.join("Library")
+            .join("Application Support")
+            .join("PrismLauncher")
+            .join("instances"),
+        PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
+            .join("PrismLauncher")
+            .join("instances"),
     ];
     for root in prism_paths {
         if let Ok(rd) = fs::read_dir(root) {
@@ -526,7 +626,10 @@ fn known_launcher_dirs() -> Vec<(&'static str, PathBuf)> {
 
     // 3. CurseForge (instâncias)
     let cf_paths = [
-        home.join("Documents").join("curseforge").join("minecraft").join("Instances"),
+        home.join("Documents")
+            .join("curseforge")
+            .join("minecraft")
+            .join("Instances"),
         home.join("curseforge").join("minecraft").join("Instances"),
     ];
     for root in cf_paths {
@@ -544,19 +647,22 @@ fn known_launcher_dirs() -> Vec<(&'static str, PathBuf)> {
 }
 
 fn scan_launchers() -> Vec<LauncherCandidate> {
-    known_launcher_dirs().into_iter().map(|(label, path)| {
-        let (loader, _, _) = detect_loader(&path);
-        let e4all_installed = find_e4all_jar(&path.join("mods")).is_some();
-        let config_exists = path.join("config").join("e4all.toml").is_file();
-        LauncherCandidate {
-            label: label.to_string(),
-            path: path.display().to_string(),
-            exists: true,
-            loader,
-            e4all_installed,
-            config_exists,
-        }
-    }).collect()
+    known_launcher_dirs()
+        .into_iter()
+        .map(|(label, path)| {
+            let (loader, _, _) = detect_loader(&path);
+            let e4all_installed = find_e4all_jar(&path.join("mods")).is_some();
+            let config_exists = path.join("config").join("e4all.toml").is_file();
+            LauncherCandidate {
+                label: label.to_string(),
+                path: path.display().to_string(),
+                exists: true,
+                loader,
+                e4all_installed,
+                config_exists,
+            }
+        })
+        .collect()
 }
 
 async fn e4all_scan() -> Json<Vec<LauncherCandidate>> {
@@ -1866,7 +1972,8 @@ async fn install_mod(
         .error_for_status()
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?
         .bytes()
-        .await        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Leitura: {e}")))?;
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Leitura: {e}")))?;
 
     let safe_name = std::path::Path::new(filename)
         .file_name()
@@ -2773,7 +2880,7 @@ async fn shutdown_server(app: &AppState) {
 async fn main() -> anyhow::Result<()> {
     let cfg_path = config_path();
     let mut cfg = load_config(&cfg_path).await;
-    
+
     let loaded = load_e4all(&cfg.e4all.minecraft_dir);
     cfg.e4all = loaded;
 

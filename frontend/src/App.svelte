@@ -624,7 +624,7 @@
 <div class="shell">
   <aside class="sidebar">
     <div class="brand">
-      <div class="mark">S</div>
+      <div class="mark"><img src="/shadowpainel.png" alt="" /></div>
       <div><strong>Shadow<span>Painel</span></strong><small>SERVER CONTROL</small></div>
     </div>
     <div class="workspace">
@@ -1340,7 +1340,7 @@
 
         <div class="e4all-note" style="margin-top:16px;">
           <b>Como aplicar</b>
-          <p>O e4all é um mod do cliente: só quem hospeda instala. O domínio é gerado pelo mod ao abrir o mundo em "Abrir para LAN". Salve com o Minecraft fechado e reabra o mundo LAN depois.</p>
+          <p>O e4all é um mod do cliente: só quem hospeda instala. O domínio é gerado pelo mod ao abrir o mundo em "Abrir para LAN". Salve com o Minecraft fechado e reabra o mundo LAN depois. No Android, use o JAR com sufixo <b>-android</b>; o P2P de voz pode não funcionar em redes com NAT restritivo.</p>
         </div>
 
         <div style="display:flex;gap:10px;margin-top:16px;">

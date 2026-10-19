@@ -1,6 +1,7 @@
 use std::{
     env,
     error::Error,
+    fs,
     io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -13,7 +14,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-use wry::WebViewBuilder;
+use wry::{WebContext, WebViewBuilder};
 
 #[cfg(target_os = "linux")]
 use tao::platform::unix::WindowExtUnix;
@@ -34,6 +35,35 @@ fn find_file(paths: Vec<PathBuf>) -> io::Result<PathBuf> {
                 "núcleo do ShadowPainel não encontrado",
             )
         })
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+fn webview_data_dir() -> io::Result<PathBuf> {
+    let base = if cfg!(windows) {
+        env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .ok_or_else(|| io::Error::other("APPDATA não está disponível"))?
+    } else if cfg!(target_os = "macos") {
+        home_dir()
+            .ok_or_else(|| io::Error::other("HOME não está disponível"))?
+            .join("Library")
+            .join("Application Support")
+    } else if let Some(xdg) = env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(xdg)
+    } else {
+        home_dir()
+            .ok_or_else(|| io::Error::other("HOME não está disponível"))?
+            .join(".local")
+            .join("share")
+    };
+    let path = base.join("ShadowPainel").join("WebView2");
+    fs::create_dir_all(&path)?;
+    Ok(path)
 }
 
 fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
@@ -121,7 +151,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Abre em tela cheia
     window.set_maximized(true);
 
-    let builder = WebViewBuilder::new().with_url(&url);
+    let webview_data = webview_data_dir()?;
+    let mut web_context = WebContext::new(Some(webview_data));
+    let builder = WebViewBuilder::with_web_context(&mut web_context).with_url(&url);
 
     #[cfg(not(target_os = "linux"))]
     let _webview = builder.build(&window)?;
