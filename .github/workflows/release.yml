@@ -173,13 +173,14 @@ jobs:
           hdiutil create -volname "ShadowPainel" -srcfolder "$ROOT" -ov -format UDZO -o "${ROOT}.dmg"
           rm -rf "$ROOT"
 
-      - name: Build MSI installer (Windows)
+      - name: Build MSI + Burn Bundle (Windows)
         if: matrix.name == 'windows-x86_64'
         shell: bash
         run: |
           set -e
           choco install wixtoolset --no-progress -y
           export PATH="$PATH:/c/Program Files (x86)/WiX Toolset v3.14/bin:/c/Program Files (x86)/WiX Toolset v3.11/bin"
+
           ROOT="${{ env.RELEASE_NAME }}-${{ matrix.name }}"
           mkdir -p "$ROOT/backend" "$ROOT/frontend/dist"
           cp "backend/target/release/${{ matrix.binary }}" "$ROOT/backend/shadowpainel-core.exe"
@@ -187,8 +188,8 @@ jobs:
           cp -r frontend/dist/. "$ROOT/frontend/dist/"
           cp README.md "$ROOT/"
           cp packaging/shadowpainel.ico "$ROOT/"
-          curl --fail --location --retry 5 --output WebView2Bootstrapper.exe \
-            https://go.microsoft.com/fwlink/p/?LinkId=2124703
+
+          # ---------- MSI (silencioso, sem UI) ----------
           cat > installer.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -198,16 +199,10 @@ jobs:
               <MediaTemplate EmbedCab="yes" />
               <Icon Id="ShadowPainelIcon" SourceFile="$(var.SourceDir)\shadowpainel.ico" />
               <Property Id="ARPPRODUCTICON" Value="ShadowPainelIcon" />
-
-              <!-- Detecção do WebView2 (máquina e usuário) -->
-              <Property Id="WV2_MACHINE">
-                <RegistrySearch Id="WV2Machine" Root="HKLM" Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" Win64="no" />
-              </Property>
-              <Property Id="WV2_USER">
-                <RegistrySearch Id="WV2User" Root="HKCU" Key="Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" />
-              </Property>
-
-              <Feature Id="ProductFeature" Title="ShadowPainel" Level="1"><ComponentGroupRef Id="AppFiles" /><ComponentRef Id="StartMenuShortcut" /></Feature>
+              <Feature Id="ProductFeature" Title="ShadowPainel" Level="1">
+                <ComponentGroupRef Id="AppFiles" />
+                <ComponentRef Id="StartMenuShortcut" />
+              </Feature>
               <Directory Id="TARGETDIR" Name="SourceDir">
                 <Directory Id="LocalAppDataFolder"><Directory Id="INSTALLFOLDER" Name="ShadowPainel" /></Directory>
                 <Directory Id="ProgramMenuFolder"><Directory Id="ApplicationProgramsFolder" Name="ShadowPainel" /></Directory>
@@ -219,18 +214,67 @@ jobs:
                   <RegistryValue Root="HKCU" Key="Software\NoteDarck\ShadowPainel" Name="installed" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
               </DirectoryRef>
-              <Binary Id="WebView2Bootstrapper" SourceFile="$(var.SourceDir)\..\WebView2Bootstrapper.exe" />
-              <CustomAction Id="InstallWebView2" BinaryKey="WebView2Bootstrapper" Execute="deferred" Return="ignore" Impersonate="yes" ExeCommand="/silent /install" />
-              <InstallExecuteSequence>
-                <Custom Action="InstallWebView2" After="InstallFiles">NOT Installed AND NOT WV2_MACHINE AND NOT WV2_USER</Custom>
-              </InstallExecuteSequence>
             </Product>
           </Wix>
           EOF
           heat dir "$ROOT" -cg AppFiles -dr INSTALLFOLDER -gg -srd -sreg -sfrag -var var.SourceDir -out files.wxs
           candle -arch x64 -dProductVersion="${PKG_VERSION}.0" installer.wxs files.wxs -dSourceDir="$ROOT"
-          light -sice:ICE38 -sice:ICE64 -sice:ICE91 installer.wixobj files.wixobj -out "${ROOT}.msi"
-          rm -f installer.wxs files.wxs installer.wixobj files.wixobj WebView2Bootstrapper.exe
+          light -sice:ICE38 -sice:ICE64 -sice:ICE91 installer.wixobj files.wixobj -out ShadowPainel.msi
+
+          # ---------- Burn Bundle (setup.exe com UI) ----------
+          curl --fail --location --retry 5 --output MicrosoftEdgeWebView2Setup.exe \
+            https://go.microsoft.com/fwlink/p/?LinkId=2124703
+
+          cat > bundle.wxs <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+               xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
+            <Bundle Name="ShadowPainel" Version="$(var.ProductVersion)" Manufacturer="NoteDarck"
+                    UpgradeCode="B7C3E9A1-4F2D-4E8A-9C5B-1A3D7F2E6B8C"
+                    IconSourceFile="$(var.SourceDir)\shadowpainel.ico"
+                    SplashScreenSourceFile="$(var.SourceDir)\shadowpainel.ico">
+              <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
+                <bal:WixStandardBootstrapperApplication
+                  LicenseUrl=""
+                  Theme="hyperlinkLicense"
+                  LogoFile="$(var.SourceDir)\shadowpainel.ico" />
+              </BootstrapperApplicationRef>
+              <Chain>
+                <ExePackage Id="WebView2"
+                            SourceFile="MicrosoftEdgeWebView2Setup.exe"
+                            Compressed="yes"
+                            Vital="no"
+                            PerMachine="no"
+                            InstallCommand="/silent /install"
+                            DetectCondition="WV2Installed"
+                            Permanent="no">
+                  <RegistrySearch Id="WV2Machine"
+                                  Root="HKLM"
+                                  Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                                  Name="pv"
+                                  Type="raw"
+                                  Win64="no"
+                                  Variable="WV2Installed" />
+                  <RegistrySearch Id="WV2User"
+                                  Root="HKCU"
+                                  Key="Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                                  Name="pv"
+                                  Type="raw"
+                                  Variable="WV2Installed" />
+                </ExePackage>
+                <MsiPackage Id="ShadowPainelMsi"
+                            SourceFile="ShadowPainel.msi"
+                            Compressed="yes"
+                            Vital="yes"
+                            Visible="no" />
+              </Chain>
+            </Bundle>
+          </Wix>
+          EOF
+          candle -arch x64 -dProductVersion="${PKG_VERSION}.0" -dSourceDir="$ROOT" bundle.wxs -ext WixBalExtension
+          light -ext WixBalExtension bundle.wixobj -out "${ROOT}.exe"
+
+          rm -f installer.wxs files.wxs installer.wixobj files.wixobj bundle.wxs bundle.wixobj ShadowPainel.msi MicrosoftEdgeWebView2Setup.exe
           rm -rf "$ROOT"
 
       - name: Upload package
