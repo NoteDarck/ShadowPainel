@@ -198,9 +198,18 @@ jobs:
               <MediaTemplate EmbedCab="yes" />
               <Icon Id="ShadowPainelIcon" SourceFile="$(var.SourceDir)\shadowpainel.ico" />
               <Property Id="ARPPRODUCTICON" Value="ShadowPainelIcon" />
+
+              <!-- Detecção do WebView2 (máquina e usuário) -->
+              <Property Id="WV2_MACHINE">
+                <RegistrySearch Id="WV2Machine" Root="HKLM" Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" Win64="no" />
+              </Property>
+              <Property Id="WV2_USER">
+                <RegistrySearch Id="WV2User" Root="HKCU" Key="Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" />
+              </Property>
+
               <Feature Id="ProductFeature" Title="ShadowPainel" Level="1"><ComponentGroupRef Id="AppFiles" /><ComponentRef Id="StartMenuShortcut" /></Feature>
               <Directory Id="TARGETDIR" Name="SourceDir">
-                <Directory Id="AppDataFolder"><Directory Id="INSTALLFOLDER" Name="ShadowPainel" /></Directory>
+                <Directory Id="LocalAppDataFolder"><Directory Id="INSTALLFOLDER" Name="ShadowPainel" /></Directory>
                 <Directory Id="ProgramMenuFolder"><Directory Id="ApplicationProgramsFolder" Name="ShadowPainel" /></Directory>
               </Directory>
               <DirectoryRef Id="ApplicationProgramsFolder">
@@ -211,8 +220,10 @@ jobs:
                 </Component>
               </DirectoryRef>
               <Binary Id="WebView2Bootstrapper" SourceFile="$(var.SourceDir)\..\WebView2Bootstrapper.exe" />
-              <CustomAction Id="InstallWebView2" BinaryKey="WebView2Bootstrapper" Execute="deferred" Return="check" Impersonate="yes" ExeCommand="/silent /install" />
-              <InstallExecuteSequence><Custom Action="InstallWebView2" After="InstallFiles">NOT Installed</Custom></InstallExecuteSequence>
+              <CustomAction Id="InstallWebView2" BinaryKey="WebView2Bootstrapper" Execute="deferred" Return="ignore" Impersonate="yes" ExeCommand="/silent /install" />
+              <InstallExecuteSequence>
+                <Custom Action="InstallWebView2" After="InstallFiles">NOT Installed AND NOT WV2_MACHINE AND NOT WV2_USER</Custom>
+              </InstallExecuteSequence>
             </Product>
           </Wix>
           EOF
