@@ -27,7 +27,7 @@ use tokio::{
 };
 use tower_http::services::ServeDir;
 
-const APP_VERSION: &str = "0.7.8";
+const APP_VERSION: &str = "0.7.9";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
