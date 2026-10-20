@@ -2425,6 +2425,7 @@ fn content_dir(base: &std::path::Path, kind: &str) -> Option<PathBuf> {
 struct ContentItem {
     filename: String,
     size: u64,
+    title: Option<String>,
     kind: String,
     project_id: Option<String>,
     version_number: Option<String>,
@@ -2438,6 +2439,12 @@ struct InstalledContent {
     kind: String,
     filename: String,
     version_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version_number: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_url: Option<String>,
 }
 fn content_manifest(base: &std::path::Path) -> PathBuf {
     base.join(".shadowpainel-content.json")
@@ -2449,6 +2456,107 @@ async fn read_installed_content(base: &std::path::Path) -> Vec<InstalledContent>
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
+async fn enrich_installed_content(
+    client: &reqwest::Client,
+    items: &mut [InstalledContent],
+) -> bool {
+    let mut changed = false;
+    let project_ids: Vec<String> = items
+        .iter()
+        .filter(|item| item.title.is_none() || item.icon_url.is_none())
+        .map(|item| item.project_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    if !project_ids.is_empty() {
+        if let Ok(ids) = serde_json::to_string(&project_ids) {
+            let url = format!(
+                "https://api.modrinth.com/v2/projects?ids={}",
+                urlencoding::encode(&ids)
+            );
+            if let Ok(response) = client
+                .get(url)
+                .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+                .send()
+                .await
+            {
+                if let Ok(projects) = response.json::<Vec<Value>>().await {
+                    let by_id: HashMap<String, Value> = projects
+                        .into_iter()
+                        .filter_map(|project| {
+                            Some((project.get("id")?.as_str()?.to_string(), project))
+                        })
+                        .collect();
+                    for item in items.iter_mut() {
+                        if let Some(project) = by_id.get(&item.project_id) {
+                            let title = project
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            let icon = project
+                                .get("icon_url")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            if item.title != title || item.icon_url != icon {
+                                item.title = title;
+                                item.icon_url = icon;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let version_ids: Vec<String> = items
+        .iter()
+        .filter(|item| item.version_number.is_none())
+        .map(|item| item.version_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    if !version_ids.is_empty() {
+        if let Ok(ids) = serde_json::to_string(&version_ids) {
+            let url = format!(
+                "https://api.modrinth.com/v2/versions?ids={}",
+                urlencoding::encode(&ids)
+            );
+            if let Ok(response) = client
+                .get(url)
+                .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+                .send()
+                .await
+            {
+                if let Ok(versions) = response.json::<Vec<Value>>().await {
+                    let by_id: HashMap<String, Value> = versions
+                        .into_iter()
+                        .filter_map(|version| {
+                            Some((version.get("id")?.as_str()?.to_string(), version))
+                        })
+                        .collect();
+                    for item in items.iter_mut() {
+                        if let Some(version) = by_id.get(&item.version_id) {
+                            let number = version
+                                .get("version_number")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            if item.version_number != number {
+                                item.version_number = number;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
 async fn write_installed_content(
     base: &std::path::Path,
     items: &[InstalledContent],
@@ -2491,6 +2599,16 @@ async fn list_content(
             format!("Falha ao listar conteúdo: {e}"),
         )
     })?;
+    let mut installed = read_installed_content(&base).await;
+    let client = reqwest::Client::new();
+    if enrich_installed_content(&client, &mut installed).await {
+        let _ = write_installed_content(&base, &installed).await;
+    }
+    let metadata: HashMap<String, InstalledContent> = installed
+        .into_iter()
+        .filter(|item| item.kind == kind)
+        .map(|item| (item.filename.clone(), item))
+        .collect();
     let mut items = Vec::new();
 
     while let Some(entry) = entries.next_entry().await.map_err(|e| {
@@ -2499,21 +2617,25 @@ async fn list_content(
             format!("Falha ao ler conteúdo: {e}"),
         )
     })? {
-        let metadata = entry.metadata().await.ok();
-        if metadata.as_ref().is_some_and(|m| m.is_file()) {
+        let file_meta = entry.metadata().await.ok();
+        if file_meta.as_ref().is_some_and(|m| m.is_file()) {
             let filename = entry.file_name().to_string_lossy().into_owned();
             if filename.starts_with('.') {
                 continue;
             }
-            let version_number = Some(filename.trim_end_matches(".jar").to_string());
+            let stored = metadata.get(&filename);
+            let version_number = stored
+                .and_then(|item| item.version_number.clone())
+                .or_else(|| Some(filename.trim_end_matches(".jar").to_string()));
 
             items.push(ContentItem {
                 filename,
-                size: metadata.unwrap().len(),
+                size: file_meta.unwrap().len(),
+                title: stored.and_then(|item| item.title.clone()),
                 kind: kind.clone(),
-                project_id: None,
+                project_id: stored.map(|item| item.project_id.clone()),
                 version_number: version_number.clone(),
-                icon_url: None,
+                icon_url: stored.and_then(|item| item.icon_url.clone()),
                 installed_version: version_number,
             });
         }
@@ -2797,12 +2919,24 @@ async fn install_content(
         })?;
     let mut installed = read_installed_content(&base).await;
     installed.retain(|x| !(x.kind == req.kind && x.filename == safe));
-    installed.push(InstalledContent {
+    let selected_version_id = version
+        .and_then(|value| value.get("id").and_then(Value::as_str))
+        .unwrap_or_else(|| req.version_id.as_deref().unwrap_or_default())
+        .to_string();
+    let selected_version_number = version
+        .and_then(|value| value.get("version_number").and_then(Value::as_str))
+        .map(str::to_owned);
+    let mut record = InstalledContent {
         project_id: req.project_id,
         kind: req.kind,
         filename: safe.to_string(),
-        version_id: req.version_id.unwrap_or_default(),
-    });
+        version_id: selected_version_id,
+        title: None,
+        version_number: selected_version_number,
+        icon_url: None,
+    };
+    enrich_installed_content(&client, std::slice::from_mut(&mut record)).await;
+    installed.push(record);
     write_installed_content(&base, &installed).await?;
     Ok(Json(json!({"ok": true, "filename": safe})))
 }

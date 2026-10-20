@@ -7,7 +7,7 @@
   type Log = { time:string; text:string; kind:string };
   type Version = { id:string; kind:string; release_time:string };
   type ContentItem = {
-    filename:string; size:number; kind:string;
+    filename:string; size:number; kind:string; title?:string;
     project_id?:string; version_number?:string; icon_url?:string;
     installed_version?:string;
   };
@@ -889,8 +889,8 @@
                   {/if}
                 </div>
                 <div class="installed-meta">
-                  <b>{file.filename}</b>
-                  <small>{formatBytes(file.size)}{#if file.installed_version} · Versão: {file.installed_version}{/if}</small>
+                  <b title={file.title || file.filename}>{file.title || file.filename}</b>
+                  <small>{#if file.installed_version}Versão: {file.installed_version} · {/if}{formatBytes(file.size)} · {file.filename}</small>
                 </div>
               </div>
             {/each}
