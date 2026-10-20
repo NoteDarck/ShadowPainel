@@ -221,10 +221,50 @@ jobs:
           candle -arch x64 -dProductVersion="${PKG_VERSION}.0" installer.wxs files.wxs -dSourceDir="$ROOT"
           light -sice:ICE38 -sice:ICE64 -sice:ICE91 installer.wixobj files.wixobj -out ShadowPainel.msi
 
-          # ---------- Burn Bundle (setup.exe com UI) ----------
-          curl --fail --location --retry 5 --output MicrosoftEdgeWebView2Setup.exe \
-            https://go.microsoft.com/fwlink/p/?LinkId=2124703
+          # ---------- Download robusto do WebView2 bootstrapper ----------
+          echo "Baixando WebView2 bootstrapper..."
+          WEBVIEW2_URL="https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+          WEBVIEW2_FALLBACK="https://msedge.sf.net/WebView2/WebView2Bootstrapper.exe"
 
+          download_webview2() {
+            local url="$1"
+            echo "Tentando: $url"
+            rm -f MicrosoftEdgeWebView2Setup.exe
+            if command -v powershell.exe >/dev/null 2>&1; then
+              if powershell.exe -NoProfile -Command "Invoke-WebRequest -Uri '$url' -OutFile 'MicrosoftEdgeWebView2Setup.exe' -UseBasicParsing"; then
+                return 0
+              fi
+            fi
+            if command -v curl >/dev/null 2>&1; then
+              if curl --fail --location --retry 5 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+                --output MicrosoftEdgeWebView2Setup.exe "$url"; then
+                return 0
+              fi
+            fi
+            if command -v wget >/dev/null 2>&1; then
+              if wget -q --tries=5 --timeout=30 -O MicrosoftEdgeWebView2Setup.exe "$url"; then
+                return 0
+              fi
+            fi
+            return 1
+          }
+
+          if ! download_webview2 "$WEBVIEW2_URL"; then
+            echo "Falha no link principal, tentando CDN alternativo..."
+            if ! download_webview2 "$WEBVIEW2_FALLBACK"; then
+              echo "ERRO: não foi possível baixar o WebView2 bootstrapper de nenhuma fonte"
+              exit 1
+            fi
+          fi
+
+          SIZE=$(stat -c%s MicrosoftEdgeWebView2Setup.exe 2>/dev/null || echo 0)
+          echo "Tamanho do bootstrapper: $SIZE bytes"
+          if [ "$SIZE" -lt 100000 ]; then
+            echo "ERRO: arquivo do WebView2 bootstrapper suspeito (muito pequeno)"
+            exit 1
+          fi
+
+          # ---------- Burn Bundle (setup.exe com UI) ----------
           cat > bundle.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
