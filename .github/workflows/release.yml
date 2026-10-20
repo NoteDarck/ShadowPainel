@@ -268,7 +268,8 @@ jobs:
           cat > bundle.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
-               xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
+               xmlns:bal="http://schemas.microsoft.com/wix/BalExtension"
+               xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
             <Bundle Name="ShadowPainel" Version="$(var.ProductVersion)" Manufacturer="NoteDarck"
                     UpgradeCode="B7C3E9A1-4F2D-4E8A-9C5B-1A3D7F2E6B8C"
                     IconSourceFile="$(var.SourceDir)\shadowpainel.ico"
@@ -276,7 +277,6 @@ jobs:
               <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
                 <bal:WixStandardBootstrapperApplication
                   LicenseUrl=""
-                  Theme="hyperlinkLicense"
                   LogoFile="$(var.SourceDir)\shadowpainel.ico" />
               </BootstrapperApplicationRef>
               <Chain>
@@ -287,21 +287,7 @@ jobs:
                             PerMachine="no"
                             InstallCommand="/silent /install"
                             DetectCondition="WV2Installed"
-                            Permanent="no">
-                  <RegistrySearch Id="WV2Machine"
-                                  Root="HKLM"
-                                  Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
-                                  Name="pv"
-                                  Type="raw"
-                                  Win64="no"
-                                  Variable="WV2Installed" />
-                  <RegistrySearch Id="WV2User"
-                                  Root="HKCU"
-                                  Key="Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
-                                  Name="pv"
-                                  Type="raw"
-                                  Variable="WV2Installed" />
-                </ExePackage>
+                            Permanent="no" />
                 <MsiPackage Id="ShadowPainelMsi"
                             SourceFile="ShadowPainel.msi"
                             Compressed="yes"
@@ -309,10 +295,25 @@ jobs:
                             Visible="no" />
               </Chain>
             </Bundle>
+            <Fragment>
+              <util:RegistrySearch Id="WV2Machine"
+                                   Root="HKLM"
+                                   Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                                   Value="pv"
+                                   Variable="WV2MachineInstalled"
+                                   Win64="no"
+                                   Result="exists" />
+              <util:RegistrySearch Id="WV2User"
+                                   Root="HKCU"
+                                   Key="Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                                   Value="pv"
+                                   Variable="WV2UserInstalled"
+                                   Result="exists" />
+            </Fragment>
           </Wix>
           EOF
-          candle -arch x64 -dProductVersion="${PKG_VERSION}.0" -dSourceDir="$ROOT" bundle.wxs -ext WixBalExtension
-          light -ext WixBalExtension bundle.wixobj -out "${ROOT}.exe"
+          candle -arch x64 -dProductVersion="${PKG_VERSION}.0" -dSourceDir="$ROOT" bundle.wxs -ext WixBalExtension -ext WixUtilExtension
+          light -ext WixBalExtension -ext WixUtilExtension bundle.wixobj -out "${ROOT}.exe"
 
           rm -f installer.wxs files.wxs installer.wixobj files.wixobj bundle.wxs bundle.wixobj ShadowPainel.msi MicrosoftEdgeWebView2Setup.exe
           rm -rf "$ROOT"
