@@ -374,201 +374,48 @@ fn validate_e4all_fields(c: &E4allConfig) -> Result<(), String> {
     Ok(())
 }
 
-// ───────────────────────── Detecção de loader (AUMENTADA) ─────────────────────────
-
-fn classify(id: &str) -> &'static str {
-    let l = id.to_lowercase();
-    if l.contains("neoforge") {
-        "neoforge"
-    } else if l.contains("quilt") {
-        "quilt"
-    } else if l.contains("fabric") {
-        "fabric"
-    } else if l.contains("forge") {
-        "forge"
-    } else {
-        "none"
-    }
-}
-
-fn detect_loader(dir: &Path) -> (String, String, String) {
-    // 1) Perfil usado no launcher oficial
-    if let Ok(text) = fs::read_to_string(dir.join("launcher_profiles.json")) {
-        if let Ok(json) = serde_json::from_str::<Value>(&text) {
-            if let Some(profiles) = json.get("profiles").and_then(|p| p.as_object()) {
-                let latest = profiles
-                    .values()
-                    .filter_map(|p| {
-                        let id = p.get("lastVersionId")?.as_str()?;
-                        let used = p.get("lastUsed").and_then(|u| u.as_str()).unwrap_or("");
-                        Some((used.to_string(), id.to_string()))
-                    })
-                    .max_by(|a, b| a.0.cmp(&b.0));
-                if let Some((_, id)) = latest {
-                    let c = classify(&id);
-                    if c != "none" {
-                        return (c.to_string(), id, "perfil do launcher oficial".into());
-                    }
-                }
-            }
-        }
-    }
-
-    // 2) Pasta versions
-    let mut found: Vec<(&'static str, String)> = Vec::new();
-    if let Ok(rd) = fs::read_dir(dir.join("versions")) {
-        for e in rd.flatten() {
-            if e.path().is_dir() {
-                let name = e.file_name().to_string_lossy().to_string();
-                let c = classify(&name);
-                if c != "none" {
-                    found.push((c, name));
-                }
-            }
-        }
-    }
-    for pref in ["neoforge", "fabric", "forge", "quilt"] {
-        if let Some((c, n)) = found.iter().find(|(c, _)| *c == pref) {
-            return (c.to_string(), n.clone(), "pasta versions".into());
-        }
-    }
-
-    // 3) Pasta libraries (procura em subpastas do net/fabricmc, net/minecraftforge, etc)
-    for (rel, name) in [
-        ("net/neoforged", "neoforge"),
-        ("net/fabricmc", "fabric"),
-        ("net/minecraftforge", "forge"),
-        ("org/quiltmc", "quilt"),
-    ] {
-        if dir.join("libraries").join(rel).is_dir() {
-            return (name.to_string(), String::new(), "pasta libraries".into());
-        }
-    }
-
-    // 4) Fallback: ler o log inteiro (onde o loader sempre se anuncia)
-    if let Ok(log) = fs::read_to_string(dir.join("logs").join("latest.log")) {
-        let low = log.to_lowercase();
-        if low.contains("neoforge") {
-            return ("neoforge".into(), String::new(), "logs/latest.log".into());
-        }
-        if low.contains("quilt") {
-            return ("quilt".into(), String::new(), "logs/latest.log".into());
-        }
-        if low.contains("fabric") {
-            return ("fabric".into(), String::new(), "logs/latest.log".into());
-        }
-        if low.contains("forge") {
-            return ("forge".into(), String::new(), "logs/latest.log".into());
-        }
-    }
-
-    (
-        "none".into(),
-        String::new(),
-        "nenhum mod loader encontrado".into(),
-    )
-}
+// ───────────────────────── Verificação do e4all.toml ─────────────────────────
 
 #[derive(Serialize, Clone)]
 struct E4allStatus {
     dir_exists: bool,
-    loader: String,
-    loader_id: String,
-    loader_source: String,
-    installed: bool,
-    jar: String,
     config_exists: bool,
     config_path: String,
     level: String,
     message: String,
 }
 
-/// Procura recursivamente por qualquer .jar que contenha "e4all", "e4mc" ou "dialtone".
-fn find_e4all_jar(dir: &Path) -> Option<PathBuf> {
-    if !dir.is_dir() {
-        return None;
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return None;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_e4all_jar(&path) {
-                return Some(found);
-            }
-        } else if path.is_file() {
-            let name = path.file_name()?.to_string_lossy().to_lowercase();
-            if name.ends_with(".jar")
-                && (name.contains("e4all") || name.contains("e4mc") || name.contains("dialtone"))
-            {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
-
 fn detect_status(dir_str: &str) -> E4allStatus {
     let dir = expand(dir_str.trim());
     let cfg_path = dir.join("config").join("e4all.toml");
     let dir_exists = dir.is_dir();
-
-    let mut st = E4allStatus {
-        dir_exists,
-        loader: "none".into(),
-        loader_id: String::new(),
-        loader_source: String::new(),
-        installed: false,
-        jar: String::new(),
-        config_exists: cfg_path.is_file(),
-        config_path: cfg_path.display().to_string(),
-        level: "error".into(),
-        message: String::new(),
-    };
-
-    if !dir_exists {
-        st.message = format!("Pasta '{}' não encontrada. Se usa Prism/MultiMC, aponte para a pasta .minecraft da instância.", dir.display());
-        return st;
-    }
-
-    let (loader, id, source) = detect_loader(&dir);
-    st.loader = loader;
-    st.loader_id = id;
-    st.loader_source = source;
-
-    if let Some(jar_path) = find_e4all_jar(&dir.join("mods")) {
-        st.installed = true;
-        st.jar = jar_path
-            .strip_prefix(dir.join("mods"))
-            .unwrap_or(&jar_path)
-            .display()
-            .to_string();
-    }
-
-    let loader_name = match st.loader.as_str() {
-        "fabric" => "Fabric",
-        "forge" => "Forge",
-        "neoforge" => "NeoForge",
-        "quilt" => "Quilt",
-        _ => "nenhum",
-    };
-
-    if st.loader == "none" {
-        st.level = "error".into();
-        st.message = "Mod loader não detectado. Se você usa um launcher como Prism ou CurseForge, use o botão 'Procurar launchers' para escolher a pasta correta.".into();
-    } else if st.loader == "quilt" {
-        st.level = "warn".into();
-        st.message =
-            "Quilt detectado. O e4all suporta oficialmente Fabric, Forge e NeoForge.".into();
-    } else if !st.installed {
-        st.level = "warn".into();
-        st.message = format!("Mod loader ({loader_name}) OK, mas o e4all não foi achado na pasta mods/. Baixe o JAR no Modrinth e coloque lá.");
+    let config_exists = cfg_path.is_file();
+    let (level, message) = if !dir_exists {
+        (
+            "error",
+            format!(
+                "Pasta '{}' não encontrada. Aponte para a instância correta do Minecraft.",
+                dir.display()
+            ),
+        )
+    } else if config_exists {
+        (
+            "ok",
+            "e4all.toml encontrado. As configurações podem ser lidas e salvas abaixo.".into(),
+        )
     } else {
-        st.level = "ok".into();
-        st.message = format!("Tudo certo! Mod loader ({loader_name}) e e4all detectados.");
+        (
+            "warn",
+            "e4all.toml não encontrado. Salve as configurações para criar o arquivo.".into(),
+        )
+    };
+    E4allStatus {
+        dir_exists,
+        config_exists,
+        config_path: cfg_path.display().to_string(),
+        level: level.into(),
+        message,
     }
-    st
 }
 
 // ───────────────────────── Auto-descoberta de launchers ─────────────────────────
@@ -578,28 +425,27 @@ struct LauncherCandidate {
     label: String,
     path: String,
     exists: bool,
-    loader: String,
-    e4all_installed: bool,
     config_exists: bool,
 }
 
-fn known_launcher_dirs() -> Vec<(&'static str, PathBuf)> {
-    let mut out = Vec::new();
+fn known_launcher_dirs() -> Vec<(String, PathBuf)> {
     let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
-
-    // 1. Launcher Oficial
-    if home.join(".minecraft").is_dir() {
-        out.push(("Launcher oficial", home.join(".minecraft")));
-    }
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let p = PathBuf::from(appdata).join(".minecraft");
-        if p.is_dir() {
-            out.push(("Launcher oficial (AppData)", p));
+    let mut paths = Vec::new();
+    let mut add = |label: String, path: PathBuf| {
+        if path.is_dir() {
+            paths.push((label, path));
         }
+    };
+
+    add("Launcher oficial".into(), home.join(".minecraft"));
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        add(
+            "Launcher oficial (AppData)".into(),
+            PathBuf::from(appdata).join(".minecraft"),
+        );
     }
 
-    // 2. Prism Launcher (instâncias)
-    let prism_paths = [
+    let prism_roots = [
         home.join(".local")
             .join("share")
             .join("PrismLauncher")
@@ -612,61 +458,56 @@ fn known_launcher_dirs() -> Vec<(&'static str, PathBuf)> {
             .join("PrismLauncher")
             .join("instances"),
     ];
-    for root in prism_paths {
-        if let Ok(rd) = fs::read_dir(root) {
-            for e in rd.flatten() {
-                let inst = e.path().join(".minecraft");
-                if inst.is_dir() {
-                    let label = format!("Prism: {}", e.file_name().to_string_lossy());
-                    out.push((Box::leak(label.into_boxed_str()), inst));
-                }
+    for root in prism_roots {
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path().join(".minecraft");
+                add(
+                    format!("Prism: {}", entry.file_name().to_string_lossy()),
+                    path,
+                );
             }
         }
     }
 
-    // 3. CurseForge (instâncias)
-    let cf_paths = [
+    let curseforge_roots = [
         home.join("Documents")
             .join("curseforge")
             .join("minecraft")
             .join("Instances"),
         home.join("curseforge").join("minecraft").join("Instances"),
     ];
-    for root in cf_paths {
-        if let Ok(rd) = fs::read_dir(root) {
-            for e in rd.flatten() {
-                let inst = e.path();
-                if inst.is_dir() {
-                    let label = format!("CurseForge: {}", e.file_name().to_string_lossy());
-                    out.push((Box::leak(label.into_boxed_str()), inst));
-                }
+    for root in curseforge_roots {
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                add(
+                    format!("CurseForge: {}", entry.file_name().to_string_lossy()),
+                    path,
+                );
             }
         }
     }
-    out
+    paths
 }
 
-fn scan_launchers() -> Vec<LauncherCandidate> {
+fn scan_e4all_configs() -> Vec<LauncherCandidate> {
     known_launcher_dirs()
         .into_iter()
-        .map(|(label, path)| {
-            let (loader, _, _) = detect_loader(&path);
-            let e4all_installed = find_e4all_jar(&path.join("mods")).is_some();
+        .filter_map(|(label, path)| {
             let config_exists = path.join("config").join("e4all.toml").is_file();
-            LauncherCandidate {
+            config_exists.then(|| LauncherCandidate {
                 label: label.to_string(),
                 path: path.display().to_string(),
                 exists: true,
-                loader,
-                e4all_installed,
                 config_exists,
-            }
+            })
         })
         .collect()
 }
 
 async fn e4all_scan() -> Json<Vec<LauncherCandidate>> {
-    Json(scan_launchers())
+    Json(scan_e4all_configs())
 }
 
 // ───────────────────────── Helpers de servidor ─────────────────────────

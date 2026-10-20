@@ -35,13 +35,11 @@
     offline_mode:boolean; hide_domain_in_chat:boolean; voice_p2p_enabled:boolean;
   };
   type E4allStatus = {
-    dir_exists:boolean; loader:string; loader_id:string; loader_source:string;
-    installed:boolean; jar:string; config_exists:boolean; config_path:string;
+    dir_exists:boolean; config_exists:boolean; config_path:string;
     level:string; message:string;
   };
   type LauncherCandidate = {
-    label: string; path: string; exists: boolean;
-    loader: string; e4all_installed: boolean; config_exists: boolean;
+    label: string; path: string; exists: boolean; config_exists: boolean;
   };
   type ServerProperties = {
     motd:string; max_players:number; gamemode:string; difficulty:string;
@@ -574,9 +572,6 @@
   }
   function resetE4allDefaults() {
     server.e4all = { minecraft_dir: server.e4all.minecraft_dir, ...E4_DEFAULTS };
-  }
-  function loaderName(l:string) {
-    return ({ fabric:'Fabric', forge:'Forge', neoforge:'NeoForge', quilt:'Quilt', none:'Nenhum (sem mod loader)' } as Record<string,string>)[l] ?? l;
   }
 
   async function scanLaunchers() {
@@ -1249,7 +1244,7 @@
 
         <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap; margin-top: 16px;">
           <button class="secondary" on:click={scanLaunchers} disabled={scanningLaunchers}>
-            {scanningLaunchers ? 'Procurando...' : '🔍 Procurar launchers'}
+            {scanningLaunchers ? 'Procurando...' : '🔍 Procurar e4all.toml'}
           </button>
         </div>
 
@@ -1264,9 +1259,7 @@
                 <b style="display:block;font-size:12px;color:#fff;">{c.label}</b>
                 <small style="display:block;color:var(--muted);font-size:10px;margin-top:4px;word-break:break-all;">{c.path}</small>
                 <small style="display:block;margin-top:8px;font-family:'DM Mono';font-size:10px;">
-                  loader: <span class:yes={c.loader !== 'none' && c.loader !== 'quilt'} class:no={c.loader === 'none'} class:maybe={c.loader === 'quilt'}>{c.loader}</span>
-                  · e4all: <span class:yes={c.e4all_installed} class:no={!c.e4all_installed}>{c.e4all_installed ? 'Sim' : 'Não'}</span>
-                  · toml: <span class:yes={c.config_exists} class:maybe={!c.config_exists}>{c.config_exists ? 'Sim' : 'Não'}</span>
+                  <span class:yes={c.config_exists}>✓ e4all.toml encontrado</span>
                 </small>
               </button>
             {/each}
@@ -1275,20 +1268,10 @@
 
         {#if e4status}
           {#if e4status.dir_exists}
-            <div class="e4-rows" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px;">
-              <div class="e4-row" style="background:var(--panel-2);border-radius:7px;padding:12px 14px;">
-                <span style="display:block;color:var(--faint);font:500 9px 'DM Mono';">MOD LOADER</span>
-                <b class:yes={e4status.loader!=='none' && e4status.loader!=='quilt'} class:no={e4status.loader==='none'} class:maybe={e4status.loader==='quilt'} style="display:block;margin-top:6px;font-size:13px;">{loaderName(e4status.loader)}</b>
-                <small style="display:block;color:var(--faint);font-size:9px;margin-top:4px;">{e4status.loader_id ? e4status.loader_id + ' · ' : ''}{e4status.loader_source}</small>
-              </div>
-              <div class="e4-row" style="background:var(--panel-2);border-radius:7px;padding:12px 14px;">
-                <span style="display:block;color:var(--faint);font:500 9px 'DM Mono';">e4all INSTALADO</span>
-                <b class:yes={e4status.installed} class:no={!e4status.installed} style="display:block;margin-top:6px;font-size:13px;">{e4status.installed ? 'Sim' : 'Não'}</b>
-                <small style="display:block;color:var(--faint);font-size:9px;margin-top:4px;">{e4status.installed ? e4status.jar : 'Nenhum JAR do e4all na pasta mods'}</small>
-              </div>
+            <div class="e4-rows" style="display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:16px;">
               <div class="e4-row" style="background:var(--panel-2);border-radius:7px;padding:12px 14px;">
                 <span style="display:block;color:var(--faint);font:500 9px 'DM Mono';">ARQUIVO e4all.toml</span>
-                <b class:yes={e4status.config_exists} class:maybe={!e4status.config_exists} style="display:block;margin-top:6px;font-size:13px;">{e4status.config_exists ? 'Encontrado' : 'Será criado ao salvar'}</b>
+                <b class:yes={e4status.config_exists} class:maybe={!e4status.config_exists} style="display:block;margin-top:6px;font-size:13px;">{e4status.config_exists ? 'Encontrado' : 'Não encontrado'}</b>
                 <small style="display:block;color:var(--faint);font-size:9px;margin-top:4px;word-break:break-all;">{e4status.config_path}</small>
               </div>
             </div>
