@@ -68,7 +68,15 @@ jobs:
 
       - name: Dependências WebView Linux
         if: matrix.name == 'linux-x86_64'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev
+        timeout-minutes: 12
+        run: |
+          sudo apt-get update -qq \
+            -o Acquire::ForceIPv4=true \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            -o Acquire::Retries=3
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Node.js 22
         uses: actions/setup-node@v4
