@@ -1,6 +1,6 @@
 [package]
 name = "shadowpainel"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 rust-version = "1.80"
 description = "Painel multiplataforma para gerenciar servidores Minecraft"
@@ -20,6 +20,9 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 urlencoding = "2.1"
 zip = "2.2"
+qrcodegen = "1.8"
+sha2 = "0.10"
+md5 = "0.7"
 
 [profile.release]
 lto = "thin"

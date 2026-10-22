@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.8.1';
+  const APP_VERSION = '0.8.2';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -27,6 +27,20 @@
     downloads?:number;
   };
   type BackupItem = { name:string; size:number; created:string };
+  type HealthLevel = 'ok' | 'warn' | 'danger';
+  type HealthItem = { id:string; label:string; level:HealthLevel; detail:string };
+  type HealthView = { level:HealthLevel; items:HealthItem[]; advice:string[] };
+  type NetworkCheck = { id:string; label:string; level:HealthLevel; detail:string };
+  type NetworkDiagnostic = {
+    port:number; local_ip:string|null; public_ip:string|null; checks:NetworkCheck[];
+    summary:string; recommendation:string;
+  };
+  type WhitelistEntry = { uuid:string; name:string };
+  type WhitelistView = { entries:WhitelistEntry[]; enabled:boolean; online_mode:boolean };
+  type UpdateInfo = {
+    current_version:string; latest_version:string; available:boolean; release_url:string;
+    notes:string; published_at:string; asset_name:string|null; asset_size:number; can_rollback:boolean;
+  };
   type CurseForgeStatus = { mode:string; configured:boolean; ok:boolean; message:string };
   type E4allConfig = {
     minecraft_dir:string;
@@ -44,7 +58,10 @@
     dir_exists:boolean; config_exists:boolean; config_path:string;
     level:string; message:string;
   };
-  type E4allLinkView = { link:string|null; source:string|null };
+  type E4allLinkView = {
+    link:string|null; source:string|null; active:boolean;
+    checked_at:string; qr_svg:string|null;
+  };
   type LauncherCandidate = {
     label: string; path: string; exists: boolean; config_exists: boolean;
   };
@@ -65,6 +82,8 @@
     java_detected:boolean; installed:boolean; eula_accepted:boolean; installing:boolean;
     curseforge_mode:string; curseforge_configured:boolean;
     e4all:E4allConfig; e4all_link:string|null; logs:Log[];
+    java_major:number|null; required_java_major:number; java_managed:boolean;
+    auto_backup:boolean; health:HealthView;
   };
   type ServerSummary = { server_name:string; version:string; server_dir:string; installed:boolean; active:boolean; status:string };
 
@@ -84,6 +103,9 @@
     java_detected:false, installed:false, eula_accepted:false, installing:false,
     curseforge_mode:'proxy', curseforge_configured:false,
     e4all:{ minecraft_dir:'~/.minecraft', ...E4_DEFAULTS }, e4all_link:null,
+    java_major:null, required_java_major:21, java_managed:false,
+    auto_backup:true,
+    health:{ level:'ok', items:[], advice:[] },
     logs:[]
   };
   let versions:Version[] = [];
@@ -104,11 +126,14 @@
     loader:'vanilla',
   };
   let setupVersion = '';
+  let setupJavaMajor = 21;
   let setupError = '';
-  let configSection:'server'|'properties'|'e4all'|'integrations'|'backups' = 'server';
+  let configSection:'server'|'properties'|'e4all'|'integrations'|'backups'|'updates' = 'server';
 
   let loading = false;
   let notice = '';
+  let lastFriendlyLog = '';
+  let noticeActions:{ label:string; run:()=>void|Promise<void> }[] = [];
   let saved = false;
   let command = '';
   let booted = false;
@@ -150,6 +175,10 @@
   let e4allLink = '';
   let e4allLinkSource = '';
   let e4allLinkLoading = false;
+  let e4allActive = false;
+  let e4allCheckedAt = '';
+  let e4allQrSvg = '';
+  let e4allStatusLabel = 'AGUARDANDO';
   let resolvedE4allLink = '';
   let resolvedE4allSource = '';
   $: resolvedE4allLink = server.e4all_link || e4allLink;
@@ -171,8 +200,25 @@
   let backupName = '';
   let backupCreating = false;
   let backupPendingDelete = '';
+  let backupPendingRestore = '';
+  let autoBackupSaving = false;
 
   let helpOpen = false;
+  let javaPreparing = false;
+  let networkResult:NetworkDiagnostic|null = null;
+  let networkChecking = false;
+  let whitelist:WhitelistView = { entries:[], enabled:false, online_mode:true };
+  let whitelistLoaded = false;
+  let whitelistLoading = false;
+  let whitelistName = '';
+  let whitelistSaving = false;
+  let updateInfo:UpdateInfo|null = null;
+  let updateChecking = false;
+  let updateApplying = false;
+  let updateError = '';
+  let undoToken = '';
+  let undoLabel = '';
+  let undoKind:'content'|'backup' = 'content';
   let contentDeleteOpen = false;
   let deletingContent = false;
 
@@ -256,6 +302,270 @@
     return left.trim().replace(/[\\/]+$/, '') === right.trim().replace(/[\\/]+$/, '');
   }
 
+  function javaMajorForVersion(version:string) {
+    const parts = version.split(/[^0-9]+/).filter(Boolean).map(Number);
+    if (!parts.length) return 21;
+    if (parts[0] === 1) {
+      const minor = parts[1] ?? 21;
+      const patch = parts[2] ?? 0;
+      if (minor >= 21 || (minor === 20 && patch >= 5)) return 21;
+      return minor >= 17 ? 17 : 8;
+    }
+    return parts[0] >= 21 ? 21 : 17;
+  }
+
+  function setNotice(message:string, actions:{ label:string; run:()=>void|Promise<void> }[] = []) {
+    notice = message;
+    noticeActions = actions;
+  }
+
+  function fail(error:unknown, fallback:string, actions:{ label:string; run:()=>void|Promise<void> }[] = []) {
+    setNotice(error instanceof Error ? error.message : fallback, actions);
+  }
+
+  function dismissNotice() {
+    notice = '';
+    noticeActions = [];
+  }
+
+  function healthText(level:HealthLevel) {
+    return level === 'danger' ? 'Ação necessária' : level === 'warn' ? 'Atenção' : 'Tudo certo';
+  }
+
+  function humanizeLog(text:string) {
+    const lower = text.toLowerCase();
+    if (lower.includes('done (') || lower.includes('finished loading')) return 'Servidor iniciado e pronto para receber jogadores.';
+    if (lower.includes('joined the game')) return 'Um jogador entrou no servidor.';
+    if (lower.includes('left the game')) return 'Um jogador saiu do servidor.';
+    if (lower.includes('starting minecraft server version')) return 'Preparando o servidor Minecraft…';
+    if (lower.includes('preparing spawn area')) return 'Gerando o mundo e preparando o spawn…';
+    if (lower.includes('stopping server')) return 'Salvando o mundo e parando o servidor…';
+    if (lower.includes('address already in use')) return 'A porta está ocupada. Use outra porta nas configurações.';
+    if (lower.includes('outofmemory') || lower.includes('java heap space')) return 'Falta memória. Aumente o limite de RAM do servidor.';
+    if (lower.includes('unsupportedclassversion')) return 'A versão do Java é incompatível. Use “Preparar Java automaticamente”.';
+    if (lower.includes('e4all') && lower.includes('domain')) return 'Link do e4all atualizado. Compartilhe com os jogadores.';
+    if (lower.includes('failed to download') || lower.includes('connection reset')) return 'Uma conexão falhou. Verifique a internet e tente novamente.';
+    if (lower.includes('could not load') || lower.includes('incompatible mod')) return 'Um mod não carregou. Veja o nome no console.';
+    if (lower.includes('error') || lower.includes('exception')) return 'O servidor registrou um erro. Abra o console para ver os detalhes.';
+    return '';
+  }
+
+  async function ensureJava(version = setupVersion || server.version) {
+    if (javaPreparing) return;
+    javaPreparing = true;
+    setNotice('Preparando o Java adequado. Isso pode baixar um runtime na primeira vez.');
+    try {
+      server = await api<Server>('/java/ensure', json({version}));
+      setNotice(`Java ${server.java_major ?? server.required_java_major} pronto.`);
+    } catch(e) {
+      fail(e, 'Não foi possível preparar o Java.', [
+        { label:'Tentar novamente', run:()=>ensureJava(version) },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
+    }
+    javaPreparing = false;
+  }
+
+  async function openServerFolder() {
+    try {
+      await api('/server/open-folder', {method:'POST'});
+    } catch(e) {
+      fail(e, 'Não foi possível abrir a pasta do servidor.');
+    }
+  }
+
+  async function useNextPort() {
+    try {
+      if (!(await loadServerProperties())) throw new Error('Não consegui ler o server.properties atual. Abra a pasta e tente novamente.');
+      const data = await api<{port:number|null}>('/server/next-port', json({current:props.server_port}));
+      if (!data.port) throw new Error('Não encontrei uma porta livre próxima. Escolha outra manualmente.');
+      props.server_port = data.port;
+      await saveServerProperties();
+      setNotice(`Porta alterada para ${data.port}. Inicie o servidor para aplicar.`);
+    } catch(e) {
+      fail(e, 'Não foi possível encontrar outra porta.');
+    }
+  }
+
+  async function checkNetwork() {
+    if (networkChecking) return;
+    networkChecking = true;
+    networkResult = null;
+    try {
+      networkResult = await api<NetworkDiagnostic>('/network/diagnose');
+    } catch(e) {
+      fail(e, 'Não foi possível testar a rede.', [
+        { label:'Tentar novamente', run:checkNetwork },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
+    }
+    networkChecking = false;
+  }
+
+  async function loadWhitelist(force = false) {
+    if (whitelistLoading || (!force && whitelistLoaded)) return;
+    whitelistLoading = true;
+    try {
+      whitelist = await api<WhitelistView>('/whitelist');
+      whitelistLoaded = true;
+    } catch(e) {
+      console.error('Falha ao carregar whitelist', e);
+    }
+    whitelistLoading = false;
+  }
+
+  async function addWhitelist(forceOffline = false) {
+    const name = whitelistName.trim();
+    if (!name || whitelistSaving) return;
+    whitelistSaving = true;
+    try {
+      whitelist = await api<WhitelistView>('/whitelist/add', json({
+        name, online_mode: forceOffline ? false : props.online_mode,
+      }));
+      props.white_list = true;
+      whitelistName = '';
+      setNotice(`${name} foi convidado. A whitelist já está ativada.`);
+    } catch(e) {
+      fail(e, 'Não foi possível convidar o jogador.', [
+        { label:'Adicionar conta offline', run:()=>addWhitelist(true) },
+      ]);
+    }
+    whitelistSaving = false;
+  }
+
+  async function removeWhitelist(name:string) {
+    try {
+      whitelist = await api<WhitelistView>('/whitelist/remove', json({name}));
+      setNotice(`${name} foi removido da whitelist.`);
+    } catch(e) {
+      fail(e, 'Não foi possível remover o jogador.');
+    }
+  }
+
+  async function toggleWhitelist() {
+    try {
+      whitelist = await api<WhitelistView>('/whitelist/toggle', json({enabled: !whitelist.enabled}));
+      props.white_list = whitelist.enabled;
+      setNotice(whitelist.enabled ? 'Whitelist ativada: só amigos convidados entram.' : 'Whitelist desativada: qualquer jogador pode entrar.');
+    } catch(e) {
+      fail(e, 'Não foi possível alterar a whitelist.');
+    }
+  }
+
+  async function toggleAutoBackup() {
+    if (autoBackupSaving) return;
+    autoBackupSaving = true;
+    try {
+      server = await api<Server>('/backups/auto', json({enabled: !server.auto_backup}));
+      setNotice(server.auto_backup ? 'Backups automáticos ativados antes de instalar conteúdo.' : 'Backups automáticos desativados.');
+    } catch(e) {
+      fail(e, 'Não foi possível alterar os backups automáticos.');
+    }
+    autoBackupSaving = false;
+  }
+
+  async function restoreBackup(name:string) {
+    try {
+      const data = await api<{message:string; items:BackupItem[]}>('/backups/restore', json({name}));
+      backups = data.items || [];
+      backupPendingRestore = '';
+      setNotice(data.message || `Backup ${name} restaurado.`);
+    } catch(e) {
+      fail(e, 'Não foi possível restaurar o backup.');
+    }
+  }
+
+  function rememberUndo(token:string, label:string, kind:'content'|'backup') {
+    undoToken = token;
+    undoLabel = label;
+    undoKind = kind;
+  }
+
+  async function undoLast() {
+    if (!undoToken) return;
+    try {
+      await api('/trash/restore', json({token:undoToken}));
+      setNotice(`${undoLabel} desfeito.`);
+      undoToken = '';
+      undoLabel = '';
+      if (undoKind === 'content') await loadContent();
+      else await loadBackups(true);
+    } catch(e) {
+      fail(e, 'Não foi possível desfazer.');
+    }
+  }
+
+  async function checkUpdates(): Promise<UpdateInfo|null> {
+    if (updateChecking) return updateInfo;
+    updateChecking = true;
+    updateError = '';
+    let result: UpdateInfo|null = null;
+    try {
+      result = await api<UpdateInfo>('/update/check');
+      updateInfo = result;
+    } catch(e) {
+      updateError = e instanceof Error ? e.message : 'Não foi possível consultar atualizações.';
+    }
+    updateChecking = false;
+    return result;
+  }
+
+  async function installUpdate() {
+    if (updateApplying) return;
+    updateApplying = true;
+    updateError = '';
+    try {
+      const data = await api<{message:string; version:string}>('/update/install', {method:'POST'});
+      setNotice(data.message, [
+        { label:'Verificar novamente', run:async()=>{ await checkUpdates(); } },
+      ]);
+      await checkUpdates();
+    } catch(e) {
+      updateError = e instanceof Error ? e.message : 'Não foi possível iniciar a atualização.';
+    }
+    updateApplying = false;
+  }
+
+  async function rollbackUpdate() {
+    if (updateApplying) return;
+    updateApplying = true;
+    updateError = '';
+    try {
+      const data = await api<{message:string}>('/update/rollback', {method:'POST'});
+      setNotice(data.message);
+    } catch(e) {
+      updateError = e instanceof Error ? e.message : 'Não foi possível reverter a atualização.';
+    }
+    updateApplying = false;
+  }
+
+  async function shareE4all() {
+    if (!resolvedE4allLink) return;
+    const text = `Entre no meu servidor Minecraft: ${resolvedE4allLink}`;
+    if (navigator.share) {
+      try { await navigator.share({ title:'Servidor Minecraft', text, url:resolvedE4allLink }); return; }
+      catch { /* usuário cancelou: cai no copiar */ }
+    }
+    await copyE4allLink();
+  }
+
+  function shareWhatsApp() {
+    if (!resolvedE4allLink) return;
+    const text = encodeURIComponent(`Entre no meu servidor Minecraft: ${resolvedE4allLink}`);
+    window.open(`https://wa.me/?text=${text}`, '_blank', 'noopener,noreferrer');
+  }
+
+  async function shareDiscord() {
+    if (!resolvedE4allLink) return;
+    const text = `Entre no meu servidor Minecraft: ${resolvedE4allLink}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice('Convite copiado. Cole no Discord ou em outra conversa.');
+    } catch {
+      setNotice(text);
+    }
+  }
+
   function openSetup(newInstall = false) {
     setupError = '';
     activeTab = 'setup';
@@ -280,7 +590,9 @@
       }
       if (!contentVersion && fresh.version) contentVersion = fresh.version;
     } catch {
-      notice = 'Núcleo Rust offline ou ainda iniciando.';
+      fail('Núcleo Rust offline ou ainda iniciando.', 'Núcleo Rust offline ou ainda iniciando.', [
+        { label:'Tentar novamente', run:refresh },
+      ]);
     }
   }
 
@@ -289,7 +601,9 @@
       const data = await api<{servers:ServerSummary[]}>('/servers');
       serverProfiles = data.servers || [];
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Não foi possível carregar os servidores.';
+      fail(e, 'Não foi possível carregar os servidores.', [
+        { label:'Tentar novamente', run:loadServers },
+      ]);
     }
   }
 
@@ -306,7 +620,10 @@
       await loadContent();
       await loadE4allLink();
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Não foi possível trocar de servidor.';
+      fail(e, 'Não foi possível trocar de servidor.', [
+        { label:'Tentar novamente', run:()=>switchServer(server_dir) },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
       await loadServers();
     }
     switchingServer = false;
@@ -323,7 +640,9 @@
         contentVersion = server.version || versions[0].id;
       }
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Não foi possível ler versões.';
+      fail(e, 'Não foi possível ler versões. Verifique a internet.', [
+        { label:'Tentar novamente', run:loadVersions },
+      ]);
     }
   }
 
@@ -333,7 +652,10 @@
       content = data.items;
       selectedItems.clear();
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao listar conteúdo.';
+      fail(e, 'Falha ao listar conteúdo.', [
+        { label:'Tentar novamente', run:loadContent },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
     }
   }
 
@@ -355,7 +677,11 @@
       await loadServers();
     } catch(e) {
       setupError = e instanceof Error ? e.message : 'Falha na instalação.';
-      notice = setupError;
+      fail(setupError, 'Falha na instalação.', [
+        { label:'Tentar novamente', run:createServer },
+        { label:'Preparar Java', run:()=>ensureJava(setupVersion) },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
     }
     loading = false;
   }
@@ -366,7 +692,9 @@
       notice = 'EULA aceita. Você já pode iniciar o servidor.';
       await refresh();
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao aceitar EULA.';
+      fail(e, 'Falha ao aceitar EULA.', [
+        { label:'Tentar novamente', run:acceptEula },
+      ]);
     }
   }
 
@@ -383,7 +711,10 @@
       saved = true;
       setTimeout(()=>saved=false, 2200);
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao salvar.';
+      fail(e, 'Falha ao salvar.', [
+        { label:'Tentar novamente', run:saveConfig },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
     }
   }
 
@@ -396,7 +727,12 @@
         {method:'POST'}
       );
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao controlar servidor.';
+      fail(e, 'Falha ao controlar servidor.', [
+        { label:'Tentar novamente', run:toggleServer },
+        { label:'Preparar Java', run:()=>ensureJava(server.version) },
+        { label:'Abrir pasta', run:openServerFolder },
+        { label:'Usar outra porta', run:useNextPort },
+      ]);
     }
     loading = false;
   }
@@ -408,22 +744,27 @@
       command='';
       await refresh();
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Console indisponível.';
+      fail(e, 'Console indisponível.', [
+        { label:'Tentar novamente', run:sendCommand },
+      ]);
     }
   }
 
   $: if (activeTab === 'config') loadServerProperties();
 
   async function loadServerProperties() {
+    let ok = false;
     try {
       loadingProps = true;
       const data = await api<ServerProperties>('/server/properties');
       if (data) props = { ...props, ...data };
+      ok = true;
     } catch (e) {
       console.error('Falha ao carregar server.properties', e);
     } finally {
       loadingProps = false;
     }
+    return ok;
   }
 
   async function saveServerProperties() {
@@ -432,8 +773,11 @@
       await api('/server/properties', json(props));
       savedProps = true;
       setTimeout(() => savedProps = false, 2200);
-    } catch (e) {
-      notice = e instanceof Error ? e.message : 'Falha ao salvar server.properties.';
+    } catch(e) {
+      fail(e, 'Falha ao salvar server.properties.', [
+        { label:'Tentar novamente', run:saveServerProperties },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
     } finally {
       loadingProps = false;
     }
@@ -450,7 +794,10 @@
       await loadContent();
       await runCatalogSearch();
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao instalar conteúdo.';
+      fail(e, 'Falha ao instalar conteúdo.', [
+        { label:'Tentar novamente', run:()=>installContent(project_id, version_id, source) },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
     }
   }
 
@@ -494,19 +841,20 @@
     if (selectedItems.size === 0) return;
     deletingContent = true;
     try {
-      const result = await api<{ok:boolean; deleted?:string[]; errors?:string[]}>('/content/delete', json({
+      const result = await api<{ok:boolean; deleted?:string[]; errors?:string[]; undo_token?:string}>('/content/delete', json({
         kind: contentKind,
         filenames: Array.from(selectedItems)
       }));
       if (result.ok) {
-        notice = `${result.deleted?.length || 0} arquivo(s) removido(s).`;
+        setNotice(`${result.deleted?.length || 0} arquivo(s) movido(s) para a lixeira.`);
+        if (result.undo_token) rememberUndo(result.undo_token, 'Remoção de conteúdo', 'content');
       } else {
-        notice = `Erros: ${result.errors?.join(', ')}`;
+        fail(`Erros: ${result.errors?.join(', ')}`, 'Falha ao excluir conteúdo.');
       }
       contentDeleteOpen = false;
       await loadContent();
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao excluir.';
+      fail(e, 'Falha ao excluir.');
     }
     deletingContent = false;
   }
@@ -654,7 +1002,7 @@
     try {
       e4status = await api<E4allStatus>('/e4all/status', json({ minecraft_dir: server.e4all.minecraft_dir }));
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Não foi possível verificar o e4all.';
+      fail(e, 'Não foi possível verificar o e4all.');
     }
     checkingE4 = false;
   }
@@ -664,7 +1012,10 @@
       await checkE4all();
       saved = true; setTimeout(()=>saved=false, 2200);
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao ler o e4all.toml';
+      fail(e, 'Falha ao ler o e4all.toml.', [
+        { label:'Tentar novamente', run:loadE4allFromFile },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
     }
   }
   async function saveE4all() {
@@ -675,7 +1026,9 @@
       await loadE4allLink();
       saved = true; setTimeout(()=>saved=false, 2200);
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao salvar e4all';
+      fail(e, 'Falha ao salvar e4all', [
+        { label:'Tentar novamente', run:saveE4all },
+      ]);
     }
   }
   function resetE4allDefaults() {
@@ -689,9 +1042,11 @@
       const data = await api<E4allLinkView>('/e4all/link', json({ minecraft_dir: server.e4all.minecraft_dir }));
       e4allLink = data.link || '';
       e4allLinkSource = data.source || '';
+      e4allActive = data.active;
+      e4allCheckedAt = data.checked_at;
+      e4allQrSvg = data.qr_svg || '';
     } catch {
-      e4allLink = '';
-      e4allLinkSource = '';
+      e4allActive = false;
     }
     e4allLinkLoading = false;
   }
@@ -718,7 +1073,9 @@
       launcherCandidates = await api<LauncherCandidate[]>('/e4all/scan');
       if (launcherCandidates.length === 0) notice = 'Nenhum launcher encontrado automaticamente.';
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao procurar launchers.';
+      fail(e, 'Falha ao procurar launchers.', [
+        { label:'Tentar novamente', run:scanLaunchers },
+      ]);
     } finally {
       scanningLaunchers = false;
     }
@@ -771,7 +1128,10 @@
       backups = data.items || [];
       backupsLoaded = true;
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao listar backups.';
+      fail(e, 'Falha ao listar backups.', [
+        { label:'Tentar novamente', run:()=>loadBackups(true) },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
       backupsLoaded = true;
     }
     backupsLoading = false;
@@ -785,19 +1145,23 @@
       backupName = '';
       notice = `Backup ${data.name} criado.`;
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao criar backup.';
+      fail(e, 'Falha ao criar backup.', [
+        { label:'Tentar novamente', run:createBackup },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
     }
     backupCreating = false;
   }
 
   async function confirmDeleteBackup(name: string) {
     try {
-      await api('/backups/delete', json({ name }));
+      const result = await api<{undo_token?:string}>('/backups/delete', json({ name }));
       backupPendingDelete = '';
       backups = backups.filter(item => item.name !== name);
-      notice = 'Backup excluído.';
+      setNotice('Backup movido para a lixeira.');
+      if (result.undo_token) rememberUndo(result.undo_token, `Exclusão de ${name}`, 'backup');
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao excluir backup.';
+      fail(e, 'Falha ao excluir backup.');
     }
   }
 
@@ -938,16 +1302,37 @@
   $: if (activeTab === 'config' && configSection === 'e4all' && !e4status) checkE4all();
   $: if (activeTab === 'config' && configSection === 'integrations' && !cfStatus && !cfChecking) checkCurseForge();
   $: if (activeTab === 'config' && configSection === 'backups' && !backupsLoaded && !backupsLoading) loadBackups();
+  $: if (activeTab === 'config' && configSection === 'properties') loadWhitelist();
+  $: if (activeTab === 'config' && configSection === 'updates' && !updateInfo && !updateChecking) checkUpdates();
   $: if (activeTab === 'overview' && booted) loadE4allLink();
   $: if (activeTab === 'config' && configSection === 'e4all') loadE4allLink();
+  $: lastFriendlyLog = (() => {
+    for (let index = server.logs.length - 1; index >= 0; index--) {
+      const friendly = humanizeLog(server.logs[index].text);
+      if (friendly) return friendly;
+    }
+    return '';
+  })();
 
   onMount(() => {
     refresh();
     loadServers();
     loadVersions();
     const timer = setInterval(() => { refresh(); loadServers(); }, 3000);
-    const e4Timer = setInterval(() => { if (activeTab === 'overview') loadE4allLink(); }, 10000);
-    return ()=>{ clearInterval(timer); clearInterval(e4Timer); catalogObserver?.disconnect(); };
+    const e4Timer = setInterval(() => { if (activeTab === 'overview' || (activeTab === 'config' && configSection === 'e4all')) loadE4allLink(); }, 10000);
+    const updateTimer = setTimeout(async () => {
+      if (updateInfo || !navigator.onLine) return;
+      const lastCheck = Number(localStorage.getItem('shadowpainel-update-check') || 0);
+      if (Date.now() - lastCheck < 6 * 60 * 60 * 1000) return;
+      const info = await checkUpdates();
+      if (info) localStorage.setItem('shadowpainel-update-check', String(Date.now()));
+      if (info?.available) {
+        setNotice(`Atualização ${info.latest_version} disponível.`, [
+          { label:'Ver atualização', run:()=>{ activeTab='config'; configSection='updates'; } },
+        ]);
+      }
+    }, 3500);
+    return ()=>{ clearInterval(timer); clearInterval(e4Timer); clearTimeout(updateTimer); catalogObserver?.disconnect(); };
   });
 </script>
 
@@ -1028,7 +1413,21 @@
     {#if notice}
       <div class="notice">
         <span>{notice}</span>
-        <button class="notice-close" title="Dispensar" on:click={()=>notice=''}>✕</button>
+        {#if noticeActions.length > 0}
+          <div class="notice-actions">
+            {#each noticeActions as action}
+              <button on:click={action.run}>{action.label}</button>
+            {/each}
+          </div>
+        {/if}
+        <button class="notice-close" title="Dispensar" on:click={dismissNotice}>✕</button>
+      </div>
+    {/if}
+    {#if undoToken}
+      <div class="undo-bar">
+        <span>{undoLabel} pode ser desfeita.</span>
+        <button on:click={undoLast}>DESFAZER</button>
+        <button class="undo-close" title="Ignorar" on:click={()=>{undoToken='';undoLabel='';}}>✕</button>
       </div>
     {/if}
     {#if saved}<div class="notice success-notice">Configuração salva.</div>{/if}
@@ -1086,11 +1485,15 @@
         {#if resolvedE4allLink}
           <section class="e4all-overview">
             <div class="e4all-overview-copy">
-              <span>LINK PÚBLICO DO E4ALL</span>
+              <span>LINK PÚBLICO DO E4ALL <em class:active={e4allActive}>{e4allStatusLabel}</em></span>
               <b>{resolvedE4allLink}</b>
               <small>Envie este endereço para os jogadores. Quem entra não precisa instalar o mod.</small>
             </div>
-            <button class="primary" on:click={copyE4allLink}>COPIAR LINK <span>⧉</span></button>
+            <div class="e4all-overview-actions">
+              <button class="primary" on:click={copyE4allLink}>COPIAR LINK <span>⧉</span></button>
+              <button class="secondary" on:click={shareWhatsApp}>WHATSAPP</button>
+              <button class="secondary" on:click={shareE4all}>COMPARTILHAR</button>
+            </div>
           </section>
         {/if}
 
@@ -1111,12 +1514,47 @@
           </div>
         </section>
 
+        {#if server.health?.items?.length}
+          <section class="health-card level-{server.health.level}">
+            <div class="health-head">
+              <div>
+                <span class="health-eyebrow">SAÚDE DO SERVIDOR</span>
+                <h3><span class="health-dot level-{server.health.level}"></span>{healthText(server.health.level)}</h3>
+              </div>
+              <div class="health-actions">
+                <button class="secondary" on:click={()=>ensureJava(server.version)} disabled={javaPreparing}>
+                  {javaPreparing ? 'PREPARANDO JAVA...' : 'PREPARAR JAVA'}
+                </button>
+                <button class="secondary" on:click={openServerFolder}>ABRIR PASTA</button>
+                <button class="secondary" on:click={()=>{configSection='backups';activeTab='config';}}>BACKUPS</button>
+              </div>
+            </div>
+            <div class="health-grid">
+              {#each server.health.items as item (item.id)}
+                <div class="health-item level-{item.level}">
+                  <span class="health-dot level-{item.level}"></span>
+                  <div><b>{item.label}</b><small>{item.detail}</small></div>
+                </div>
+              {/each}
+            </div>
+            {#if server.health.advice.length > 0}
+              <div class="health-advice">
+                <b>Próximo passo</b>
+                <span>{server.health.advice[0]}</span>
+              </div>
+            {/if}
+          </section>
+        {/if}
+
         <div class="content-grid">
           <section class="console-card">
             <div class="card-head">
               <div><h3>Console do servidor</h3><p>Logs em tempo real</p></div>
               <div class="live"><span></span> AO VIVO</div>
             </div>
+            {#if lastFriendlyLog}
+              <div class="friendly-log"><span>✦</span><b>{lastFriendlyLog}</b></div>
+            {/if}
             <div class="console" bind:this={consoleEl} on:scroll={handleConsoleScroll}>
               {#each server.logs as log}
                 <div class="log">
@@ -1437,6 +1875,9 @@
         <button class:active={configSection==='backups'} on:click={()=>configSection='backups'}>
           <b>Backups</b><small>Cópias do servidor</small>
         </button>
+        <button class:active={configSection==='updates'} on:click={()=>configSection='updates'}>
+          <b>Atualizações</b><small>Versão e rollback</small>
+        </button>
       </div>
 
       {#if configSection==='server'}
@@ -1464,16 +1905,23 @@
           </label>
           <label>Pasta do servidor<input bind:value={server.server_dir}/></label>
           <label>Memória (GB)<input type="number" min="1" max="64" bind:value={server.memory_limit_gb}/></label>
-          <label>Executável do Java<input bind:value={server.java_path} placeholder="java"/></label>
+          <label>Executável do Java (avançado)<input bind:value={server.java_path} placeholder="java"/></label>
         </div>
         <div class="java-check">
           <span class:ok={server.java_detected}>●</span>
           <div>
-            <b>{server.java_detected?'Java detectado':'Java não detectado'}</b>
-            <small>{server.java_path} · necessário para iniciar</small>
+            <b>{server.java_detected ? `Java ${server.java_major ?? '?'} detectado` : 'Java não detectado'}</b>
+            <small>{server.java_managed ? 'Runtime gerenciado pelo ShadowPainel' : server.java_path} · necessário: Java {server.required_java_major}</small>
           </div>
+          <button class="secondary" on:click={()=>ensureJava(server.version)} disabled={javaPreparing}>
+            {javaPreparing ? 'PREPARANDO...' : 'PREPARAR JAVA AUTOMATICAMENTE'}
+          </button>
         </div>
-        <button class="primary" on:click={saveConfig}>SALVAR CONFIGURAÇÃO <span>→</span></button>
+        <p class="field-hint">O painel baixa o Java correto do Adoptium quando necessário. Você não precisa instalar Java manualmente.</p>
+        <div class="button-row">
+          <button class="primary" on:click={saveConfig}>SALVAR CONFIGURAÇÃO <span>→</span></button>
+          <button class="secondary" on:click={openServerFolder}>ABRIR PASTA DO SERVIDOR</button>
+        </div>
       </section>
       {/if}
 
@@ -1519,6 +1967,15 @@
             {backupsLoading ? 'Carregando...' : 'Atualizar'}
           </button>
         </div>
+        <div class="auto-backup-row">
+          <div>
+            <b>Backup automático antes de instalar</b>
+            <small>Protege o mundo e as configurações antes de adicionar mods, plugins ou datapacks.</small>
+          </div>
+          <button class="toggle-btn" class:active={server.auto_backup} on:click={toggleAutoBackup} disabled={autoBackupSaving}>
+            {server.auto_backup ? '✓' : '✕'}
+          </button>
+        </div>
         <div class="backup-create">
           <input bind:value={backupName} placeholder="Nome opcional (padrão: data e hora)"/>
           <button class="primary" on:click={createBackup}
@@ -1542,10 +1999,14 @@
                   <small>{backup.created} · {formatBytes(backup.size)}</small>
                 </div>
                 <div class="backup-actions">
-                  {#if backupPendingDelete === backup.name}
+                  {#if backupPendingRestore === backup.name}
+                    <button class="primary" on:click={()=>restoreBackup(backup.name)}>CONFIRMAR RESTAURAÇÃO</button>
+                    <button class="secondary" on:click={()=>backupPendingRestore=''}>CANCELAR</button>
+                  {:else if backupPendingDelete === backup.name}
                     <button class="danger" on:click={()=>confirmDeleteBackup(backup.name)}>CONFIRMAR</button>
                     <button class="secondary" on:click={()=>backupPendingDelete=''}>CANCELAR</button>
                   {:else}
+                    <button class="secondary" on:click={()=>backupPendingRestore=backup.name}>RESTAURAR</button>
                     <button class="secondary" on:click={()=>downloadBackup(backup.name)}>BAIXAR</button>
                     <button class="secondary danger-outline" on:click={()=>backupPendingDelete=backup.name}>EXCLUIR</button>
                   {/if}
@@ -1554,6 +2015,50 @@
             {/each}
           </div>
         {/if}
+      </section>
+      {/if}
+
+      {#if configSection==='updates'}
+      <section class="settings-card">
+        <div class="card-head">
+          <div><h3>Atualizações</h3><p>Baixe e abra o instalador oficial. Feche o ShadowPainel para concluir.</p></div>
+          <button class="secondary" on:click={checkUpdates} disabled={updateChecking}>
+            {updateChecking ? 'VERIFICANDO...' : 'VERIFICAR AGORA'}
+          </button>
+        </div>
+        {#if updateError}<div class="inline-warning">{updateError}</div>{/if}
+        {#if updateInfo}
+          <div class="update-grid">
+            <div><span>VERSÃO ATUAL</span><b>{updateInfo.current_version}</b></div>
+            <div><span>ÚLTIMA VERSÃO</span><b>{updateInfo.latest_version}</b></div>
+            <div><span>INSTALADOR</span><b>{updateInfo.asset_name || 'indisponível'}</b><small>{updateInfo.asset_size ? formatBytes(updateInfo.asset_size) : ''}</small></div>
+          </div>
+          {#if updateInfo.available}
+            <div class="update-available">
+              <div><b>Atualização disponível</b><small>O download é verificado por SHA-256 antes de abrir. Seu mundo e configurações são preservados; um backup do config é salvo antes.</small></div>
+              <button class="primary" on:click={installUpdate} disabled={updateApplying || !updateInfo.asset_name}>
+                {updateApplying ? 'PREPARANDO...' : 'BAIXAR E ABRIR INSTALADOR'}
+              </button>
+            </div>
+          {:else}
+            <div class="empty">Você já está na versão mais recente.</div>
+          {/if}
+          {#if updateInfo.notes}
+            <details class="release-notes">
+              <summary>Novidades desta versão</summary>
+              <pre>{updateInfo.notes}</pre>
+            </details>
+          {/if}
+          <div class="button-row">
+            <a class="secondary link-button" href={updateInfo.release_url} target="_blank" rel="noreferrer">ABRIR NO GITHUB</a>
+            {#if updateInfo.can_rollback}
+              <button class="secondary" on:click={rollbackUpdate} disabled={updateApplying}>VOLTAR À VERSÃO ANTERIOR</button>
+            {/if}
+          </div>
+        {:else if !updateChecking}
+          <div class="empty">Não foi possível carregar as atualizações.</div>
+        {/if}
+        <p class="field-hint">O botão “Voltar” baixa o instalador da versão anterior registrada e abre para você. Não substitui arquivos silenciosamente.</p>
       </section>
       {/if}
 
@@ -1719,6 +2224,60 @@
             </div>
           </div>
         </div>
+
+        <div class="settings-subhead"><h4>Meus amigos conseguem entrar?</h4><p>Teste local da porta, firewall, internet e roteador. Nenhum teste consegue garantir acesso externo sozinho.</p></div>
+        <div class="network-actions">
+          <button class="primary" on:click={checkNetwork} disabled={networkChecking}>
+            {networkChecking ? 'TESTANDO...' : 'TESTAR CONEXÃO'}
+          </button>
+          <button class="secondary" on:click={useNextPort}>USAR PRÓXIMA PORTA LIVRE</button>
+          <button class="secondary" on:click={openServerFolder}>ABRIR PASTA</button>
+          <button class="secondary" on:click={()=>{configSection='e4all';}}>VER LINK E4ALL</button>
+        </div>
+        {#if networkResult}
+          <div class="network-summary">
+            <b>{networkResult.summary}</b>
+            <small>Porta {networkResult.port}{#if networkResult.local_ip} · IP local {networkResult.local_ip}{/if}{#if networkResult.public_ip} · IP público {networkResult.public_ip}{/if}</small>
+          </div>
+          <div class="network-checks">
+            {#each networkResult.checks as check (check.id)}
+              <div class="network-check level-{check.level}">
+                <span class="health-dot level-{check.level}"></span>
+                <div><b>{check.label}</b><small>{check.detail}</small></div>
+              </div>
+            {/each}
+          </div>
+          <div class="network-tip">{networkResult.recommendation}</div>
+        {/if}
+
+        <div class="settings-subhead"><h4>Convites e whitelist</h4><p>Só quem estiver na lista entra quando a whitelist está ativa. Use o nome exato do jogador.</p></div>
+        <div class="whitelist-head">
+          <div>
+            <b>{whitelist.enabled ? 'Whitelist ativa' : 'Whitelist desativada'}</b>
+            <small>{whitelist.online_mode ? 'Contas originais: o UUID é consultado na Mojang.' : 'Contas offline: o UUID é calculado pelo nome.'}</small>
+          </div>
+          <button class:active={whitelist.enabled} class="toggle-btn" on:click={toggleWhitelist}>{whitelist.enabled ? '✓' : '✕'}</button>
+        </div>
+        <div class="whitelist-add">
+          <input bind:value={whitelistName} placeholder="Nome do jogador" on:keydown={(e)=>e.key==='Enter'&&addWhitelist()}/>
+          <button class="primary" on:click={()=>addWhitelist()} disabled={whitelistSaving || !whitelistName.trim()}>
+            {whitelistSaving ? 'CONVIDANDO...' : 'CONVIDAR'}
+          </button>
+        </div>
+        {#if whitelistLoading}
+          <div class="catalog-loading"><div class="spinner"></div> Lendo whitelist…</div>
+        {:else if whitelist.entries.length === 0}
+          <div class="empty">Nenhum jogador convidado ainda.</div>
+        {:else}
+          <div class="whitelist-list">
+            {#each whitelist.entries as entry (entry.uuid)}
+              <div class="whitelist-row">
+                <div><b>{entry.name}</b><small class="mono">{entry.uuid}</small></div>
+                <button class="secondary danger-outline" on:click={()=>removeWhitelist(entry.name)}>REMOVER</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </section>
       {/if}
 
@@ -1731,22 +2290,33 @@
 
         <div class="e4all-link-box">
           <div>
-            <span>LINK PÚBLICO ATUAL</span>
+            <span>LINK PÚBLICO ATUAL <em class:active={e4allActive}>{e4allStatusLabel}</em></span>
             {#if resolvedE4allLink}
               <b class="mono">{resolvedE4allLink}</b>
-              <small>Fonte: {resolvedE4allSource || 'e4all'}. Compartilhe este endereço com os jogadores.</small>
+              <small>Fonte: {resolvedE4allSource || 'e4all'}{#if e4allCheckedAt} · verificado {new Date(e4allCheckedAt).toLocaleTimeString('pt-BR')}{/if}. Compartilhe este endereço com os jogadores.</small>
             {:else}
               <b class="mono muted">Aguardando o e4all gerar o domínio…</b>
               <small>Abra o mundo no Minecraft com o e4all e use “Abrir para LAN”. O link aparecerá aqui automaticamente.</small>
             {/if}
           </div>
           <div class="e4all-link-actions">
-            {#if resolvedE4allLink}<button class="primary" on:click={copyE4allLink}>COPIAR LINK</button>{/if}
+            {#if resolvedE4allLink}
+              <button class="primary" on:click={copyE4allLink}>COPIAR LINK</button>
+              <button class="secondary" on:click={shareWhatsApp}>WHATSAPP</button>
+              <button class="secondary" on:click={shareDiscord}>DISCORD</button>
+              <button class="secondary" on:click={shareE4all}>COMPARTILHAR</button>
+            {/if}
             <button class="secondary" on:click={loadE4allLink} disabled={e4allLinkLoading}>
               {e4allLinkLoading ? 'PROCURANDO...' : 'ATUALIZAR LINK'}
             </button>
           </div>
         </div>
+        {#if resolvedE4allLink && e4allQrSvg}
+          <div class="qr-share">
+            <div class="qr-box">{@html e4allQrSvg}</div>
+            <div><b>QR Code do convite</b><small>Aponte a câmera do celular para entrar. O domínio pode expirar quando o mundo for fechado.</small></div>
+          </div>
+        {/if}
 
         <div class="e4-folder" style="display:grid;grid-template-columns:1fr auto auto;gap:10px;margin-bottom:16px;">
           <label style="display:flex;flex-direction:column;gap:8px;color:var(--muted);font:500 10px 'DM Mono';letter-spacing:.7px;">
@@ -1797,31 +2367,31 @@
           <div class="notice" style="margin:0 0 16px;">{e4status.message}</div>
         {/if}
 
-        <div class="settings-subhead"><h4>Hospedagem</h4></div>
+        <div class="settings-subhead"><h4>Hospedagem</h4><p>Controla como o mod compartilha o mundo com os amigos.</p></div>
         <div class="e4all-options">
-          <div class="prop-group"><span class="prop-label">Compartilhar mundos LAN</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.host_enabled} on:click={() => server.e4all.host_enabled = !server.e4all.host_enabled}>{#if server.e4all.host_enabled}✓{:else}✕{/if}</button></div><small>hostEnabled</small></div>
-          <div class="prop-group"><span class="prop-label">Não pausar enquanto hospeda</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.prevent_pause_while_hosting} on:click={() => server.e4all.prevent_pause_while_hosting = !server.e4all.prevent_pause_while_hosting}>{#if server.e4all.prevent_pause_while_hosting}✓{:else}✕{/if}</button></div><small>preventPauseWhileHosting</small></div>
-          <div class="prop-group"><span class="prop-label">Esconder domínio no chat</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.hide_domain_in_chat} on:click={() => server.e4all.hide_domain_in_chat = !server.e4all.hide_domain_in_chat}>{#if server.e4all.hide_domain_in_chat}✓{:else}✕{/if}</button></div><small>hideDomainInChat</small></div>
+          <div class="prop-group" title="Liga o compartilhamento LAN do e4all para amigos entrarem pelo domínio."><span class="prop-label">Compartilhar mundos LAN</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.host_enabled} on:click={() => server.e4all.host_enabled = !server.e4all.host_enabled}>{#if server.e4all.host_enabled}✓{:else}✕{/if}</button></div><small>hostEnabled</small></div>
+          <div class="prop-group" title="Mantém o mundo rodando mesmo quando você abre o menu do jogo."><span class="prop-label">Não pausar enquanto hospeda</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.prevent_pause_while_hosting} on:click={() => server.e4all.prevent_pause_while_hosting = !server.e4all.prevent_pause_while_hosting}>{#if server.e4all.prevent_pause_while_hosting}✓{:else}✕{/if}</button></div><small>preventPauseWhileHosting</small></div>
+          <div class="prop-group" title="Não mostra o endereço público no chat do Minecraft."><span class="prop-label">Esconder domínio no chat</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.hide_domain_in_chat} on:click={() => server.e4all.hide_domain_in_chat = !server.e4all.hide_domain_in_chat}>{#if server.e4all.hide_domain_in_chat}✓{:else}✕{/if}</button></div><small>hideDomainInChat</small></div>
         </div>
 
-        <div class="settings-subhead"><h4>Acesso</h4></div>
+        <div class="settings-subhead"><h4>Acesso</h4><p>Define quem pode entrar e como as contas são reconhecidas.</p></div>
         <div class="e4all-options">
-          <div class="prop-group"><span class="prop-label">Contas offline</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.offline_mode} on:click={() => server.e4all.offline_mode = !server.e4all.offline_mode}>{#if server.e4all.offline_mode}✓{:else}✕{/if}</button></div><small>offlineMode</small></div>
-          <div class="prop-group"><span class="prop-label">Usar whitelist</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.use_whitelist} on:click={() => server.e4all.use_whitelist = !server.e4all.use_whitelist}>{#if server.e4all.use_whitelist}✓{:else}✕{/if}</button></div><small>useWhiteList</small></div>
-          <div class="prop-group"><span class="prop-label">Comandos de servidor dedicado</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.restore_dedicated_commands} on:click={() => server.e4all.restore_dedicated_commands = !server.e4all.restore_dedicated_commands}>{#if server.e4all.restore_dedicated_commands}✓{:else}✕{/if}</button></div><small>restoreDedicatedCommands</small></div>
+          <div class="prop-group" title="Permite entrar sem conta original. Combine com a whitelist para controlar quem entra."><span class="prop-label">Contas offline</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.offline_mode} on:click={() => server.e4all.offline_mode = !server.e4all.offline_mode}>{#if server.e4all.offline_mode}✓{:else}✕{/if}</button></div><small>offlineMode</small></div>
+          <div class="prop-group" title="Só permite jogadores aprovados na lista de convidados do e4all."><span class="prop-label">Usar whitelist</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.use_whitelist} on:click={() => server.e4all.use_whitelist = !server.e4all.use_whitelist}>{#if server.e4all.use_whitelist}✓{:else}✕{/if}</button></div><small>useWhiteList</small></div>
+          <div class="prop-group" title="Restaura os comandos de servidor dedicado no mundo LAN."><span class="prop-label">Comandos de servidor dedicado</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.restore_dedicated_commands} on:click={() => server.e4all.restore_dedicated_commands = !server.e4all.restore_dedicated_commands}>{#if server.e4all.restore_dedicated_commands}✓{:else}✕{/if}</button></div><small>restoreDedicatedCommands</small></div>
         </div>
 
-        <div class="settings-subhead"><h4>Voz e P2P</h4></div>
+        <div class="settings-subhead"><h4>Voz e P2P</h4><p>Melhora a voz e tenta conexões diretas quando possível.</p></div>
         <div class="e4all-options">
-          <div class="prop-group"><span class="prop-label">Simple Voice Chat P2P</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.voice_p2p_enabled} on:click={() => server.e4all.voice_p2p_enabled = !server.e4all.voice_p2p_enabled}>{#if server.e4all.voice_p2p_enabled}✓{:else}✕{/if}</button></div><small>voiceP2PEnabled</small></div>
-          <div class="prop-group"><span class="prop-label">P2P como host</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.dialtone_host_enabled} on:click={() => server.e4all.dialtone_host_enabled = !server.e4all.dialtone_host_enabled}>{#if server.e4all.dialtone_host_enabled}✓{:else}✕{/if}</button></div><small>dialtoneHostEnabled</small></div>
-          <div class="prop-group"><span class="prop-label">P2P como jogador</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.dialtone_player_enabled} on:click={() => server.e4all.dialtone_player_enabled = !server.e4all.dialtone_player_enabled}>{#if server.e4all.dialtone_player_enabled}✓{:else}✕{/if}</button></div><small>dialtonePlayerEnabled</small></div>
-          <div class="prop-group"><span class="prop-label">Ocultar IP direto do relay</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.dialtone_sanitize_ticket} on:click={() => server.e4all.dialtone_sanitize_ticket = !server.e4all.dialtone_sanitize_ticket}>{#if server.e4all.dialtone_sanitize_ticket}✓{:else}✕{/if}</button></div><small>dialtoneSanitizeTicket</small></div>
+          <div class="prop-group" title="Tenta conectar a voz do Simple Voice Chat direto entre os jogadores."><span class="prop-label">Simple Voice Chat P2P</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.voice_p2p_enabled} on:click={() => server.e4all.voice_p2p_enabled = !server.e4all.voice_p2p_enabled}>{#if server.e4all.voice_p2p_enabled}✓{:else}✕{/if}</button></div><small>voiceP2PEnabled</small></div>
+          <div class="prop-group" title="Permite hospedar voz P2P quando você abre o mundo."><span class="prop-label">P2P como host</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.dialtone_host_enabled} on:click={() => server.e4all.dialtone_host_enabled = !server.e4all.dialtone_host_enabled}>{#if server.e4all.dialtone_host_enabled}✓{:else}✕{/if}</button></div><small>dialtoneHostEnabled</small></div>
+          <div class="prop-group" title="Permite usar voz P2P quando você entra em outro mundo."><span class="prop-label">P2P como jogador</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.dialtone_player_enabled} on:click={() => server.e4all.dialtone_player_enabled = !server.e4all.dialtone_player_enabled}>{#if server.e4all.dialtone_player_enabled}✓{:else}✕{/if}</button></div><small>dialtonePlayerEnabled</small></div>
+          <div class="prop-group" title="Remove o IP direto do relay das informações de conexão."><span class="prop-label">Ocultar IP direto do relay</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.dialtone_sanitize_ticket} on:click={() => server.e4all.dialtone_sanitize_ticket = !server.e4all.dialtone_sanitize_ticket}>{#if server.e4all.dialtone_sanitize_ticket}✓{:else}✕{/if}</button></div><small>dialtoneSanitizeTicket</small></div>
         </div>
 
-        <div class="settings-subhead"><h4>Relay</h4></div>
+        <div class="settings-subhead"><h4>Relay</h4><p>O relay é a ponte que permite entrar sem abrir portas.</p></div>
         <div class="e4all-options">
-          <div class="prop-group"><span class="prop-label">Escolher melhor relay</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.use_broker} on:click={() => server.e4all.use_broker = !server.e4all.use_broker}>{#if server.e4all.use_broker}✓{:else}✕{/if}</button></div><small>useBroker</small></div>
+          <div class="prop-group" title="Escolhe automaticamente o relay com melhor conexão."><span class="prop-label">Escolher melhor relay</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.use_broker} on:click={() => server.e4all.use_broker = !server.e4all.use_broker}>{#if server.e4all.use_broker}✓{:else}✕{/if}</button></div><small>useBroker</small></div>
         </div>
         <div class="form-grid">
           <label>URL do broker<input bind:value={server.e4all.broker_url}></label>
@@ -1899,6 +2469,16 @@
             Esta pasta já pertence ao servidor ativo. Escolha outra pasta para criar uma nova instalação sem sobrescrever a atual.
           </div>
         {/if}
+
+        <div class="setup-java-note">
+          <div>
+            <b>Java {setupJavaMajor} será preparado automaticamente</b>
+            <small>Você não precisa instalar Java. O painel baixa o runtime correto do Adoptium antes de iniciar.</small>
+          </div>
+          <button class="secondary" on:click={()=>ensureJava(setupVersion)} disabled={javaPreparing}>
+            {javaPreparing ? 'PREPARANDO...' : 'PREPARAR AGORA'}
+          </button>
+        </div>
 
         {#if setupMode === 'manual'}
           <div class="form-grid">
@@ -2039,7 +2619,15 @@
         {/if}
 
         {#if setupError}
-          <div class="inline-error setup-error" role="alert">{setupError}</div>
+          <div class="inline-error setup-error" role="alert">
+            <span>{setupError}</span>
+            <div class="error-actions">
+              <button class="secondary" on:click={setupMode==='manual'?createServer:installModpack}>TENTAR NOVAMENTE</button>
+              <button class="secondary" on:click={()=>ensureJava(setupVersion)} disabled={javaPreparing}>BAIXAR JAVA</button>
+              <button class="secondary" on:click={openServerFolder}>ABRIR PASTA</button>
+              <button class="secondary" on:click={useNextPort}>USAR OUTRA PORTA</button>
+            </div>
+          </div>
         {/if}
       </section>
     {/if}
@@ -2050,7 +2638,7 @@
           <div class="modal-head">
             <div>
               <h3>Remover conteúdo</h3>
-              <p>Os arquivos selecionados serão apagados de <b>{contentKind}/</b>.</p>
+              <p>Os arquivos selecionados serão movidos de <b>{contentKind}/</b> para a lixeira.</p>
             </div>
             <button class="modal-close" on:click={()=>contentDeleteOpen=false} disabled={deletingContent}>✕</button>
           </div>
@@ -2058,11 +2646,11 @@
             <div><span>Arquivos</span><b>{selectedItems.size}</b></div>
             <div><span>Tipo</span><b>{contentKind}</b></div>
           </div>
-          <p class="danger-warning">Esta ação não pode ser desfeita.</p>
+          <p class="danger-warning">Os arquivos vão para a lixeira. Você poderá desfazer logo depois.</p>
           <div class="modal-actions">
             <button class="secondary" on:click={()=>contentDeleteOpen=false} disabled={deletingContent}>Cancelar</button>
             <button class="danger" on:click={deleteSelectedContent} disabled={deletingContent}>
-              {deletingContent ? 'REMOVENDO...' : 'REMOVER DEFINITIVAMENTE'}
+              {deletingContent ? 'REMOVENDO...' : 'MOVER PARA A LIXEIRA'}
             </button>
           </div>
         </div>
@@ -2086,6 +2674,11 @@
             <div><b>Criar servidor</b><p>Use a instalação manual ou escolha um modpack. O painel baixa arquivos, aplica overrides e configura o loader.</p></div>
             <div><b>CurseForge</b><p>Sem chave, o painel usa o proxy api.curse.tools. Uma chave oficial pode ser validada e salva nas configurações.</p></div>
             <div><b>Segurança</b><p>Exclusões de servidor, conteúdo e backups pedem confirmação. O fechamento do app solicita o desligamento do servidor.</p></div>
+            <div><b>Java automático</b><p>Se o Java estiver ausente ou na versão errada, use “Preparar Java”. O painel baixa o runtime correto do Adoptium.</p></div>
+            <div><b>Rede e amigos</b><p>“Meus amigos conseguem entrar?” testa porta, firewall, internet e UPnP. Para evitar abrir portas, use o link e4all e compartilhe o QR Code.</p></div>
+            <div><b>Whitelist</b><p>Convide pelo nome do jogador. Em servidor original, o UUID vem da Mojang; em conta offline, é calculado pelo painel.</p></div>
+            <div><b>Atualizações</b><p>O painel verifica sozinho a cada 6 horas, baixa o instalador oficial, confere SHA-256 e abre. A versão anterior pode ser baixada de novo pelo botão de rollback.</p></div>
+            <div><b>Desfazer</b><p>Conteúdo e backups removidos vão para uma lixeira temporária. Use “Desfazer” logo após a ação.</p></div>
           </div>
           <div class="modal-actions">
             <button class="primary" on:click={()=>helpOpen=false}>ENTENDI</button>

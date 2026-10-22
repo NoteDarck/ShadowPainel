@@ -9,8 +9,11 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Local, Utc};
+use md5::compute as md5_digest;
+use qrcodegen::{QrCode, QrCodeEcc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     fs,
@@ -19,11 +22,12 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Disks, Pid, ProcessesToUpdate, System};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream, UdpSocket},
     process::{Child, ChildStdin, Command},
     sync::{oneshot, Mutex, Semaphore},
     task::JoinSet,
@@ -31,7 +35,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.8.0";
+const APP_VERSION: &str = "0.8.2";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -128,8 +132,14 @@ struct Config {
     server_dir: String,
     memory_limit_gb: u64,
     java_path: String,
+    #[serde(default = "default_true")]
+    auto_backup: bool,
     curseforge_api_key: String,
     e4all: E4allConfig,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -144,6 +154,7 @@ impl Default for Config {
             server_dir: "~/Minecraft/MeuServidor".into(),
             memory_limit_gb: 4,
             java_path,
+            auto_backup: true,
             curseforge_api_key: String::new(),
             e4all: E4allConfig::default(),
         }
@@ -186,12 +197,43 @@ fn extract_e4all_link(line: &str) -> Option<String> {
     None
 }
 
-async fn latest_e4all_link(minecraft_dir: &str) -> Option<String> {
+async fn latest_e4all_link(minecraft_dir: &str) -> Option<(String, bool)> {
     let path = expand(minecraft_dir.trim()).join("logs").join("latest.log");
+    let modified = tokio::fs::metadata(&path).await.ok()?.modified().ok();
     let bytes = tokio::fs::read(path).await.ok()?;
     let start = bytes.len().saturating_sub(2 * 1024 * 1024);
     let text = String::from_utf8_lossy(&bytes[start..]);
-    text.lines().rev().find_map(extract_e4all_link)
+    let mut stopped = false;
+    for line in text.lines().rev() {
+        if line.contains("e4all: relay session stopped") {
+            stopped = true;
+            continue;
+        }
+        if let Some(link) = extract_e4all_link(line) {
+            let recent = modified
+                .and_then(|time| SystemTime::now().duration_since(time).ok())
+                .is_some_and(|age| age < Duration::from_secs(300));
+            return Some((link, !stopped && recent));
+        }
+    }
+    None
+}
+
+fn qr_svg(data: &str) -> Option<String> {
+    let qr = QrCode::encode_text(data, QrCodeEcc::Medium).ok()?;
+    let border = 4;
+    let size = qr.size() + border * 2;
+    let mut path = String::new();
+    for y in 0..qr.size() {
+        for x in 0..qr.size() {
+            if qr.get_module(x, y) {
+                path.push_str(&format!("M{},{}h1v1h-1z", x + border, y + border));
+            }
+        }
+    }
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\" shape-rendering=\"crispEdges\"><rect width=\"{size}\" height=\"{size}\" fill=\"#ffffff\"/><path d=\"{path}\" fill=\"#080a10\"/></svg>"
+    ))
 }
 
 fn default_minecraft_dir() -> String {
@@ -619,15 +661,290 @@ async fn load_profiles(cfg_path: &Path, current: &Config) -> Vec<Config> {
     }
 }
 
-async fn detect_java(path: &str) -> bool {
-    Command::new(path)
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+fn java_major_for_version(version: &str) -> u32 {
+    let parts: Vec<u32> = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .collect();
+    if parts.first() == Some(&1) {
+        let minor = parts.get(1).copied().unwrap_or(21);
+        let patch = parts.get(2).copied().unwrap_or(0);
+        if minor >= 21 || (minor == 20 && patch >= 5) {
+            21
+        } else if minor >= 17 {
+            17
+        } else {
+            8
+        }
+    } else {
+        21
+    }
+}
+
+fn java_runtimes_dir() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".shadowpainel")
+        .join("java")
+}
+
+fn find_java_binary(root: &Path) -> Option<PathBuf> {
+    let wanted = if cfg!(windows) { "java.exe" } else { "java" };
+    let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
+    while let Some((dir, depth)) = queue.pop_front() {
+        if depth > 8 || !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                queue.push_back((path, depth + 1));
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(wanted)
+                && path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    == Some("bin")
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn managed_java_path(major: u32) -> Option<PathBuf> {
+    find_java_binary(&java_runtimes_dir().join(major.to_string()))
+}
+
+fn is_managed_java(path: &str) -> bool {
+    expand(path).starts_with(java_runtimes_dir())
+}
+
+fn parse_java_major(output: &str) -> Option<u32> {
+    let version = output.split("version \"").nth(1)?.split('"').next()?;
+    let first = version.split('.').next()?.trim();
+    if first == "1" {
+        version.split('.').nth(1)?.parse().ok()
+    } else {
+        first.parse().ok()
+    }
+}
+
+async fn detect_java_major(path: &str) -> Option<u32> {
+    let mut command = Command::new(path);
+    command.arg("-version");
+    let output = tokio::time::timeout(Duration::from_secs(6), command.output())
         .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .ok()?
+        .ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    parse_java_major(&text)
+}
+
+fn adoptium_os() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "mac"
+    } else {
+        "linux"
+    }
+}
+
+fn adoptium_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "aarch64",
+        "x86" => "x86",
+        "arm" => "arm",
+        other => other,
+    }
+}
+
+async fn install_managed_java(major: u32) -> Result<PathBuf, ApiErr> {
+    if let Some(path) = managed_java_path(major) {
+        return Ok(path);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha no cliente HTTP: {e}"),
+            )
+        })?;
+    let manifest_url = format!(
+        "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={}&image_type=jre&os={}&vendor=eclipse",
+        adoptium_arch(),
+        adoptium_os()
+    );
+    let data: Value = client
+        .get(&manifest_url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Falha ao consultar o Java: {e}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Adoptium retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Resposta inválida do Adoptium: {e}"),
+            )
+        })?;
+    let package = data
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("binary"))
+        .and_then(|binary| binary.get("package"))
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("Java {major} não disponível para esta plataforma."),
+            )
+        })?;
+    let link = package
+        .get("link")
+        .and_then(Value::as_str)
+        .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Link do Java ausente."))?;
+    let name = package
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("java-runtime.zip");
+    let expected = package.get("checksum").and_then(Value::as_str);
+    let bytes = client
+        .get(link)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Falha ao baixar o Java: {e}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Download do Java rejeitado: {e}"),
+            )
+        })?
+        .bytes()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Falha ao ler o Java: {e}")))?;
+    if let Some(expected) = expected {
+        let actual = format!("{:x}", Sha256::digest(&bytes));
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(err(
+                StatusCode::BAD_GATEWAY,
+                "O arquivo do Java chegou corrompido. Tente novamente.",
+            ));
+        }
+    }
+    let root = java_runtimes_dir();
+    tokio::fs::create_dir_all(&root).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a pasta do Java: {e}"),
+        )
+    })?;
+    let archive = root.join(format!(".{major}-{name}"));
+    let target = root.join(major.to_string());
+    let _ = tokio::fs::remove_dir_all(&target).await;
+    let _ = tokio::fs::remove_file(&archive).await;
+    tokio::fs::write(&archive, &bytes).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar o Java: {e}"),
+        )
+    })?;
+    tokio::fs::create_dir_all(&target).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao criar a pasta do Java: {e}"),
+        )
+    })?;
+    let is_zip = name.ends_with(".zip");
+    if is_zip {
+        let archive_copy = archive.clone();
+        let target_copy = target.clone();
+        tokio::task::spawn_blocking(move || {
+            extract_zip_blocking(archive_copy, target_copy, Vec::new())
+        })
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao extrair o Java: {e}"),
+            )
+        })?
+        .map_err(|e| {
+            let _ = std::fs::remove_dir_all(&target);
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao extrair o Java: {e}"),
+            )
+        })?;
+    } else {
+        let status = tokio::time::timeout(
+            Duration::from_secs(180),
+            tokio::process::Command::new("tar")
+                .arg("-xzf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(&target)
+                .status(),
+        )
+        .await
+        .map_err(|_| {
+            err(
+                StatusCode::GATEWAY_TIMEOUT,
+                "A extração do Java demorou demais. Tente novamente.",
+            )
+        })?
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao extrair o Java: {e}"),
+            )
+        })?;
+        if !status.success() {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Falha ao extrair o arquivo do Java.",
+            ));
+        }
+    }
+    let _ = tokio::fs::remove_file(&archive).await;
+    find_java_binary(&target).ok_or_else(|| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "O Java foi baixado, mas o executável não foi encontrado.",
+        )
+    })
 }
 
 fn eula_accepted(dir: &Path) -> bool {
@@ -765,6 +1082,21 @@ fn safe_filename(filename: &str) -> Option<&str> {
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| *name == filename && !name.is_empty())
+}
+
+fn trash_root(base: &Path) -> PathBuf {
+    base.join(".shadowpainel").join("trash")
+}
+
+fn new_trash_token() -> String {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos().to_string())
+        .unwrap_or_else(|_| "0".into())
+}
+
+fn valid_trash_token(token: &str) -> bool {
+    !token.is_empty() && token.chars().all(|c| c.is_ascii_digit())
 }
 
 fn valid_loader(loader: &str) -> bool {
@@ -907,6 +1239,7 @@ struct Inner {
     profiles: Vec<Config>,
     cfg_path: PathBuf,
     java_detected: bool,
+    java_major: Option<u32>,
     status: Status,
     logs: VecDeque<LogLine>,
     players: u32,
@@ -920,12 +1253,19 @@ struct Inner {
 }
 
 impl Inner {
-    fn new(cfg: Config, profiles: Vec<Config>, cfg_path: PathBuf, java_detected: bool) -> Self {
+    fn new(
+        cfg: Config,
+        profiles: Vec<Config>,
+        cfg_path: PathBuf,
+        java_detected: bool,
+        java_major: Option<u32>,
+    ) -> Self {
         let mut s = Self {
             cfg,
             profiles,
             cfg_path,
             java_detected,
+            java_major,
             status: Status::Offline,
             logs: VecDeque::new(),
             players: 0,
@@ -983,6 +1323,70 @@ impl Inner {
 #[derive(Clone)]
 struct AppState(Arc<Mutex<Inner>>);
 
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+enum HealthLevel {
+    Ok,
+    Warn,
+    Danger,
+}
+
+#[derive(Serialize, Clone)]
+struct HealthItem {
+    id: String,
+    label: String,
+    level: HealthLevel,
+    detail: String,
+}
+
+#[derive(Serialize, Clone)]
+struct HealthView {
+    level: HealthLevel,
+    items: Vec<HealthItem>,
+    advice: Vec<String>,
+}
+
+async fn set_java_path(app: &AppState, path: &Path, major: u32) -> Result<(), ApiErr> {
+    let mut i = app.0.lock().await;
+    i.cfg.java_path = path.to_string_lossy().into_owned();
+    i.java_detected = true;
+    i.java_major = Some(major);
+    i.persist().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Java pronto, mas falhou ao salvar a configuração: {e}"),
+        )
+    })?;
+    i.push(
+        format!("Java {major} pronto em {}", path.display()),
+        "success",
+    );
+    Ok(())
+}
+
+async fn ensure_java_for_version(app: &AppState, version: &str) -> Result<String, ApiErr> {
+    let required = java_major_for_version(version);
+    let current = {
+        let i = app.0.lock().await;
+        i.cfg.java_path.clone()
+    };
+    if detect_java_major(&current).await == Some(required) {
+        let mut i = app.0.lock().await;
+        i.java_detected = true;
+        i.java_major = Some(required);
+        return Ok(i.cfg.java_path.clone());
+    }
+    if let Some(path) = managed_java_path(required) {
+        set_java_path(app, &path, required).await?;
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    let path = install_managed_java(required).await?;
+    let detected = detect_java_major(&path.to_string_lossy()).await;
+    let major = detected.unwrap_or(required);
+    set_java_path(app, &path, major).await?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[derive(Serialize)]
 struct View {
     status: Status,
@@ -998,13 +1402,18 @@ struct View {
     server_dir: String,
     java_path: String,
     java_detected: bool,
+    java_major: Option<u32>,
+    required_java_major: u32,
+    java_managed: bool,
     installed: bool,
     eula_accepted: bool,
     installing: bool,
+    auto_backup: bool,
     curseforge_mode: String,
     curseforge_configured: bool,
     e4all: E4allConfig,
     e4all_link: Option<String>,
+    health: HealthView,
     logs: Vec<LogLine>,
 }
 
@@ -1029,6 +1438,194 @@ fn view(i: &mut Inner) -> View {
         .map(|s| (Utc::now() - s).num_seconds().max(0) as u64)
         .unwrap_or(0);
     let address = format!("localhost:{}", server_port(&dir));
+    let required_java_major = java_major_for_version(&i.cfg.version);
+
+    let mut items = Vec::new();
+    let mut advice = Vec::new();
+
+    let java_ok = i.java_detected && i.java_major == Some(required_java_major);
+    items.push(HealthItem {
+        id: "java".into(),
+        label: "Java".into(),
+        level: if java_ok {
+            HealthLevel::Ok
+        } else {
+            HealthLevel::Danger
+        },
+        detail: if java_ok {
+            format!("Java {required_java_major} pronto.")
+        } else if i.java_detected {
+            format!(
+                "Versão incompatível: detectado Java {}, necessário Java {required_java_major}.",
+                i.java_major
+                    .map(|major| major.to_string())
+                    .unwrap_or_else(|| "desconhecido".into())
+            )
+        } else {
+            format!("Java {required_java_major} não encontrado.")
+        },
+    });
+    if !java_ok {
+        advice.push("Use “Preparar Java automaticamente” para baixar a versão correta.".into());
+    }
+
+    i.sys.refresh_memory();
+    let total_memory_mb = i.sys.total_memory() / 1024 / 1024;
+    let limit_memory_mb = i.cfg.memory_limit_gb * 1024;
+    let memory_percent = if limit_memory_mb > 0 {
+        (memory_mb as f32 / limit_memory_mb as f32 * 100.0).min(999.0)
+    } else {
+        0.0
+    };
+    let memory_too_high =
+        total_memory_mb > 0 && limit_memory_mb * 10 >= total_memory_mb.saturating_mul(8);
+    let memory_too_low = i.cfg.memory_limit_gb < 2;
+    let memory_level = if memory_percent >= 92.0 || memory_too_high {
+        HealthLevel::Danger
+    } else if memory_percent >= 78.0 || memory_too_low {
+        HealthLevel::Warn
+    } else {
+        HealthLevel::Ok
+    };
+    items.push(HealthItem {
+        id: "memory".into(),
+        label: "Memória".into(),
+        level: memory_level,
+        detail: if i.status == Status::Offline {
+            format!(
+                "Limite: {} GB{}.",
+                i.cfg.memory_limit_gb,
+                if total_memory_mb > 0 {
+                    format!(" · PC tem {:.1} GB", total_memory_mb as f64 / 1024.0)
+                } else {
+                    String::new()
+                }
+            )
+        } else {
+            format!(
+                "{} MB de {} GB em uso ({:.0}%).",
+                memory_mb, i.cfg.memory_limit_gb, memory_percent
+            )
+        },
+    });
+    if memory_too_high {
+        advice.push(
+            "O limite de RAM está alto demais para este PC. Reduza-o para não travar o sistema."
+                .into(),
+        );
+    } else if memory_too_low {
+        advice.push("Aumente a memória do servidor para pelo menos 2 GB.".into());
+    } else if memory_percent >= 78.0 {
+        advice.push(
+            "O servidor está perto do limite de RAM. Reduza mods ou aumente o limite se houver RAM sobrando."
+                .into(),
+        );
+    }
+
+    let mut disk_available = None;
+    let mut disk_total = None;
+    for disk in Disks::new_with_refreshed_list().iter() {
+        if dir.starts_with(disk.mount_point()) {
+            disk_available = Some(disk.available_space());
+            disk_total = Some(disk.total_space());
+        }
+    }
+    let (disk_level, disk_detail) = match (disk_available, disk_total) {
+        (Some(available), Some(total)) => {
+            let gb = available as f64 / 1024.0 / 1024.0 / 1024.0;
+            let level = if gb < 2.0 {
+                HealthLevel::Danger
+            } else if gb < 10.0 {
+                HealthLevel::Warn
+            } else {
+                HealthLevel::Ok
+            };
+            (
+                level,
+                format!(
+                    "{gb:.1} GB livres de {:.1} GB.",
+                    total as f64 / 1024.0 / 1024.0 / 1024.0
+                ),
+            )
+        }
+        _ => (HealthLevel::Ok, "Espaço em disco não verificado.".into()),
+    };
+    items.push(HealthItem {
+        id: "disk".into(),
+        label: "Disco".into(),
+        level: disk_level,
+        detail: disk_detail,
+    });
+    if disk_level >= HealthLevel::Warn {
+        advice.push("Libere espaço em disco antes de continuar.".into());
+    }
+
+    let max_players = std::fs::read_to_string(dir.join("server.properties"))
+        .ok()
+        .and_then(|text| property_from_text(&text, "max-players"))
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(20)
+        .max(1);
+    let players_level = if i.status == Status::Online && i.players >= max_players {
+        HealthLevel::Danger
+    } else if i.status == Status::Online && i.players * 100 >= max_players * 80 {
+        HealthLevel::Warn
+    } else {
+        HealthLevel::Ok
+    };
+    items.push(HealthItem {
+        id: "players".into(),
+        label: "Jogadores".into(),
+        level: players_level,
+        detail: if i.status == Status::Online {
+            format!("{} de {} vagas ocupadas.", i.players, max_players)
+        } else {
+            format!("Servidor desligado · {} vagas configuradas.", max_players)
+        },
+    });
+    if players_level >= HealthLevel::Warn {
+        advice.push("O servidor está quase cheio: aumente as vagas ou entre mais tarde.".into());
+    }
+
+    let newest_backup = std::fs::read_dir(backups_dir(&dir))
+        .ok()
+        .and_then(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.metadata().ok()?.modified().ok())
+                .max()
+        });
+    let backup_age_hours = newest_backup.and_then(|time| {
+        SystemTime::now()
+            .duration_since(time)
+            .ok()
+            .map(|age| age.as_secs() / 3600)
+    });
+    let backup_level = match backup_age_hours {
+        None if installed => HealthLevel::Warn,
+        Some(hours) if hours > 24 * 7 => HealthLevel::Warn,
+        _ => HealthLevel::Ok,
+    };
+    items.push(HealthItem {
+        id: "backup".into(),
+        label: "Backup".into(),
+        level: backup_level,
+        detail: match backup_age_hours {
+            Some(hours) if hours < 24 => format!("Último backup há {hours} h."),
+            Some(hours) => format!("Último backup há {} dia(s).", hours / 24),
+            None => "Nenhum backup encontrado.".into(),
+        },
+    });
+    if backup_level == HealthLevel::Warn {
+        advice.push("Crie um backup automático antes de instalar mods ou atualizar.".into());
+    }
+
+    let overall = items
+        .iter()
+        .map(|item| item.level)
+        .max()
+        .unwrap_or(HealthLevel::Ok);
+
     View {
         status: i.status,
         address,
@@ -1043,9 +1640,13 @@ fn view(i: &mut Inner) -> View {
         server_dir: i.cfg.server_dir.clone(),
         java_path: i.cfg.java_path.clone(),
         java_detected: i.java_detected,
+        java_major: i.java_major,
+        required_java_major,
+        java_managed: is_managed_java(&i.cfg.java_path),
         installed,
         eula_accepted: eula,
         installing: i.installing,
+        auto_backup: i.cfg.auto_backup,
         curseforge_mode: if i.cfg.curseforge_api_key.trim().is_empty() {
             "proxy".into()
         } else {
@@ -1054,6 +1655,11 @@ fn view(i: &mut Inner) -> View {
         curseforge_configured: !i.cfg.curseforge_api_key.trim().is_empty(),
         e4all: i.cfg.e4all.clone(),
         e4all_link: i.e4all_link.clone(),
+        health: HealthView {
+            level: overall,
+            items,
+            advice,
+        },
         logs: i.logs.iter().cloned().collect(),
     }
 }
@@ -1222,7 +1828,8 @@ async fn switch_server(
             .cloned()
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "Servidor não encontrado."))?
     };
-    let java_detected = detect_java(&selected.java_path).await;
+    let java_major = detect_java_major(&selected.java_path).await;
+    let java_detected = java_major.is_some();
     let mut i = app.0.lock().await;
     if i.status != Status::Offline || i.installing {
         return Err(err(
@@ -1232,6 +1839,7 @@ async fn switch_server(
     }
     i.cfg = selected;
     i.java_detected = java_detected;
+    i.java_major = java_major;
     i.logs.clear();
     i.players = 0;
     i.started = None;
@@ -1432,7 +2040,62 @@ async fn accept_eula(State(app): State<AppState>) -> Result<Json<Value>, ApiErr>
     Ok(Json(json!({ "ok": true, "message": "EULA aceita." })))
 }
 
+#[derive(Deserialize)]
+struct JavaEnsureRequest {
+    #[serde(default)]
+    version: Option<String>,
+}
+
+async fn java_ensure(State(app): State<AppState>, Json(req): Json<JavaEnsureRequest>) -> ApiResult {
+    let version = {
+        let i = app.0.lock().await;
+        if i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Aguarde a instalação terminar antes de preparar o Java.",
+            ));
+        }
+        req.version
+            .filter(|version| !version.trim().is_empty())
+            .unwrap_or_else(|| i.cfg.version.clone())
+    };
+    ensure_java_for_version(&app, &version).await?;
+    let mut i = app.0.lock().await;
+    Ok(Json(view(&mut i)))
+}
+
 async fn start(State(app): State<AppState>) -> ApiResult {
+    let version = {
+        let i = app.0.lock().await;
+        if i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Aguarde a instalação terminar antes de iniciar.",
+            ));
+        }
+        if i.status != Status::Offline {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "O servidor já está em execução ou parando.",
+            ));
+        }
+        let dir = expand(&i.cfg.server_dir);
+        if detect_launch(&dir).is_none() {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "Nenhum servidor instalado nesta pasta. Use o assistente de criação.",
+            ));
+        }
+        if !eula_accepted(&dir) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "Aceite a EULA antes de iniciar.",
+            ));
+        }
+        i.cfg.version.clone()
+    };
+    let java_path = ensure_java_for_version(&app, &version).await?;
+
     let mut i = app.0.lock().await;
     if i.installing {
         return Err(err(
@@ -1460,7 +2123,7 @@ async fn start(State(app): State<AppState>) -> ApiResult {
         ));
     }
 
-    let mut cmd = Command::new(&i.cfg.java_path);
+    let mut cmd = Command::new(&java_path);
     cmd.current_dir(&dir)
         .arg(format!("-Xmx{}G", i.cfg.memory_limit_gb))
         .arg("-Dfile.encoding=UTF-8");
@@ -1586,7 +2249,8 @@ async fn save_config(State(app): State<AppState>, Json(req): Json<ConfigRequest>
     i.cfg.memory_limit_gb = req.memory_limit_gb;
     if java_path != i.cfg.java_path {
         i.cfg.java_path = java_path;
-        i.java_detected = detect_java(&i.cfg.java_path).await;
+        i.java_major = detect_java_major(&i.cfg.java_path).await;
+        i.java_detected = i.java_major.is_some();
     }
     if let Some(key) = req.curseforge_api_key.as_deref() {
         let key = key.trim();
@@ -1627,20 +2291,30 @@ async fn e4all_load(Json(req): Json<DirRequest>) -> Json<E4allConfig> {
 struct E4allLinkView {
     link: Option<String>,
     source: Option<String>,
+    active: bool,
+    checked_at: String,
+    qr_svg: Option<String>,
 }
 
 async fn e4all_link(
     State(app): State<AppState>,
     Json(req): Json<DirRequest>,
 ) -> Json<E4allLinkView> {
-    let (server_link, default_dir) = {
+    let (server_link, server_online, default_dir) = {
         let i = app.0.lock().await;
-        (i.e4all_link.clone(), i.cfg.e4all.minecraft_dir.clone())
+        (
+            i.e4all_link.clone(),
+            i.status == Status::Online,
+            i.cfg.e4all.minecraft_dir.clone(),
+        )
     };
     if let Some(link) = server_link {
         return Json(E4allLinkView {
+            qr_svg: qr_svg(&link),
             link: Some(link),
             source: Some("servidor".into()),
+            active: server_online,
+            checked_at: Local::now().to_rfc3339(),
         });
     }
     let minecraft_dir = if req.minecraft_dir.trim().is_empty() {
@@ -1648,10 +2322,16 @@ async fn e4all_link(
     } else {
         req.minecraft_dir
     };
-    let link = latest_e4all_link(&minecraft_dir).await;
+    let (link, active) = match latest_e4all_link(&minecraft_dir).await {
+        Some((link, active)) => (Some(link), active),
+        None => (None, false),
+    };
     Json(E4allLinkView {
+        qr_svg: link.as_deref().and_then(qr_svg),
         source: link.as_ref().map(|_| "Minecraft".into()),
         link,
+        active,
+        checked_at: Local::now().to_rfc3339(),
     })
 }
 
@@ -1683,6 +2363,1082 @@ async fn save_e4all(State(app): State<AppState>, Json(mut cfg): Json<E4allConfig
         "success",
     );
     Ok(Json(view(&mut i)))
+}
+
+// ───────────────────────── Rede / pastas ─────────────────────────
+
+#[derive(Serialize)]
+struct NetworkCheck {
+    id: String,
+    label: String,
+    level: HealthLevel,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct NetworkDiagnostic {
+    port: u16,
+    local_ip: Option<String>,
+    public_ip: Option<String>,
+    checks: Vec<NetworkCheck>,
+    summary: String,
+    recommendation: String,
+}
+
+async fn command_text(program: &str, args: &[&str]) -> Option<String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(4),
+        Command::new(program).args(args).output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let mut text = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    text.push_str(&String::from_utf8_lossy(&output.stderr).to_lowercase());
+    Some(text)
+}
+
+async fn local_ipv4() -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    socket.connect("8.8.8.8:80").await.ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
+}
+
+async fn public_ipv4() -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()
+        .ok()?;
+    let text = client
+        .get("https://api.ipify.org")
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    text.trim()
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
+}
+
+async fn firewall_check(port: u16) -> (HealthLevel, String) {
+    if cfg!(windows) {
+        let Some(text) = command_text("netsh", &["advfirewall", "show", "allprofiles"]).await
+        else {
+            return (
+                HealthLevel::Warn,
+                "Não foi possível consultar o Firewall do Windows.".into(),
+            );
+        };
+        if text.contains("state") && text.contains("off") && !text.contains("on") {
+            return (HealthLevel::Ok, "Firewall do Windows desativado.".into());
+        }
+        return (
+            HealthLevel::Warn,
+            format!("Firewall do Windows ativo: confirme a regra de entrada para a porta {port}."),
+        );
+    }
+    if cfg!(target_os = "macos") {
+        let Some(text) = command_text(
+            "/usr/libexec/ApplicationFirewall/socketfilterfw",
+            &["--getglobalstate"],
+        )
+        .await
+        else {
+            return (
+                HealthLevel::Warn,
+                "Não foi possível consultar o firewall do macOS.".into(),
+            );
+        };
+        if text.contains("disabled") {
+            return (HealthLevel::Ok, "Firewall do macOS desativado.".into());
+        }
+        return (
+            HealthLevel::Warn,
+            format!("Firewall do macOS ativo: permita o Java na porta {port} se necessário."),
+        );
+    }
+    if let Some(text) = command_text("ufw", &["status"]).await {
+        if text.contains("status: inactive") {
+            return (HealthLevel::Ok, "UFW desativado.".into());
+        }
+        if text.contains("status: active") {
+            let port_text = port.to_string();
+            let allowed = text
+                .lines()
+                .any(|line| line.contains(&port_text) && line.contains("allow"));
+            return if allowed {
+                (
+                    HealthLevel::Ok,
+                    format!("UFW ativo com regra para a porta {port}."),
+                )
+            } else {
+                (
+                    HealthLevel::Warn,
+                    format!("UFW ativo: libere a porta {port}/tcp para receber amigos."),
+                )
+            };
+        }
+    }
+    if let Some(text) = command_text("firewall-cmd", &["--state"]).await {
+        return if text.contains("running") {
+            (
+                HealthLevel::Warn,
+                format!("firewalld ativo: confirme a porta {port}/tcp."),
+            )
+        } else {
+            (HealthLevel::Ok, "firewalld desativado.".into())
+        };
+    }
+    (
+        HealthLevel::Ok,
+        "Nenhum firewall conhecido detectado.".into(),
+    )
+}
+
+async fn upnp_available() -> bool {
+    let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
+        return false;
+    };
+    let message = concat!(
+        "M-SEARCH * HTTP/1.1\r\n",
+        "HOST: 239.255.255.250:1900\r\n",
+        "MAN: \"ssdp:discover\"\r\n",
+        "MX: 2\r\n",
+        "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n",
+        "\r\n"
+    );
+    if socket
+        .send_to(message.as_bytes(), "239.255.255.250:1900")
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let mut buffer = [0u8; 4096];
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match socket.recv_from(&mut buffer).await {
+                Ok((size, _)) => {
+                    let text = String::from_utf8_lossy(&buffer[..size]).to_lowercase();
+                    if text.contains("internetgatewaydevice") || text.contains("upnp") {
+                        return true;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+async fn network_diagnose(State(app): State<AppState>) -> Json<NetworkDiagnostic> {
+    let (dir, minecraft_dir, online) = {
+        let i = app.0.lock().await;
+        (
+            expand(&i.cfg.server_dir),
+            i.cfg.e4all.minecraft_dir.clone(),
+            i.status == Status::Online,
+        )
+    };
+    let port = server_port(&dir);
+    let (local_ip, public_ip, (firewall_level, firewall_detail), upnp) = tokio::join!(
+        local_ipv4(),
+        public_ipv4(),
+        firewall_check(port),
+        upnp_available()
+    );
+
+    let (port_level, port_detail) = if online {
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        {
+            Ok(Ok(_)) => (
+                HealthLevel::Ok,
+                format!("O servidor está respondendo na porta {port}."),
+            ),
+            _ => (
+                HealthLevel::Danger,
+                format!("O servidor está ligado, mas não responde na porta {port}."),
+            ),
+        }
+    } else {
+        match TcpListener::bind(("0.0.0.0", port)).await {
+            Ok(_) => (
+                HealthLevel::Warn,
+                format!("A porta {port} está livre, mas o servidor está desligado."),
+            ),
+            Err(_) => (
+                HealthLevel::Danger,
+                format!("A porta {port} já está ocupada por outro programa."),
+            ),
+        }
+    };
+
+    let internet_level = if public_ip.is_some() {
+        HealthLevel::Ok
+    } else {
+        HealthLevel::Danger
+    };
+    let internet_detail = public_ip
+        .as_ref()
+        .map(|ip| format!("Seu IP público é {ip}."))
+        .unwrap_or_else(|| "Não foi possível consultar seu IP público.".into());
+    let upnp_level = if upnp {
+        HealthLevel::Ok
+    } else {
+        HealthLevel::Warn
+    };
+    let upnp_detail = if upnp {
+        "Roteador compatível com UPnP encontrado.".to_string()
+    } else {
+        "UPnP não encontrado. O e4all evita abrir portas no roteador.".to_string()
+    };
+    let (e4all_level, e4all_detail) = match latest_e4all_link(&minecraft_dir).await {
+        Some((link, true)) if online => {
+            (HealthLevel::Ok, format!("Link e4all ativo agora: {link}."))
+        }
+        Some((link, true)) => (
+            HealthLevel::Warn,
+            format!("O último link e4all foi {link}, mas o servidor está desligado."),
+        ),
+        Some((link, false)) => (
+            HealthLevel::Warn,
+            format!("O último link e4all ({link}) expirou. Inicie o servidor para gerar outro."),
+        ),
+        None => (
+            HealthLevel::Warn,
+            "Nenhum link e4all encontrado ainda. Ele aparece quando o servidor abre o mod."
+                .to_string(),
+        ),
+    };
+    let recommendation = if e4all_level == HealthLevel::Ok {
+        "Compartilhe o link e4all ativo: ele funciona sem abrir portas no roteador."
+    } else {
+        "Inicie o servidor e compartilhe o link e4all para jogar sem abrir portas."
+    };
+
+    let summary = if !online {
+        "O servidor está desligado. Ligue-o antes de testar com amigos.".to_string()
+    } else if port_level == HealthLevel::Ok {
+        "O servidor está escutando. O próximo passo é testar de outra rede.".to_string()
+    } else {
+        "O servidor está ligado, mas a porta não respondeu. Veja as dicas abaixo.".to_string()
+    };
+
+    Json(NetworkDiagnostic {
+        port,
+        local_ip,
+        public_ip,
+        checks: vec![
+            NetworkCheck {
+                id: "port".into(),
+                label: "Porta do servidor".into(),
+                level: port_level,
+                detail: port_detail,
+            },
+            NetworkCheck {
+                id: "firewall".into(),
+                label: "Firewall".into(),
+                level: firewall_level,
+                detail: firewall_detail,
+            },
+            NetworkCheck {
+                id: "upnp".into(),
+                label: "Roteador / UPnP".into(),
+                level: upnp_level,
+                detail: upnp_detail,
+            },
+            NetworkCheck {
+                id: "internet".into(),
+                label: "Internet".into(),
+                level: internet_level,
+                detail: internet_detail,
+            },
+            NetworkCheck {
+                id: "e4all".into(),
+                label: "Alternativa e4all".into(),
+                level: e4all_level,
+                detail: e4all_detail,
+            },
+        ],
+        summary,
+        recommendation: recommendation.into(),
+    })
+}
+
+async fn open_server_folder(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    let dir = expand(&app.0.lock().await.cfg.server_dir);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao criar a pasta do servidor: {e}"),
+        )
+    })?;
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("explorer");
+        command.arg(&dir);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(&dir);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(&dir);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Não foi possível abrir a pasta: {e}"),
+            )
+        })?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct NextPortRequest {
+    #[serde(default)]
+    current: Option<u16>,
+}
+
+async fn next_port(Json(req): Json<NextPortRequest>) -> Json<Value> {
+    let start = req.current.unwrap_or(25565).clamp(1024, 65000);
+    for port in (start + 1)..=(start + 40) {
+        if let Ok(listener) = TcpListener::bind(("0.0.0.0", port)).await {
+            drop(listener);
+            return Json(json!({ "port": port }));
+        }
+    }
+    Json(json!({ "port": null }))
+}
+
+// ───────────────────────── Whitelist ─────────────────────────
+
+#[derive(Serialize, Deserialize, Clone)]
+struct WhitelistEntry {
+    uuid: String,
+    name: String,
+}
+
+fn whitelist_path(base: &Path) -> PathBuf {
+    base.join("whitelist.json")
+}
+
+async fn read_whitelist(base: &Path) -> Vec<WhitelistEntry> {
+    tokio::fs::read(whitelist_path(base))
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+async fn write_whitelist(base: &Path, entries: &[WhitelistEntry]) -> Result<(), ApiErr> {
+    let bytes = serde_json::to_vec_pretty(entries).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar whitelist: {e}"),
+        )
+    })?;
+    tokio::fs::write(whitelist_path(base), bytes)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao salvar whitelist: {e}"),
+            )
+        })
+}
+
+fn property_from_text(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (line_key, value) = line.split_once('=')?;
+        (line_key.trim() == key).then(|| value.trim().to_string())
+    })
+}
+
+async fn set_server_property(base: &Path, key: &str, value: &str) -> Result<(), ApiErr> {
+    let path = base.join("server.properties");
+    let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    let mut found = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        if let Some((line_key, _)) = line.split_once('=') {
+            if line_key.trim() == key {
+                lines.push(format!("{key}={value}"));
+                found = true;
+                continue;
+            }
+        }
+        lines.push(line.to_string());
+    }
+    if !found {
+        lines.push(format!("{key}={value}"));
+    }
+    let mut output = lines.join("\n");
+    output.push('\n');
+    tokio::fs::write(path, output).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar server.properties: {e}"),
+        )
+    })
+}
+
+fn offline_uuid(name: &str) -> String {
+    let digest = md5_digest(format!("OfflinePlayer:{name}").as_bytes());
+    let mut bytes = digest.0;
+    bytes[6] = (bytes[6] & 0x0f) | 0x30;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn valid_player_name(name: &str) -> bool {
+    (3..=16).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+async fn whitelist_view(base: &Path) -> Result<Value, ApiErr> {
+    let entries = read_whitelist(base).await;
+    let props = tokio::fs::read_to_string(base.join("server.properties"))
+        .await
+        .unwrap_or_default();
+    let enabled = property_from_text(&props, "white-list")
+        .map(|value| value == "true")
+        .unwrap_or(false);
+    let online_mode = property_from_text(&props, "online-mode")
+        .map(|value| value == "true")
+        .unwrap_or(true);
+    Ok(json!({
+        "entries": entries,
+        "enabled": enabled,
+        "online_mode": online_mode,
+    }))
+}
+
+async fn get_whitelist(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    let base = {
+        let i = app.0.lock().await;
+        expand(&i.cfg.server_dir)
+    };
+    Ok(Json(whitelist_view(&base).await?))
+}
+
+#[derive(Deserialize)]
+struct WhitelistAddRequest {
+    name: String,
+    #[serde(default)]
+    online_mode: Option<bool>,
+}
+
+async fn add_whitelist(
+    State(app): State<AppState>,
+    Json(req): Json<WhitelistAddRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let name = req.name.trim();
+    if !valid_player_name(name) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Use um nome de jogador válido (3 a 16 letras, números ou _).",
+        ));
+    }
+    let base = {
+        let i = app.0.lock().await;
+        expand(&i.cfg.server_dir)
+    };
+    let props = tokio::fs::read_to_string(base.join("server.properties"))
+        .await
+        .unwrap_or_default();
+    let online_mode = req.online_mode.unwrap_or_else(|| {
+        property_from_text(&props, "online-mode")
+            .map(|value| value == "true")
+            .unwrap_or(true)
+    });
+    let entry = if online_mode {
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!(
+                "https://api.mojang.com/users/profiles/minecraft/{name}"
+            ))
+            .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+            .send()
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Mojang: {e}")))?;
+        if response.status() == StatusCode::NO_CONTENT || response.status() == StatusCode::NOT_FOUND
+        {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "Jogador não encontrado. Confira o nome ou use a conta offline.",
+            ));
+        }
+        let data: Value = response
+            .error_for_status()
+            .map_err(|e| {
+                err(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Mojang retornou erro: {e}"),
+                )
+            })?
+            .json()
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Mojang JSON: {e}")))?;
+        let uuid = data["id"]
+            .as_str()
+            .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Mojang não retornou o UUID."))?;
+        let canonical = data["name"].as_str().unwrap_or(name);
+        WhitelistEntry {
+            uuid: uuid.to_string(),
+            name: canonical.to_string(),
+        }
+    } else {
+        WhitelistEntry {
+            uuid: offline_uuid(name),
+            name: name.to_string(),
+        }
+    };
+
+    let mut entries = read_whitelist(&base).await;
+    entries.retain(|item| !item.name.eq_ignore_ascii_case(&entry.name));
+    entries.push(entry.clone());
+    write_whitelist(&base, &entries).await?;
+    set_server_property(&base, "white-list", "true").await?;
+    let mut i = app.0.lock().await;
+    if i.status == Status::Online {
+        let _ = send_line(&mut i, "whitelist reload").await;
+        let _ = send_line(&mut i, "whitelist on").await;
+    }
+    i.push(
+        format!(
+            "{} convidado. UUID: {}",
+            entry.name,
+            if online_mode {
+                "conta original"
+            } else {
+                "conta offline"
+            }
+        ),
+        "success",
+    );
+    drop(i);
+    Ok(Json(whitelist_view(&base).await?))
+}
+
+#[derive(Deserialize)]
+struct WhitelistRemoveRequest {
+    name: String,
+}
+
+async fn remove_whitelist(
+    State(app): State<AppState>,
+    Json(req): Json<WhitelistRemoveRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let base = {
+        let i = app.0.lock().await;
+        expand(&i.cfg.server_dir)
+    };
+    let mut entries = read_whitelist(&base).await;
+    let before = entries.len();
+    entries.retain(|item| !item.name.eq_ignore_ascii_case(req.name.trim()));
+    if entries.len() == before {
+        return Err(err(StatusCode::NOT_FOUND, "Jogador não está na whitelist."));
+    }
+    write_whitelist(&base, &entries).await?;
+    let mut i = app.0.lock().await;
+    if i.status == Status::Online {
+        let _ = send_line(&mut i, "whitelist reload").await;
+    }
+    i.push(
+        format!("{} removido da whitelist.", req.name.trim()),
+        "info",
+    );
+    drop(i);
+    Ok(Json(whitelist_view(&base).await?))
+}
+
+#[derive(Deserialize)]
+struct WhitelistToggleRequest {
+    enabled: bool,
+}
+
+async fn toggle_whitelist(
+    State(app): State<AppState>,
+    Json(req): Json<WhitelistToggleRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let base = {
+        let i = app.0.lock().await;
+        expand(&i.cfg.server_dir)
+    };
+    set_server_property(
+        &base,
+        "white-list",
+        if req.enabled { "true" } else { "false" },
+    )
+    .await?;
+    let mut i = app.0.lock().await;
+    if i.status == Status::Online {
+        let _ = send_line(
+            &mut i,
+            if req.enabled {
+                "whitelist on"
+            } else {
+                "whitelist off"
+            },
+        )
+        .await;
+    }
+    i.push(
+        if req.enabled {
+            "Whitelist ativada: só jogadores convidados entram."
+        } else {
+            "Whitelist desativada: qualquer jogador pode entrar."
+        },
+        "info",
+    );
+    drop(i);
+    Ok(Json(whitelist_view(&base).await?))
+}
+
+// ───────────────────────── Atualizações ─────────────────────────
+
+const RELEASES_API: &str = "https://api.github.com/repos/NoteDarck/ShadowPainel/releases";
+
+fn updates_dir() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".shadowpainel")
+        .join("updates")
+}
+
+fn update_state_path() -> PathBuf {
+    updates_dir().join("state.json")
+}
+
+#[cfg(unix)]
+async fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).await;
+}
+
+#[cfg(not(unix))]
+async fn make_executable(_path: &Path) {}
+
+fn version_parts(version: &str) -> (u64, u64, u64) {
+    let mut parts = version.trim_start_matches('v').split('.').map(|part| {
+        part.chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0)
+    });
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+fn update_asset_rank(name: &str) -> Option<u8> {
+    let lower = name.to_lowercase();
+    if cfg!(windows) {
+        if lower.ends_with(".exe") {
+            return Some(0);
+        }
+        if lower.ends_with(".msi") {
+            return Some(1);
+        }
+        return None;
+    }
+    if cfg!(target_os = "macos") {
+        if lower.ends_with(".dmg") {
+            return Some(0);
+        }
+        if lower.ends_with(".tar.gz") {
+            return Some(1);
+        }
+        return None;
+    }
+    if lower.ends_with(".appimage") {
+        Some(0)
+    } else if lower.ends_with(".deb") {
+        Some(1)
+    } else if lower.ends_with(".tar.gz") {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+fn release_asset(release: &Value) -> Option<(String, String, u64, Option<String>)> {
+    release["assets"]
+        .as_array()?
+        .iter()
+        .filter_map(|asset| {
+            let name = asset["name"].as_str()?;
+            let rank = update_asset_rank(name)?;
+            let url = asset["browser_download_url"].as_str()?.to_string();
+            let size = asset["size"].as_u64().unwrap_or(0);
+            let digest = asset["digest"]
+                .as_str()
+                .and_then(|value| value.strip_prefix("sha256:"))
+                .map(str::to_owned);
+            Some((rank, name.to_string(), url, size, digest))
+        })
+        .min_by_key(|(rank, ..)| *rank)
+        .map(|(_, name, url, size, digest)| (name, url, size, digest))
+}
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    current_version: String,
+    latest_version: String,
+    available: bool,
+    release_url: String,
+    notes: String,
+    published_at: String,
+    asset_name: Option<String>,
+    asset_size: u64,
+    can_rollback: bool,
+}
+
+async fn fetch_release(client: &reqwest::Client, tag: Option<&str>) -> Result<Value, ApiErr> {
+    let url = match tag {
+        Some(tag) => format!("{RELEASES_API}/tags/{tag}"),
+        None => format!("{RELEASES_API}/latest"),
+    };
+    client
+        .get(url)
+        .timeout(Duration::from_secs(20))
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("GitHub: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("GitHub retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("GitHub JSON: {e}")))
+}
+
+fn update_info(release: &Value) -> UpdateInfo {
+    let latest = release["tag_name"]
+        .as_str()
+        .unwrap_or(APP_VERSION)
+        .trim_start_matches('v')
+        .to_string();
+    let asset = release_asset(release);
+    let previous = std::fs::read(update_state_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|state| state["previous_version"].as_str().map(str::to_owned));
+    UpdateInfo {
+        current_version: APP_VERSION.into(),
+        available: version_parts(&latest) > version_parts(APP_VERSION),
+        latest_version: latest,
+        release_url: release["html_url"]
+            .as_str()
+            .unwrap_or("https://github.com/NoteDarck/ShadowPainel/releases")
+            .into(),
+        notes: release["body"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(4000)
+            .collect(),
+        published_at: release["published_at"].as_str().unwrap_or("").into(),
+        asset_name: asset.as_ref().map(|(name, ..)| name.clone()),
+        asset_size: asset.as_ref().map(|(_, _, size, _)| *size).unwrap_or(0),
+        can_rollback: previous.is_some(),
+    }
+}
+
+async fn check_update() -> Result<Json<UpdateInfo>, ApiErr> {
+    let client = reqwest::Client::new();
+    let release = fetch_release(&client, None).await?;
+    Ok(Json(update_info(&release)))
+}
+
+fn update_checksum_from_sums(text: &str, asset_name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let name = parts.next()?.trim_start_matches('*');
+        (name == asset_name).then(|| hash.to_lowercase())
+    })
+}
+
+async fn install_update(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao preparar o download: {e}"),
+            )
+        })?;
+    let release = fetch_release(&client, None).await?;
+    let info = update_info(&release);
+    if !info.available {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Você já está usando a versão mais recente.",
+        ));
+    }
+    let (asset_name, asset_url, _size, digest) = release_asset(&release).ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            "Esta versão não tem instalador para o seu sistema.",
+        )
+    })?;
+    let dir = updates_dir();
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar atualizações: {e}"),
+        )
+    })?;
+    let destination = dir.join(
+        safe_filename(&asset_name)
+            .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Nome de instalador inválido."))?,
+    );
+    if !destination.is_file() {
+        save_download(&client, &asset_url, &destination).await?;
+    }
+    let expected = if let Some(digest) = digest {
+        Some(digest)
+    } else if let Some(url) = release["assets"].as_array().and_then(|assets| {
+        assets.iter().find_map(|asset| {
+            (asset["name"].as_str() == Some("SHA256SUMS.txt"))
+                .then(|| asset["browser_download_url"].as_str())
+                .flatten()
+        })
+    }) {
+        let sums = client
+            .get(url)
+            .timeout(Duration::from_secs(20))
+            .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+            .send()
+            .await
+            .ok()
+            .and_then(|response| response.error_for_status().ok());
+        match sums {
+            Some(response) => response
+                .text()
+                .await
+                .ok()
+                .and_then(|text| update_checksum_from_sums(&text, &asset_name)),
+            None => None,
+        }
+    } else {
+        None
+    };
+    if let Some(expected) = expected {
+        let bytes = tokio::fs::read(&destination).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao verificar o instalador: {e}"),
+            )
+        })?;
+        let actual = format!("{:x}", Sha256::digest(&bytes));
+        if !actual.eq_ignore_ascii_case(&expected) {
+            let _ = tokio::fs::remove_file(&destination).await;
+            return Err(err(
+                StatusCode::BAD_GATEWAY,
+                "O instalador chegou corrompido e foi apagado. Tente novamente.",
+            ));
+        }
+    }
+    make_executable(&destination).await;
+    if let Some(parent) = config_path().parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let config = config_path();
+    if config.is_file() {
+        let backup = dir.join(format!("config-antes-de-{APP_VERSION}.json"));
+        let _ = tokio::fs::copy(&config, &backup).await;
+    }
+    let state = json!({
+        "previous_version": APP_VERSION,
+        "target_version": info.latest_version,
+        "asset": asset_name,
+        "saved_at": Local::now().to_rfc3339(),
+    });
+    let _ = tokio::fs::write(
+        update_state_path(),
+        serde_json::to_vec_pretty(&state).unwrap_or_default(),
+    )
+    .await;
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(&destination);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(&destination);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(&destination);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao abrir o instalador: {e}"),
+            )
+        })?;
+    app.0.lock().await.push(
+        format!(
+            "Atualização {} baixada. Feche o ShadowPainel e conclua no instalador.",
+            info.latest_version
+        ),
+        "success",
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "version": info.latest_version,
+        "path": destination,
+        "message": "Instalador aberto. Feche o ShadowPainel para concluir a atualização.",
+    })))
+}
+
+async fn rollback_update(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    let state: Value = tokio::fs::read(update_state_path())
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "Ainda não há uma versão anterior registrada para voltar.",
+            )
+        })?;
+    let previous = state["previous_version"]
+        .as_str()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Versão anterior não encontrada."))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao preparar o download: {e}"),
+            )
+        })?;
+    let release = fetch_release(&client, Some(&format!("v{previous}"))).await?;
+    let (asset_name, asset_url, _size, digest) = release_asset(&release).ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            "A versão anterior não tem instalador para este sistema.",
+        )
+    })?;
+    let dir = updates_dir();
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar atualizações: {e}"),
+        )
+    })?;
+    let destination = dir.join(
+        safe_filename(&asset_name)
+            .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Nome de instalador inválido."))?,
+    );
+    save_download(&client, &asset_url, &destination).await?;
+    if let Some(expected) = digest {
+        let bytes = tokio::fs::read(&destination).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao verificar o instalador anterior: {e}"),
+            )
+        })?;
+        let actual = format!("{:x}", Sha256::digest(&bytes));
+        if !actual.eq_ignore_ascii_case(&expected) {
+            let _ = tokio::fs::remove_file(&destination).await;
+            return Err(err(
+                StatusCode::BAD_GATEWAY,
+                "O instalador anterior chegou corrompido e foi apagado. Tente novamente.",
+            ));
+        }
+    }
+    make_executable(&destination).await;
+    let _ = state;
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(&destination);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(&destination);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(&destination);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao abrir o instalador anterior: {e}"),
+            )
+        })?;
+    app.0.lock().await.push(
+        format!("Instalador da versão {previous} aberto para reversão."),
+        "info",
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "version": previous,
+        "message": format!("Instalador da versão {previous} aberto."),
+    })))
 }
 
 // ───────────────────────── Delete / Command ─────────────────────────
@@ -2599,7 +4355,17 @@ async fn create_server(
         ));
     }
 
-    let java_path = {
+    {
+        let i = app.0.lock().await;
+        if i.status != Status::Offline || i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Pare o servidor e aguarde instalações antes de criar outro.",
+            ));
+        }
+    }
+    let java_path = ensure_java_for_version(&app, req.version.trim()).await?;
+    {
         let mut i = app.0.lock().await;
         if i.status != Status::Offline || i.installing {
             return Err(err(
@@ -2608,8 +4374,7 @@ async fn create_server(
             ));
         }
         i.installing = true;
-        i.cfg.java_path.clone()
-    };
+    }
 
     let client = reqwest::Client::new();
     let result = install_loader(
@@ -2932,13 +4697,32 @@ async fn delete_content(
     State(app): State<AppState>,
     Json(req): Json<ContentDeleteRequest>,
 ) -> Result<Json<Value>, ApiErr> {
-    let i = app.0.lock().await;
-    let dir = content_dir(&expand(&i.cfg.server_dir), &req.kind)
+    let (base, status) = {
+        let i = app.0.lock().await;
+        (expand(&i.cfg.server_dir), i.status)
+    };
+    if status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de remover conteúdo.",
+        ));
+    }
+    let dir = content_dir(&base, &req.kind)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
-    drop(i);
 
     let mut deleted = Vec::new();
     let mut errors = Vec::new();
+    let token = new_trash_token();
+    let trash_dir = trash_root(&base)
+        .join("content")
+        .join(&token)
+        .join(&req.kind);
+    tokio::fs::create_dir_all(&trash_dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a lixeira: {e}"),
+        )
+    })?;
 
     for filename in req.filenames {
         let safe_name = std::path::Path::new(&filename)
@@ -2949,7 +4733,7 @@ async fn delete_content(
         if let Some(name) = safe_name {
             let path = dir.join(name);
             if path.exists() {
-                if let Err(e) = tokio::fs::remove_file(&path).await {
+                if let Err(e) = tokio::fs::rename(&path, trash_dir.join(name)).await {
                     errors.push(format!("{name}: {e}"));
                 } else {
                     deleted.push(name.to_string());
@@ -2962,20 +4746,48 @@ async fn delete_content(
         }
     }
 
-    let base = dir.parent().unwrap_or(&dir);
-    let mut installed = read_installed_content(base).await;
+    if deleted.is_empty() {
+        let _ = tokio::fs::remove_dir_all(trash_root(&base).join("content").join(&token)).await;
+        return Ok(Json(
+            json!({"ok": false, "deleted": deleted, "errors": errors}),
+        ));
+    }
+
+    let mut installed = read_installed_content(&base).await;
+    let removed: Vec<InstalledContent> = installed
+        .iter()
+        .filter(|item| item.kind == req.kind && deleted.contains(&item.filename))
+        .cloned()
+        .collect();
     installed.retain(|x| {
         !deleted
             .iter()
             .any(|name| x.kind == req.kind && x.filename == *name)
     });
-    write_installed_content(base, &installed).await?;
-    if !errors.is_empty() {
-        return Ok(Json(
-            json!({"ok": false, "deleted": deleted, "errors": errors}),
-        ));
-    }
-    Ok(Json(json!({"ok": true, "deleted": deleted})))
+    write_installed_content(&base, &installed).await?;
+    let removed_bytes = serde_json::to_vec_pretty(&removed).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a lixeira: {e}"),
+        )
+    })?;
+    tokio::fs::write(
+        trash_root(&base)
+            .join("content")
+            .join(&token)
+            .join("removed.json"),
+        removed_bytes,
+    )
+    .await
+    .map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a lixeira: {e}"),
+        )
+    })?;
+    Ok(Json(
+        json!({"ok": true, "deleted": deleted, "errors": errors, "undo_token": token}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -3596,6 +5408,12 @@ async fn install_content(
                 "Aguarde a instalação em andamento antes de adicionar conteúdo.",
             ));
         }
+        if i.status != Status::Offline {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Pare o servidor antes de instalar conteúdo. Isso evita arquivos corrompidos.",
+            ));
+        }
         let base = expand(&i.cfg.server_dir);
         (base, i.cfg.curseforge_api_key.clone())
     };
@@ -3607,6 +5425,7 @@ async fn install_content(
             format!("Falha na pasta: {e}"),
         )
     })?;
+    automatic_backup(&app, &format!("antes-de-{}", req.kind)).await?;
     let client = reqwest::Client::new();
     let mut record = if source == "curseforge" {
         let cf = CurseForge::new(&client, &key);
@@ -4331,7 +6150,6 @@ struct ModpackInstallRef<'a> {
 async fn install_modpack_inner(
     app: &AppState,
     client: &reqwest::Client,
-    java_path: &str,
     base: &Path,
     install: ModpackInstallRef<'_>,
 ) -> Result<(String, String), ApiErr> {
@@ -4513,9 +6331,10 @@ async fn install_modpack_inner(
         }
 
         let _ = tokio::fs::remove_file(&pack_path).await;
+        let java_path = ensure_java_for_version(app, &plan.minecraft).await?;
         install_loader(
             client,
-            java_path,
+            &java_path,
             base,
             &plan.minecraft,
             &plan.loader,
@@ -4595,7 +6414,7 @@ async fn install_modpack(
             "Esta pasta já possui uma instalação de servidor.",
         ));
     }
-    let (java_path, curseforge_key) = {
+    let curseforge_key = {
         let mut i = app.0.lock().await;
         if i.status != Status::Offline || i.installing {
             return Err(err(
@@ -4604,14 +6423,13 @@ async fn install_modpack(
             ));
         }
         i.installing = true;
-        (i.cfg.java_path.clone(), i.cfg.curseforge_api_key.clone())
+        i.cfg.curseforge_api_key.clone()
     };
 
     let client = reqwest::Client::new();
     let result = install_modpack_inner(
         &app,
         &client,
-        &java_path,
         &base,
         ModpackInstallRef {
             source,
@@ -4803,6 +6621,83 @@ fn create_backup_blocking(base: &Path, destination: &Path) -> Result<u64, String
         .map_err(|e| e.to_string())
 }
 
+async fn write_backup_file(base: &Path, destination: &Path) -> Result<u64, ApiErr> {
+    let base_copy = base.to_path_buf();
+    let destination_copy = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || create_backup_blocking(&base_copy, &destination_copy))
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao criar o backup: {e}"),
+            )
+        })?
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao criar o backup: {e}"),
+            )
+        })
+}
+
+async fn automatic_backup(app: &AppState, reason: &str) -> Result<Option<String>, ApiErr> {
+    let (enabled, base, status, installing) = {
+        let i = app.0.lock().await;
+        (
+            i.cfg.auto_backup,
+            expand(&i.cfg.server_dir),
+            i.status,
+            i.installing,
+        )
+    };
+    if !enabled || detect_launch(&base).is_none() {
+        return Ok(None);
+    }
+    if status != Status::Offline || installing {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor para criar o backup automático antes de instalar.",
+        ));
+    }
+    let dir = backups_dir(&base);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a pasta de backups: {e}"),
+        )
+    })?;
+    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("automatico-") || !name.ends_with(".zip") {
+                continue;
+            }
+            if let Ok(metadata) = entry.metadata().await {
+                if metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| SystemTime::now().duration_since(time).ok())
+                    .is_some_and(|age| age < Duration::from_secs(600))
+                {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    let name = format!(
+        "automatico-{}-{}.zip",
+        safe_filename(reason).unwrap_or("antes-de-instalar"),
+        Local::now().format("%Y%m%d-%H%M%S")
+    );
+    let destination = dir.join(&name);
+    write_backup_file(&base, &destination).await?;
+    app.0.lock().await.push(
+        format!("Backup automático criado antes de instalar: {name}"),
+        "success",
+    );
+    Ok(Some(name))
+}
+
 #[derive(Deserialize)]
 struct BackupCreateRequest {
     name: Option<String>,
@@ -4894,13 +6789,270 @@ async fn delete_backup(
         .filter(|name| name.ends_with(".zip"))
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Backup inválido."))?;
     let path = backups_dir(&base).join(name);
-    tokio::fs::remove_file(&path).await.map_err(|e| {
+    if !path.is_file() {
+        return Err(err(StatusCode::NOT_FOUND, "Backup não encontrado."));
+    }
+    let token = new_trash_token();
+    let trash = trash_root(&base).join("backups").join(&token);
+    tokio::fs::create_dir_all(&trash).await.map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Falha ao excluir o backup: {e}"),
+            format!("Falha ao preparar a lixeira: {e}"),
         )
     })?;
-    Ok(Json(json!({"ok": true})))
+    tokio::fs::rename(&path, trash.join(name))
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao excluir o backup: {e}"),
+            )
+        })?;
+    Ok(Json(json!({"ok": true, "undo_token": token})))
+}
+
+#[derive(Deserialize)]
+struct TrashRestoreRequest {
+    token: String,
+}
+
+async fn restore_trash(
+    State(app): State<AppState>,
+    Json(req): Json<TrashRestoreRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    if !valid_trash_token(req.token.trim()) {
+        return Err(err(StatusCode::BAD_REQUEST, "Ação inválida."));
+    }
+    let (base, status) = {
+        let i = app.0.lock().await;
+        (expand(&i.cfg.server_dir), i.status)
+    };
+    if status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de desfazer uma ação.",
+        ));
+    }
+    let token = req.token.trim();
+    let backup_trash = trash_root(&base).join("backups").join(token);
+    if backup_trash.is_dir() {
+        let mut entries = tokio::fs::read_dir(&backup_trash).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao abrir a lixeira: {e}"),
+            )
+        })?;
+        let mut restored = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao abrir a lixeira: {e}"),
+            )
+        })? {
+            let name = entry.file_name();
+            let destination = backups_dir(&base).join(&name);
+            if destination.exists() {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "Já existe um arquivo com esse nome. Renomeie-o antes de desfazer.",
+                ));
+            }
+            tokio::fs::rename(entry.path(), destination)
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Falha ao restaurar o backup: {e}"),
+                    )
+                })?;
+            restored.push(name.to_string_lossy().into_owned());
+        }
+        let _ = tokio::fs::remove_dir_all(&backup_trash).await;
+        app.0
+            .lock()
+            .await
+            .push("Backup restaurado da lixeira.", "success");
+        return Ok(Json(json!({"ok": true, "restored": restored})));
+    }
+
+    let content_trash = trash_root(&base).join("content").join(token);
+    if !content_trash.is_dir() {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "Esta ação já foi desfeita ou expirou.",
+        ));
+    }
+    let removed_path = content_trash.join("removed.json");
+    let removed: Vec<InstalledContent> = tokio::fs::read(&removed_path)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let mut kinds = tokio::fs::read_dir(&content_trash).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao abrir a lixeira: {e}"),
+        )
+    })?;
+    let mut restored = Vec::new();
+    while let Some(kind_entry) = kinds.next_entry().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao abrir a lixeira: {e}"),
+        )
+    })? {
+        if !kind_entry
+            .file_type()
+            .await
+            .map(|t| t.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let kind = kind_entry.file_name().to_string_lossy().into_owned();
+        let Some(destination_dir) = content_dir(&base, &kind) else {
+            continue;
+        };
+        tokio::fs::create_dir_all(&destination_dir)
+            .await
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Falha ao restaurar conteúdo: {e}"),
+                )
+            })?;
+        let mut files = tokio::fs::read_dir(kind_entry.path()).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao abrir a lixeira: {e}"),
+            )
+        })?;
+        while let Some(file) = files.next_entry().await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao abrir a lixeira: {e}"),
+            )
+        })? {
+            let name = file.file_name();
+            let destination = destination_dir.join(&name);
+            if destination.exists() {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "O arquivo {} já existe. Remova-o antes de desfazer.",
+                        name.to_string_lossy()
+                    ),
+                ));
+            }
+            tokio::fs::rename(file.path(), destination)
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Falha ao restaurar conteúdo: {e}"),
+                    )
+                })?;
+            restored.push(name.to_string_lossy().into_owned());
+        }
+    }
+    let mut installed = read_installed_content(&base).await;
+    for record in removed {
+        if !installed
+            .iter()
+            .any(|item| item.kind == record.kind && item.filename == record.filename)
+        {
+            installed.push(record);
+        }
+    }
+    write_installed_content(&base, &installed).await?;
+    let _ = tokio::fs::remove_dir_all(&content_trash).await;
+    app.0
+        .lock()
+        .await
+        .push("Conteúdo restaurado da lixeira.", "success");
+    Ok(Json(json!({"ok": true, "restored": restored})))
+}
+
+#[derive(Deserialize)]
+struct BackupRestoreRequest {
+    name: String,
+}
+
+async fn restore_backup(
+    State(app): State<AppState>,
+    Json(req): Json<BackupRestoreRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let (base, auto_backup, status, installing) = {
+        let i = app.0.lock().await;
+        (
+            expand(&i.cfg.server_dir),
+            i.cfg.auto_backup,
+            i.status,
+            i.installing,
+        )
+    };
+    if status != Status::Offline || installing {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor e aguarde instalações antes de restaurar um backup.",
+        ));
+    }
+    let name = safe_filename(req.name.trim())
+        .filter(|name| name.ends_with(".zip"))
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Backup inválido."))?;
+    let path = backups_dir(&base).join(name);
+    if !path.is_file() {
+        return Err(err(StatusCode::NOT_FOUND, "Backup não encontrado."));
+    }
+    if auto_backup {
+        let safety = format!(
+            "antes-de-restaurar-{}.zip",
+            Local::now().format("%Y%m%d-%H%M%S")
+        );
+        write_backup_file(&base, &backups_dir(&base).join(&safety)).await?;
+        app.0
+            .lock()
+            .await
+            .push(format!("Backup de segurança criado: {safety}"), "info");
+    }
+    extract_zip(&path, &base, vec![]).await?;
+    app.0
+        .lock()
+        .await
+        .push(format!("Backup restaurado: {name}"), "success");
+    Ok(Json(json!({
+        "ok": true,
+        "message": "Backup restaurado. Inicie o servidor para conferir.",
+        "items": backup_items(&base).await?,
+    })))
+}
+
+#[derive(Deserialize)]
+struct AutoBackupRequest {
+    enabled: bool,
+}
+
+async fn set_auto_backup(
+    State(app): State<AppState>,
+    Json(req): Json<AutoBackupRequest>,
+) -> ApiResult {
+    let mut i = app.0.lock().await;
+    i.cfg.auto_backup = req.enabled;
+    i.persist().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar configuração: {e}"),
+        )
+    })?;
+    i.push(
+        if req.enabled {
+            "Backups automáticos ativados antes de instalar conteúdo."
+        } else {
+            "Backups automáticos desativados."
+        },
+        "info",
+    );
+    Ok(Json(view(&mut i)))
 }
 
 #[derive(Deserialize)]
@@ -5051,12 +7203,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let profiles = load_profiles(&cfg_path, &cfg).await;
-    let java_detected = detect_java(&cfg.java_path).await;
+    let java_major = detect_java_major(&cfg.java_path).await;
+    let java_detected = java_major.is_some();
     let app_state = AppState(Arc::new(Mutex::new(Inner::new(
         cfg,
         profiles,
         cfg_path,
         java_detected,
+        java_major,
     ))));
 
     let configured_addr = std::env::var("SHADOWPAINEL_ADDR").ok();
@@ -5095,6 +7249,10 @@ async fn main() -> anyhow::Result<()> {
             get(get_server_properties).post(save_server_properties),
         )
         .route("/api/server/icon", post(save_server_icon))
+        .route("/api/server/open-folder", post(open_server_folder))
+        .route("/api/server/next-port", post(next_port))
+        .route("/api/java/ensure", post(java_ensure))
+        .route("/api/network/diagnose", get(network_diagnose))
         .route("/api/minecraft/versions", get(minecraft_versions))
         .route("/api/server/create", post(create_server))
         .route("/api/content", get(list_content))
@@ -5111,6 +7269,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/backups/create", post(create_backup))
         .route("/api/backups/delete", post(delete_backup))
         .route("/api/backups/download", get(download_backup))
+        .route("/api/backups/restore", post(restore_backup))
+        .route("/api/backups/auto", post(set_auto_backup))
+        .route("/api/trash/restore", post(restore_trash))
+        .route("/api/whitelist", get(get_whitelist))
+        .route("/api/whitelist/add", post(add_whitelist))
+        .route("/api/whitelist/remove", post(remove_whitelist))
+        .route("/api/whitelist/toggle", post(toggle_whitelist))
+        .route("/api/update/check", get(check_update))
+        .route("/api/update/install", post(install_update))
+        .route("/api/update/rollback", post(rollback_update))
         .route("/api/shutdown", post(shutdown))
         .route("/api/config", post(save_config))
         .route("/api/e4all/config", post(save_e4all))
@@ -5141,7 +7309,10 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_e4all_link;
+    use super::{
+        extract_e4all_link, offline_uuid, parse_java_major, qr_svg, update_checksum_from_sums,
+        version_parts,
+    };
 
     #[test]
     fn extracts_assigned_e4all_domain() {
@@ -5162,5 +7333,47 @@ mod tests {
     #[test]
     fn ignores_unrelated_lines() {
         assert_eq!(extract_e4all_link("Domain assigned: exemplo.com"), None);
+    }
+
+    #[test]
+    fn qr_svg_contains_payload_modules() {
+        let svg = qr_svg("https://abc.e4mc.link").expect("qr");
+        assert!(svg.starts_with("<svg"));
+        assert!(svg.contains("shape-rendering=\"crispEdges\""));
+        assert!(svg.contains("<path d=\"M"));
+    }
+
+    #[test]
+    fn offline_uuid_is_v3_and_deterministic() {
+        let uuid = offline_uuid("Notch");
+        assert_eq!(uuid, offline_uuid("Notch"));
+        assert_eq!(&uuid[14..15], "3");
+        assert!(matches!(&uuid[19..20], "8" | "9" | "a" | "b"));
+        assert_eq!(uuid.len(), 36);
+    }
+
+    #[test]
+    fn parses_java_versions() {
+        assert_eq!(parse_java_major("openjdk version \"1.8.0_402\""), Some(8));
+        assert_eq!(parse_java_major("openjdk version \"17.0.10\""), Some(17));
+        assert_eq!(parse_java_major("openjdk version \"21.0.4\""), Some(21));
+        assert_eq!(parse_java_major("sem número"), None);
+    }
+
+    #[test]
+    fn compares_update_versions() {
+        assert!(version_parts("0.10.0") > version_parts("0.9.9"));
+        assert!(version_parts("v1.0.0") > version_parts("0.99.99"));
+        assert_eq!(version_parts("0.8.2"), (0, 8, 2));
+    }
+
+    #[test]
+    fn picks_checksum_from_sums_file() {
+        let sums = "aaa111  ShadowPainel-0.9.0.AppImage\nbbb222  outro.zip\n";
+        assert_eq!(
+            update_checksum_from_sums(sums, "ShadowPainel-0.9.0.AppImage"),
+            Some("aaa111".into())
+        );
+        assert_eq!(update_checksum_from_sums(sums, "sumiu"), None);
     }
 }
