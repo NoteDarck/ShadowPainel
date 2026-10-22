@@ -170,6 +170,30 @@ fn expand(path: &str) -> PathBuf {
 
 // ───────────────────────── e4all.toml ─────────────────────────
 
+fn extract_e4all_link(line: &str) -> Option<String> {
+    for marker in ["Domain reassigned: ", "Domain assigned: "] {
+        let Some(index) = line.find(marker) else {
+            continue;
+        };
+        let candidate = line[index + marker.len()..].split_whitespace().next()?;
+        let candidate = candidate.trim_matches(|c: char| {
+            !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+        });
+        if candidate.contains(".e4mc.link") {
+            return Some(candidate.trim_end_matches('.').to_string());
+        }
+    }
+    None
+}
+
+async fn latest_e4all_link(minecraft_dir: &str) -> Option<String> {
+    let path = expand(minecraft_dir.trim()).join("logs").join("latest.log");
+    let bytes = tokio::fs::read(path).await.ok()?;
+    let start = bytes.len().saturating_sub(2 * 1024 * 1024);
+    let text = String::from_utf8_lossy(&bytes[start..]);
+    text.lines().rev().find_map(extract_e4all_link)
+}
+
 fn default_minecraft_dir() -> String {
     if cfg!(windows) {
         if let Ok(appdata) = std::env::var("APPDATA") {
@@ -891,6 +915,7 @@ struct Inner {
     stdin: Option<ChildStdin>,
     kill_tx: Option<oneshot::Sender<()>>,
     installing: bool,
+    e4all_link: Option<String>,
     sys: System,
 }
 
@@ -909,6 +934,7 @@ impl Inner {
             stdin: None,
             kill_tx: None,
             installing: false,
+            e4all_link: None,
             sys: System::new(),
         };
         s.push("ShadowPainel pronto. Aguardando inicialização.", "muted");
@@ -978,6 +1004,7 @@ struct View {
     curseforge_mode: String,
     curseforge_configured: bool,
     e4all: E4allConfig,
+    e4all_link: Option<String>,
     logs: Vec<LogLine>,
 }
 
@@ -1026,6 +1053,7 @@ fn view(i: &mut Inner) -> View {
         },
         curseforge_configured: !i.cfg.curseforge_api_key.trim().is_empty(),
         e4all: i.cfg.e4all.clone(),
+        e4all_link: i.e4all_link.clone(),
         logs: i.logs.iter().cloned().collect(),
     }
 }
@@ -1085,6 +1113,11 @@ async fn pump<R: AsyncRead + Unpin>(app: AppState, reader: R) {
         } else if line.contains(" left the game") {
             i.players = i.players.saturating_sub(1);
         }
+        if let Some(link) = extract_e4all_link(&line) {
+            i.e4all_link = Some(link);
+        } else if line.contains("e4all: relay session stopped") {
+            i.e4all_link = None;
+        }
         i.push(line.clone(), log_kind(&line));
     }
 }
@@ -1106,6 +1139,7 @@ async fn wait_child(app: AppState, mut child: Child, kill_rx: oneshot::Receiver<
     i.kill_tx = None;
     i.players = 0;
     i.started = None;
+    i.e4all_link = None;
     match result {
         Ok(code) => i.push(format!("Servidor encerrado ({code})."), "warning"),
         Err(e) => i.push(format!("Erro ao aguardar o processo: {e}"), "error"),
@@ -1466,6 +1500,7 @@ async fn start(State(app): State<AppState>) -> ApiResult {
     i.status = Status::Online;
     i.started = Some(Utc::now());
     i.players = 0;
+    i.e4all_link = None;
     i.push(format!("Iniciando servidor com {launch_name}"), "success");
     tokio::spawn(wait_child(app.clone(), child, rx));
     Ok(Json(view(&mut i)))
@@ -1586,6 +1621,38 @@ async fn e4all_status(Json(req): Json<DirRequest>) -> Json<E4allStatus> {
 
 async fn e4all_load(Json(req): Json<DirRequest>) -> Json<E4allConfig> {
     Json(load_e4all(&req.minecraft_dir))
+}
+
+#[derive(Serialize)]
+struct E4allLinkView {
+    link: Option<String>,
+    source: Option<String>,
+}
+
+async fn e4all_link(
+    State(app): State<AppState>,
+    Json(req): Json<DirRequest>,
+) -> Json<E4allLinkView> {
+    let (server_link, default_dir) = {
+        let i = app.0.lock().await;
+        (i.e4all_link.clone(), i.cfg.e4all.minecraft_dir.clone())
+    };
+    if let Some(link) = server_link {
+        return Json(E4allLinkView {
+            link: Some(link),
+            source: Some("servidor".into()),
+        });
+    }
+    let minecraft_dir = if req.minecraft_dir.trim().is_empty() {
+        default_dir
+    } else {
+        req.minecraft_dir
+    };
+    let link = latest_e4all_link(&minecraft_dir).await;
+    Json(E4allLinkView {
+        source: link.as_ref().map(|_| "Minecraft".into()),
+        link,
+    })
 }
 
 async fn save_e4all(State(app): State<AppState>, Json(mut cfg): Json<E4allConfig>) -> ApiResult {
@@ -5049,6 +5116,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/e4all/config", post(save_e4all))
         .route("/api/e4all/status", post(e4all_status))
         .route("/api/e4all/load", post(e4all_load))
+        .route("/api/e4all/link", post(e4all_link))
         .route("/api/e4all/scan", get(e4all_scan))
         .route("/api/command", post(command))
         .with_state(app_state.clone());
@@ -5069,4 +5137,30 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     shutdown_server(&app_state).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_e4all_link;
+
+    #[test]
+    fn extracts_assigned_e4all_domain() {
+        assert_eq!(
+            extract_e4all_link("[Render thread/INFO] [e4all]: Domain assigned: abcde.e4mc.link"),
+            Some("abcde.e4mc.link".into())
+        );
+    }
+
+    #[test]
+    fn extracts_reassigned_e4all_domain() {
+        assert_eq!(
+            extract_e4all_link("Domain reassigned: new.e4mc.link (was: old.e4mc.link)"),
+            Some("new.e4mc.link".into())
+        );
+    }
+
+    #[test]
+    fn ignores_unrelated_lines() {
+        assert_eq!(extract_e4all_link("Domain assigned: exemplo.com"), None);
+    }
 }

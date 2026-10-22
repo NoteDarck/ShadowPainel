@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-0.8.0-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/version-0.8.1-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
 <img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
 <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
 <img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
@@ -33,7 +33,7 @@ aplicativo**, sem navegador externo.
 | 🎯 | **Escolher a versão do mod** | Diferente da versão do Minecraft: escolha a build exata que o servidor vai rodar. |
 | 🔌 | **Plugins e datapacks** | Suporte a Paper, Purpur e datapacks no mesmo catálogo. |
 | 🧵 | **Instalar o Fabric** | Pronto para rodar mods e o e4all. |
-| 🌐 | **Configurar o e4all** | Registre o domínio público gerado pelo mod e compartilhe com os jogadores. |
+| 🌐 | **Link público do e4all** | Detecte o domínio gerado pelo mod no log e copie o endereço direto da visão geral. |
 | 🎛️ | **Gerenciar o servidor** | Iniciar, parar, reiniciar, enviar comandos e acompanhar logs e métricas (CPU, memória, jogadores). |
 | 🖥️ | **Abrir em tela cheia** | A janela já abre maximizada, como um software dedicado. |
 | 🔒 | **Execução local** | Tudo roda na sua máquina — seus dados não saem do PC. |

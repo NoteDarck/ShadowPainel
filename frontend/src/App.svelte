@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.8.0';
+  const APP_VERSION = '0.8.1';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -44,6 +44,7 @@
     dir_exists:boolean; config_exists:boolean; config_path:string;
     level:string; message:string;
   };
+  type E4allLinkView = { link:string|null; source:string|null };
   type LauncherCandidate = {
     label: string; path: string; exists: boolean; config_exists: boolean;
   };
@@ -63,7 +64,7 @@
     server_name:string; version:string; loader:string; server_dir:string; java_path:string;
     java_detected:boolean; installed:boolean; eula_accepted:boolean; installing:boolean;
     curseforge_mode:string; curseforge_configured:boolean;
-    e4all:E4allConfig; logs:Log[];
+    e4all:E4allConfig; e4all_link:string|null; logs:Log[];
   };
   type ServerSummary = { server_name:string; version:string; server_dir:string; installed:boolean; active:boolean; status:string };
 
@@ -82,7 +83,7 @@
     server_dir:'~/Minecraft/MeuServidor', java_path:'java',
     java_detected:false, installed:false, eula_accepted:false, installing:false,
     curseforge_mode:'proxy', curseforge_configured:false,
-    e4all:{ minecraft_dir:'~/.minecraft', ...E4_DEFAULTS },
+    e4all:{ minecraft_dir:'~/.minecraft', ...E4_DEFAULTS }, e4all_link:null,
     logs:[]
   };
   let versions:Version[] = [];
@@ -103,6 +104,8 @@
     loader:'vanilla',
   };
   let setupVersion = '';
+  let setupError = '';
+  let configSection:'server'|'properties'|'e4all'|'integrations'|'backups' = 'server';
 
   let loading = false;
   let notice = '';
@@ -144,6 +147,14 @@
 
   let e4status: E4allStatus | null = null;
   let checkingE4 = false;
+  let e4allLink = '';
+  let e4allLinkSource = '';
+  let e4allLinkLoading = false;
+  let resolvedE4allLink = '';
+  let resolvedE4allSource = '';
+  $: resolvedE4allLink = server.e4all_link || e4allLink;
+  $: resolvedE4allSource = server.e4all_link ? 'console do servidor' : e4allLinkSource;
+  $: setupPathConflict = server.installed && sameDir(setup.server_dir, server.server_dir);
 
   let launcherCandidates: LauncherCandidate[] = [];
   let scanningLaunchers = false;
@@ -241,13 +252,30 @@
     body:JSON.stringify(value)
   });
 
+  function sameDir(left:string, right:string) {
+    return left.trim().replace(/[\\/]+$/, '') === right.trim().replace(/[\\/]+$/, '');
+  }
+
+  function openSetup(newInstall = false) {
+    setupError = '';
+    activeTab = 'setup';
+    if (newInstall && server.installed) {
+      if (setupPathConflict) {
+        setup.server_dir = `${server.server_dir.replace(/[\\/]+$/, '')}-2`;
+      }
+      if (!setup.server_name.trim() || setup.server_name === server.server_name) {
+        setup.server_name = `${server.server_name} 2`;
+      }
+    }
+  }
+
   async function refresh() {
     try {
       const fresh = await api<Server>('/state');
       server = fresh;
       if (booted === false) {
         booted = true;
-        if (!fresh.installed) activeTab = 'setup';
+        if (!fresh.installed) openSetup(false);
         if (fresh.loader && fresh.loader !== 'vanilla') contentLoader = fresh.loader;
       }
       if (!contentVersion && fresh.version) contentVersion = fresh.version;
@@ -276,6 +304,7 @@
       notice = `Servidor ativo: ${server.server_name}.`;
       await loadServers();
       await loadContent();
+      await loadE4allLink();
     } catch(e) {
       notice = e instanceof Error ? e.message : 'Não foi possível trocar de servidor.';
       await loadServers();
@@ -310,6 +339,7 @@
 
   async function createServer() {
     loading = true;
+    setupError = '';
     notice = '';
     try {
       server = await api<Server>('/server/create', json({
@@ -324,7 +354,8 @@
       await loadContent();
       await loadServers();
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha na instalação.';
+      setupError = e instanceof Error ? e.message : 'Falha na instalação.';
+      notice = setupError;
     }
     loading = false;
   }
@@ -609,7 +640,7 @@
         confirm_name: deleteName.trim(),
       }));
       deleteOpen = false;
-      activeTab = 'setup';
+      openSetup(true);
       notice = 'Servidor excluído. Crie uma nova instalação.';
       await loadServers();
     } catch (e) {
@@ -641,6 +672,7 @@
     try {
       server = await api<Server>('/e4all/config', json(server.e4all));
       await checkE4all();
+      await loadE4allLink();
       saved = true; setTimeout(()=>saved=false, 2200);
     } catch(e) {
       notice = e instanceof Error ? e.message : 'Falha ao salvar e4all';
@@ -648,6 +680,36 @@
   }
   function resetE4allDefaults() {
     server.e4all = { minecraft_dir: server.e4all.minecraft_dir, ...E4_DEFAULTS };
+  }
+
+  async function loadE4allLink() {
+    if (e4allLinkLoading) return;
+    e4allLinkLoading = true;
+    try {
+      const data = await api<E4allLinkView>('/e4all/link', json({ minecraft_dir: server.e4all.minecraft_dir }));
+      e4allLink = data.link || '';
+      e4allLinkSource = data.source || '';
+    } catch {
+      e4allLink = '';
+      e4allLinkSource = '';
+    }
+    e4allLinkLoading = false;
+  }
+
+  async function copyE4allLink() {
+    if (!resolvedE4allLink) return;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard indisponível');
+      await navigator.clipboard.writeText(resolvedE4allLink);
+    } catch {
+      const area = document.createElement('textarea');
+      area.value = resolvedE4allLink;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+    }
+    notice = 'Link do e4all copiado. Envie para os jogadores.';
   }
 
   async function scanLaunchers() {
@@ -665,6 +727,7 @@
   function pickLauncherPath(path: string) {
     server.e4all.minecraft_dir = path;
     checkE4all();
+    loadE4allLink();
   }
 
   async function checkCurseForge() {
@@ -815,10 +878,12 @@
   async function installModpack() {
     if (!modpackSelected) return;
     if (!setup.server_name.trim() || !setup.server_dir.trim()) {
-      notice = 'Informe o nome e a pasta do servidor antes de instalar o modpack.';
+      setupError = 'Informe o nome e a pasta do servidor antes de instalar o modpack.';
+      notice = setupError;
       return;
     }
     modpackInstalling = true;
+    setupError = '';
     notice = '';
     try {
       server = await api<Server>('/modpacks/install', json({
@@ -839,7 +904,8 @@
       await loadServers();
       await loadContent();
     } catch(e) {
-      notice = e instanceof Error ? e.message : 'Falha ao instalar o modpack.';
+      setupError = e instanceof Error ? e.message : 'Falha ao instalar o modpack.';
+      notice = setupError;
     }
     modpackInstalling = false;
   }
@@ -869,16 +935,19 @@
     catalogDetail = null;
     catalogSelected.clear();
   }
-  $: if (activeTab === 'config' && !e4status) checkE4all();
-  $: if (activeTab === 'config' && !cfStatus && !cfChecking) checkCurseForge();
-  $: if (activeTab === 'config' && !backupsLoaded && !backupsLoading) loadBackups();
+  $: if (activeTab === 'config' && configSection === 'e4all' && !e4status) checkE4all();
+  $: if (activeTab === 'config' && configSection === 'integrations' && !cfStatus && !cfChecking) checkCurseForge();
+  $: if (activeTab === 'config' && configSection === 'backups' && !backupsLoaded && !backupsLoading) loadBackups();
+  $: if (activeTab === 'overview' && booted) loadE4allLink();
+  $: if (activeTab === 'config' && configSection === 'e4all') loadE4allLink();
 
   onMount(() => {
     refresh();
     loadServers();
     loadVersions();
     const timer = setInterval(() => { refresh(); loadServers(); }, 3000);
-    return ()=>{ clearInterval(timer); catalogObserver?.disconnect(); };
+    const e4Timer = setInterval(() => { if (activeTab === 'overview') loadE4allLink(); }, 10000);
+    return ()=>{ clearInterval(timer); clearInterval(e4Timer); catalogObserver?.disconnect(); };
   });
 </script>
 
@@ -910,7 +979,7 @@
       <button class:active={activeTab==='content'} on:click={()=>activeTab='content'}>
         <span class="nav-icon">▦</span>Mods, plugins e datapacks
       </button>
-      <button class:active={activeTab==='setup'} on:click={()=>activeTab='setup'}>
+      <button class:active={activeTab==='setup'} on:click={()=>openSetup(true)}>
         <span class="nav-icon">＋</span>Criar servidor
       </button>
       <div class="nav-label settings-label">SISTEMA</div>
@@ -977,7 +1046,7 @@
             </div>
             <span class="mod-badge">PRIMEIROS PASSOS</span>
           </div>
-          <button class="primary" on:click={()=>activeTab='setup'}>
+          <button class="primary" on:click={()=>openSetup(false)}>
             ABRIR ASSISTENTE DE CRIAÇÃO <span>→</span>
           </button>
         </section>
@@ -1003,7 +1072,7 @@
               {:else}
                 <span class="eula-ok">✓ EULA aceita</span>
               {/if}
-              <button class="secondary" on:click={()=>activeTab='setup'}>＋ Nova instalação</button>
+              <button class="secondary" on:click={()=>openSetup(true)}>＋ Nova instalação</button>
               <button class="secondary danger-outline" on:click={openDelete}>EXCLUIR SERVIDOR</button>
             </div>
             <div class="hero-meta">
@@ -1013,6 +1082,17 @@
             </div>
           </div>
         </div>
+
+        {#if resolvedE4allLink}
+          <section class="e4all-overview">
+            <div class="e4all-overview-copy">
+              <span>LINK PÚBLICO DO E4ALL</span>
+              <b>{resolvedE4allLink}</b>
+              <small>Envie este endereço para os jogadores. Quem entra não precisa instalar o mod.</small>
+            </div>
+            <button class="primary" on:click={copyE4allLink}>COPIAR LINK <span>⧉</span></button>
+          </section>
+        {/if}
 
         <section class="metrics">
           <div class="metric">
@@ -1068,7 +1148,7 @@
             </button>
             <button class="quick" on:click={()=>activeTab='config'}>
               <span class="q-icon">⚙</span>
-              <div><b>Configurações avançadas</b><small>Memória, pasta e e4all</small></div>
+              <div><b>Configurações avançadas</b><small>Servidor, mundo, e4all e backups</small></div>
               <span>›</span>
             </button>
           </section>
@@ -1341,11 +1421,30 @@
       {/if}
 
     {:else if activeTab==='config'}
+      <div class="config-tabs" role="tablist" aria-label="Seções das configurações">
+        <button class:active={configSection==='server'} on:click={()=>configSection='server'}>
+          <b>Servidor</b><small>Memória, Java e pasta</small>
+        </button>
+        <button class:active={configSection==='properties'} on:click={()=>configSection='properties'}>
+          <b>Mundo e rede</b><small>server.properties</small>
+        </button>
+        <button class:active={configSection==='e4all'} on:click={()=>configSection='e4all'}>
+          <b>e4all</b><small>Link e compartilhamento</small>
+        </button>
+        <button class:active={configSection==='integrations'} on:click={()=>configSection='integrations'}>
+          <b>Integrações</b><small>CurseForge</small>
+        </button>
+        <button class:active={configSection==='backups'} on:click={()=>configSection='backups'}>
+          <b>Backups</b><small>Cópias do servidor</small>
+        </button>
+      </div>
+
+      {#if configSection==='server'}
       <section class="settings-card">
         <div class="card-head">
           <div>
-            <h3>Configurações avançadas</h3>
-            <p>Estas opções ficam separadas do assistente de instalação inicial.</p>
+            <h3>Servidor</h3>
+            <p>Identidade, pasta, memória e executável do Java.</p>
           </div>
         </div>
         <div class="form-grid">
@@ -1376,7 +1475,9 @@
         </div>
         <button class="primary" on:click={saveConfig}>SALVAR CONFIGURAÇÃO <span>→</span></button>
       </section>
+      {/if}
 
+      {#if configSection==='integrations'}
       <section class="settings-card">
         <div class="card-head">
           <div><h3>CurseForge</h3><p>Use o proxy público ou informe uma chave oficial da API.</p></div>
@@ -1408,7 +1509,9 @@
         </div>
         <p class="field-hint">Sem chave, o painel usa api.curse.tools. A chave oficial evita limites do proxy e é armazenada apenas no config local.</p>
       </section>
+      {/if}
 
+      {#if configSection==='backups'}
       <section class="settings-card">
         <div class="card-head">
           <div><h3>Backups</h3><p>Cópias ZIP da pasta do servidor, sem logs, bibliotecas e arquivos baixáveis.</p></div>
@@ -1452,7 +1555,9 @@
           </div>
         {/if}
       </section>
+      {/if}
 
+      {#if configSection==='properties'}
       <section class="settings-card">
         <div class="card-head" style="padding-bottom: 16px;">
           <div><h3 style="display:flex; align-items:center; gap:8px;"><span style="font-size:20px; color:var(--accent);">📄</span> server.properties</h3></div>
@@ -1615,11 +1720,32 @@
           </div>
         </div>
       </section>
+      {/if}
 
+      {#if configSection==='e4all'}
       <section class="settings-card">
         <div class="card-head">
           <div><h3>e4all</h3><p>Configuração do mod para abrir um mundo LAN pela internet.</p></div>
           <span class="mod-badge">MODRINTH · e4all</span>
+        </div>
+
+        <div class="e4all-link-box">
+          <div>
+            <span>LINK PÚBLICO ATUAL</span>
+            {#if resolvedE4allLink}
+              <b class="mono">{resolvedE4allLink}</b>
+              <small>Fonte: {resolvedE4allSource || 'e4all'}. Compartilhe este endereço com os jogadores.</small>
+            {:else}
+              <b class="mono muted">Aguardando o e4all gerar o domínio…</b>
+              <small>Abra o mundo no Minecraft com o e4all e use “Abrir para LAN”. O link aparecerá aqui automaticamente.</small>
+            {/if}
+          </div>
+          <div class="e4all-link-actions">
+            {#if resolvedE4allLink}<button class="primary" on:click={copyE4allLink}>COPIAR LINK</button>{/if}
+            <button class="secondary" on:click={loadE4allLink} disabled={e4allLinkLoading}>
+              {e4allLinkLoading ? 'PROCURANDO...' : 'ATUALIZAR LINK'}
+            </button>
+          </div>
         </div>
 
         <div class="e4-folder" style="display:grid;grid-template-columns:1fr auto auto;gap:10px;margin-bottom:16px;">
@@ -1723,6 +1849,7 @@
           <button class="secondary" on:click={resetE4allDefaults}>Restaurar padrões</button>
         </div>
       </section>
+      {/if}
 
     {:else if activeTab==='setup'}
       <section class="settings-card setup-card">
@@ -1754,18 +1881,24 @@
         <div class="form-grid">
           <label>
             Nome do servidor
-            <input bind:value={setup.server_name} placeholder="Sobrevivência principal"/>
+            <input bind:value={setup.server_name} placeholder="Sobrevivência principal" on:input={()=>setupError=''}/>
             <small style="color: var(--faint); font-size: 11px; margin-top: 4px;">Este nome aparece no painel. Pode ser alterado depois.</small>
           </label>
           <label>
             Pasta do servidor
-            <input bind:value={setup.server_dir}/>
+            <input bind:value={setup.server_dir} on:input={()=>setupError=''}/>
             <small style="color: var(--faint); font-size: 11px; margin-top: 4px;">Onde os arquivos do mundo serão salvos. Use o caminho completo.</small>
           </label>
           <label>Memória inicial (GB)
             <input type="number" min="1" max="64" bind:value={setup.memory_limit_gb}/>
           </label>
         </div>
+
+        {#if setupPathConflict}
+          <div class="inline-warning setup-path-warning">
+            Esta pasta já pertence ao servidor ativo. Escolha outra pasta para criar uma nova instalação sem sobrescrever a atual.
+          </div>
+        {/if}
 
         {#if setupMode === 'manual'}
           <div class="form-grid">
@@ -1796,7 +1929,7 @@
             <span>Você poderá administrar mods, plugins e datapacks na área de conteúdo, escolhendo entre Modrinth e CurseForge.</span>
           </div>
 
-          <button class="primary" on:click={createServer} disabled={loading || !setupVersion || server.installing}>
+          <button class="primary" on:click={createServer} disabled={loading || !setupVersion || server.installing || setupPathConflict}>
             {#if loading}
               <span class="spinner" style="width: 14px; height: 14px; border-width: 2px; margin-right: 8px;"></span>
               BAIXANDO ARQUIVOS...
@@ -1888,7 +2021,7 @@
               </label>
 
               <button class="primary" on:click={installModpack}
-                      disabled={modpackInstalling || server.installing || modpackVersionsLoading || !setup.server_name.trim() || !setup.server_dir.trim()}>
+                      disabled={modpackInstalling || server.installing || modpackVersionsLoading || !setup.server_name.trim() || !setup.server_dir.trim() || setupPathConflict}>
                 {#if modpackInstalling || server.installing}
                   <span class="spinner" style="width: 14px; height: 14px; border-width: 2px; margin-right: 8px;"></span>
                   INSTALANDO MODPACK...
@@ -1903,6 +2036,10 @@
             <b>Como funciona</b>
             <span>O servidor é criado na pasta informada. Se o modpack tiver server pack, ele é usado; caso contrário, os mods do manifesto são baixados no servidor. O EULA só é gravado se você marcar a opção acima.</span>
           </div>
+        {/if}
+
+        {#if setupError}
+          <div class="inline-error setup-error" role="alert">{setupError}</div>
         {/if}
       </section>
     {/if}
