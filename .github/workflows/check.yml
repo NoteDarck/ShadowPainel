@@ -35,7 +35,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev
+      - name: Dependências WebView Linux
+        timeout-minutes: 15
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          APT_OPTS=(-o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60)
+          # A imagem do runner já traz os índices do apt; tente instalar direto primeiro.
+          if ! timeout 300 sudo apt-get install -y -qq --no-install-recommends "${APT_OPTS[@]}" libgtk-3-dev libwebkit2gtk-4.1-dev; then
+            timeout 180 sudo apt-get update -qq "${APT_OPTS[@]}"
+            timeout 300 sudo apt-get install -y -qq --no-install-recommends "${APT_OPTS[@]}" libgtk-3-dev libwebkit2gtk-4.1-dev
+          fi
       - run: cargo check --locked --manifest-path desktop/Cargo.toml
 
   frontend:
