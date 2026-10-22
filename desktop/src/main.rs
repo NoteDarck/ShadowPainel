@@ -2,11 +2,12 @@ use std::{
     env,
     error::Error,
     fs,
-    io::{self, BufRead, BufReader},
+    io::{self, BufRead, BufReader, Read, Write},
+    net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tao::{
@@ -134,6 +135,24 @@ fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
     Err(io::Error::other("o núcleo não informou uma porta disponível").into())
 }
 
+fn request_shutdown(url: &str) {
+    let Some(address) = url.strip_prefix("http://") else {
+        return;
+    };
+    let address = address.split('/').next().unwrap_or(address);
+    let Ok(mut stream) = TcpStream::connect(address) else {
+        return;
+    };
+    let request = format!(
+        "POST /api/shutdown HTTP/1.1\r\nHost: {address}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let _ = stream.write_all(request.as_bytes());
+    let _ = stream.flush();
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut response = [0u8; 256];
+    let _ = stream.read(&mut response);
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let exe_dir = env::current_exe()?
         .parent()
@@ -174,7 +193,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                let _ = core.kill();
+                request_shutdown(&url);
+                let deadline = Instant::now() + Duration::from_secs(20);
+                loop {
+                    match core.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if Instant::now() < deadline => {
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        _ => {
+                            let _ = core.kill();
+                            let _ = core.wait();
+                            break;
+                        }
+                    }
+                }
                 *control_flow = ControlFlow::Exit;
             }
             _ => {}

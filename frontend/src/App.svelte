@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.7.9';
+  const APP_VERSION = '0.8.0';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -9,11 +9,12 @@
   type ContentItem = {
     filename:string; size:number; kind:string; title?:string;
     project_id?:string; version_number?:string; icon_url?:string;
-    installed_version?:string;
+    installed_version?:string; source?:'modrinth'|'curseforge';
   };
   type ContentResult = {
     project_id:string; title:string; description:string;
     icon_url?:string; downloads:number; version_number?:string; installed?:boolean;
+    author?:string; source?:'modrinth'|'curseforge'; game_versions?:string[]; url?:string;
   };
   type ModVersion = {
     id: string;
@@ -21,7 +22,12 @@
     game_versions: string[];
     loaders: string[];
     date_published: string;
+    filename?:string;
+    source?:'modrinth'|'curseforge';
+    downloads?:number;
   };
+  type BackupItem = { name:string; size:number; created:string };
+  type CurseForgeStatus = { mode:string; configured:boolean; ok:boolean; message:string };
   type E4allConfig = {
     minecraft_dir:string;
     use_broker:boolean; broker_url:string; relay_host:string; relay_port:number;
@@ -54,8 +60,10 @@
   type Server = {
     status:string; address:string; players:number; memory_mb:number;
     memory_limit_gb:number; cpu_percent:number; uptime_seconds:number;
-    server_name:string; version:string; server_dir:string; java_path:string;
-    java_detected:boolean; installed:boolean; e4all:E4allConfig; logs:Log[];
+    server_name:string; version:string; loader:string; server_dir:string; java_path:string;
+    java_detected:boolean; installed:boolean; eula_accepted:boolean; installing:boolean;
+    curseforge_mode:string; curseforge_configured:boolean;
+    e4all:E4allConfig; logs:Log[];
   };
   type ServerSummary = { server_name:string; version:string; server_dir:string; installed:boolean; active:boolean; status:string };
 
@@ -70,9 +78,10 @@
   let server:Server = {
     status:'offline', address:'localhost:25565', players:0, memory_mb:0,
     memory_limit_gb:4, cpu_percent:0, uptime_seconds:0,
-    server_name:'Meu servidor', version:'',
+    server_name:'Meu servidor', version:'', loader:'vanilla',
     server_dir:'~/Minecraft/MeuServidor', java_path:'java',
-    java_detected:false, installed:false,
+    java_detected:false, installed:false, eula_accepted:false, installing:false,
+    curseforge_mode:'proxy', curseforge_configured:false,
     e4all:{ minecraft_dir:'~/.minecraft', ...E4_DEFAULTS },
     logs:[]
   };
@@ -119,6 +128,7 @@
   let catalogOffset = 0;
   let catalogHasMore = true;
   let catalogLoadingMore = false;
+  let catalogRequest = 0;
   let catalogSentinel:HTMLDivElement | undefined;
   let catalogScroll:HTMLDivElement | undefined;
   let catalogObserver:IntersectionObserver | undefined;
@@ -137,6 +147,40 @@
 
   let launcherCandidates: LauncherCandidate[] = [];
   let scanningLaunchers = false;
+
+  let contentSource:'modrinth'|'curseforge' = 'modrinth';
+  let cfStatus:CurseForgeStatus|null = null;
+  let cfKey = '';
+  let cfSaving = false;
+  let cfChecking = false;
+
+  let backups:BackupItem[] = [];
+  let backupsLoaded = false;
+  let backupsLoading = false;
+  let backupName = '';
+  let backupCreating = false;
+  let backupPendingDelete = '';
+
+  let helpOpen = false;
+  let contentDeleteOpen = false;
+  let deletingContent = false;
+
+  let setupMode:'manual'|'modpack' = 'manual';
+  let modpackSource:'modrinth'|'curseforge' = 'modrinth';
+  let modpackQuery = '';
+  let modpackVersionFilter = '';
+  let modpackLoaderFilter = '';
+  let modpackResults:ContentResult[] = [];
+  let modpackLoading = false;
+  let modpackRequest = 0;
+  let modpackVersionRequest = 0;
+  let modpackError = '';
+  let modpackSelected:ContentResult|null = null;
+  let modpackVersions:ModVersion[] = [];
+  let modpackVersionsLoading = false;
+  let modpackVersion = '';
+  let modpackInstalling = false;
+  let modpackAcceptEula = false;
 
   let props: ServerProperties = {
     motd:'Servidor ShadowPainel', max_players:20, gamemode:'survival', difficulty:'easy',
@@ -204,6 +248,7 @@
       if (booted === false) {
         booted = true;
         if (!fresh.installed) activeTab = 'setup';
+        if (fresh.loader && fresh.loader !== 'vanilla') contentLoader = fresh.loader;
       }
       if (!contentVersion && fresh.version) contentVersion = fresh.version;
     } catch {
@@ -226,6 +271,7 @@
     try {
       server = await api<Server>('/servers/switch', json({server_dir}));
       contentVersion = server.version || contentVersion;
+      if (server.loader && server.loader !== 'vanilla') contentLoader = server.loader;
       activeTab = server.installed ? 'overview' : 'setup';
       notice = `Servidor ativo: ${server.server_name}.`;
       await loadServers();
@@ -298,8 +344,10 @@
       server = await api<Server>('/config', json({
         server_name: server.server_name,
         version: server.version,
+        loader: server.loader,
         server_dir: server.server_dir,
         memory_limit_gb: server.memory_limit_gb,
+        java_path: server.java_path,
       }));
       saved = true;
       setTimeout(()=>saved=false, 2200);
@@ -309,6 +357,7 @@
   }
 
   async function toggleServer() {
+    if (loading || server.installing || server.status === 'stopping') return;
     loading = true;
     try {
       server = await api<Server>(
@@ -359,12 +408,12 @@
     }
   }
 
-  async function installContent(project_id:string, version_id?: string) {
+  async function installContent(project_id:string, version_id?: string, source = contentSource) {
     try {
       const version = contentVersion || server.version;
       await api('/content/install', json({
         project_id, kind:contentKind, loader:contentLoader, version,
-        version_id,
+        version_id, source,
       }));
       notice = 'Conteúdo instalado.';
       await loadContent();
@@ -387,7 +436,7 @@
         const versionId = selectedModVersions[projectId] || undefined;
         await api('/content/install', json({
           project_id: projectId, kind: contentKind, loader: contentLoader, version,
-          version_id: versionId,
+          version_id: versionId, source: contentSource,
         }));
         success++;
       } catch (e) {
@@ -406,9 +455,13 @@
     await runCatalogSearch();
   }
 
+  function openContentDelete() {
+    if (selectedItems.size > 0) contentDeleteOpen = true;
+  }
+
   async function deleteSelectedContent() {
     if (selectedItems.size === 0) return;
-    if (!confirm(`Excluir ${selectedItems.size} arquivo(s) selecionado(s)?`)) return;
+    deletingContent = true;
     try {
       const result = await api<{ok:boolean; deleted?:string[]; errors?:string[]}>('/content/delete', json({
         kind: contentKind,
@@ -419,10 +472,12 @@
       } else {
         notice = `Erros: ${result.errors?.join(', ')}`;
       }
+      contentDeleteOpen = false;
       await loadContent();
     } catch(e) {
       notice = e instanceof Error ? e.message : 'Falha ao excluir.';
     }
+    deletingContent = false;
   }
 
   function toggleSelection(filename: string) {
@@ -438,6 +493,10 @@
   }
 
   async function openCatalog() {
+    if (contentSource === 'curseforge' && contentKind === 'datapacks') {
+      notice = 'O CurseForge não possui catálogo de datapacks. Use o Modrinth.';
+      return;
+    }
     catalogOpen = true;
     catalogDetail = null;
     catalogSelected.clear();
@@ -447,9 +506,16 @@
     await runCatalogSearch();
   }
   async function runCatalogSearch(loadMore = false) {
-    if (catalogLoading || catalogLoadingMore || (loadMore && !catalogHasMore)) return;
-    if (loadMore) catalogLoadingMore = true;
-    else { catalogLoading = true; catalogOffset = 0; catalogHasMore = true; }
+    if (loadMore && (catalogLoading || catalogLoadingMore || !catalogHasMore)) return;
+    if (!loadMore) {
+      catalogRequest += 1;
+      catalogLoading = true;
+      catalogOffset = 0;
+      catalogHasMore = true;
+    } else {
+      catalogLoadingMore = true;
+    }
+    const requestId = catalogRequest;
     catalogError = '';
     try {
       const version = contentVersion || server.version;
@@ -459,18 +525,24 @@
         loader: contentLoader,
         version,
         category: catalogCategory,
+        source: contentSource,
         offset: catalogOffset,
         limit: 12
       }));
+      if (requestId !== catalogRequest) return;
       const hits = data.hits || [];
       results = loadMore ? [...results, ...hits] : hits;
       catalogOffset += hits.length;
       catalogHasMore = hits.length === 12;
     } catch (e) {
-      catalogError = e instanceof Error ? e.message : 'Falha na busca.';
+      if (requestId === catalogRequest) {
+        catalogError = e instanceof Error ? e.message : 'Falha na busca.';
+      }
     }
-    catalogLoading = false;
-    catalogLoadingMore = false;
+    if (requestId === catalogRequest) {
+      catalogLoading = false;
+      catalogLoadingMore = false;
+    }
   }
   function observeCatalog(node:HTMLDivElement) {
     catalogSentinel = node;
@@ -487,13 +559,17 @@
     if (catalogOpen) runCatalogSearch();
   }
 
-  async function loadModVersions(projectId: string) {
+  async function loadModVersions(projectId: string, source = contentSource) {
     modVersions = [];
     selectedModVersion = '';
     if (!projectId) return;
     try {
       const version = contentVersion || server.version;
-      const data = await api<ModVersion[]>(`/content/versions?query=${projectId}&loader=${contentLoader}&version=${version}`);
+      const params = new URLSearchParams({
+        query: projectId, kind: contentKind, loader: contentLoader,
+        version, source,
+      });
+      const data = await api<ModVersion[]>(`/content/versions?${params}`);
       modVersions = data;
       if (modVersions.length > 0) {
         selectedModVersion = selectedModVersions[projectId] || modVersions[0].id;
@@ -591,6 +667,190 @@
     checkE4all();
   }
 
+  async function checkCurseForge() {
+    if (cfChecking) return;
+    cfChecking = true;
+    try {
+      cfStatus = await api<CurseForgeStatus>('/curseforge/status');
+    } catch(e) {
+      cfStatus = {
+        mode: server.curseforge_mode,
+        configured: server.curseforge_configured,
+        ok: false,
+        message: e instanceof Error ? e.message : 'CurseForge indisponível.',
+      };
+    }
+    cfChecking = false;
+  }
+
+  async function saveCurseForgeKey(clear = false) {
+    cfSaving = true;
+    try {
+      const key = clear ? '' : cfKey.trim();
+      server = await api<Server>('/curseforge/config', json({ api_key: key }));
+      cfKey = '';
+      cfStatus = null;
+      await checkCurseForge();
+      notice = key
+        ? 'Chave do CurseForge validada e salva.'
+        : 'CurseForge configurado para usar o proxy público.';
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao salvar a chave do CurseForge.';
+    }
+    cfSaving = false;
+  }
+
+  async function loadBackups(force = false) {
+    if (backupsLoading || (!force && backupsLoaded)) return;
+    backupsLoading = true;
+    try {
+      const data = await api<{items:BackupItem[]}>('/backups');
+      backups = data.items || [];
+      backupsLoaded = true;
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao listar backups.';
+      backupsLoaded = true;
+    }
+    backupsLoading = false;
+  }
+
+  async function createBackup() {
+    backupCreating = true;
+    try {
+      const data = await api<{items:BackupItem[]; name:string}>('/backups/create', json({ name: backupName.trim() || null }));
+      backups = data.items || [];
+      backupName = '';
+      notice = `Backup ${data.name} criado.`;
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao criar backup.';
+    }
+    backupCreating = false;
+  }
+
+  async function confirmDeleteBackup(name: string) {
+    try {
+      await api('/backups/delete', json({ name }));
+      backupPendingDelete = '';
+      backups = backups.filter(item => item.name !== name);
+      notice = 'Backup excluído.';
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao excluir backup.';
+    }
+  }
+
+  function downloadBackup(name: string) {
+    const anchor = document.createElement('a');
+    anchor.href = `/api/backups/download?name=${encodeURIComponent(name)}`;
+    anchor.download = name;
+    anchor.click();
+  }
+
+  function setContentSource(source:'modrinth'|'curseforge') {
+    contentSource = source;
+    catalogCategory = 'all';
+    results = [];
+    catalogSelected.clear();
+    catalogDetail = null;
+    if (catalogOpen) runCatalogSearch();
+  }
+
+  async function searchModpacks() {
+    const requestId = ++modpackRequest;
+    modpackLoading = true;
+    modpackError = '';
+    modpackSelected = null;
+    modpackVersions = [];
+    modpackVersion = '';
+    try {
+      const data = await api<{hits:ContentResult[]}>('/modpacks/search', json({
+        query: modpackQuery,
+        source: modpackSource,
+        version: modpackVersionFilter,
+        loader: modpackLoaderFilter,
+        limit: 24,
+      }));
+      if (requestId !== modpackRequest) return;
+      modpackResults = data.hits || [];
+    } catch(e) {
+      if (requestId !== modpackRequest) return;
+      modpackError = e instanceof Error ? e.message : 'Falha ao buscar modpacks.';
+      modpackResults = [];
+    }
+    modpackLoading = false;
+  }
+
+  function setModpackSource(source:'modrinth'|'curseforge') {
+    modpackSource = source;
+    modpackResults = [];
+    modpackSelected = null;
+    modpackVersions = [];
+    modpackVersion = '';
+    searchModpacks();
+  }
+
+  async function openModpack(item:ContentResult) {
+    const requestId = ++modpackVersionRequest;
+    modpackSelected = item;
+    modpackVersions = [];
+    modpackVersionsLoading = true;
+    modpackVersion = '';
+    try {
+      const params = new URLSearchParams({
+        project_id: item.project_id,
+        source: item.source || modpackSource,
+        version: modpackVersionFilter,
+        loader: modpackLoaderFilter,
+      });
+      const versions = await api<ModVersion[]>(`/modpacks/versions?${params}`);
+      if (requestId !== modpackVersionRequest) return;
+      modpackVersions = versions;
+      modpackVersion = versions[0]?.id || '';
+    } catch(e) {
+      if (requestId !== modpackVersionRequest) return;
+      notice = e instanceof Error ? e.message : 'Falha ao listar versões do modpack.';
+    }
+    modpackVersionsLoading = false;
+  }
+
+  async function installModpack() {
+    if (!modpackSelected) return;
+    if (!setup.server_name.trim() || !setup.server_dir.trim()) {
+      notice = 'Informe o nome e a pasta do servidor antes de instalar o modpack.';
+      return;
+    }
+    modpackInstalling = true;
+    notice = '';
+    try {
+      server = await api<Server>('/modpacks/install', json({
+        source: modpackSelected.source || modpackSource,
+        project_id: modpackSelected.project_id,
+        version_id: modpackVersion || undefined,
+        server_name: setup.server_name,
+        server_dir: setup.server_dir,
+        memory_limit_gb: setup.memory_limit_gb,
+        accept_eula: modpackAcceptEula,
+      }));
+      contentVersion = server.version || contentVersion;
+      contentLoader = server.loader !== 'vanilla' ? server.loader : contentLoader;
+      activeTab = 'overview';
+      notice = modpackAcceptEula
+        ? 'Modpack instalado e EULA aceita. Você já pode iniciar o servidor.'
+        : 'Modpack instalado. Aceite o EULA antes de iniciar.';
+      await loadServers();
+      await loadContent();
+    } catch(e) {
+      notice = e instanceof Error ? e.message : 'Falha ao instalar o modpack.';
+    }
+    modpackInstalling = false;
+  }
+
+  function setSetupMode(mode:'manual'|'modpack') {
+    setupMode = mode;
+    if (mode === 'modpack' && modpackResults.length === 0 && !modpackLoading) {
+      searchModpacks();
+    }
+  }
+
   function formatBytes(n:number) {
     return n < 1024*1024
       ? `${Math.max(1,Math.round(n/1024))} KB`
@@ -604,8 +864,14 @@
   }
 
   $: if (activeTab === 'content') loadContent();
-  $: if (contentKind || contentVersion || contentLoader) results = [];
+  $: if (contentKind || contentVersion || contentLoader || contentSource) {
+    results = [];
+    catalogDetail = null;
+    catalogSelected.clear();
+  }
   $: if (activeTab === 'config' && !e4status) checkE4all();
+  $: if (activeTab === 'config' && !cfStatus && !cfChecking) checkCurseForge();
+  $: if (activeTab === 'config' && !backupsLoaded && !backupsLoading) loadBackups();
 
   onMount(() => {
     refresh();
@@ -685,13 +951,21 @@
         </p>
       </div>
       <div class="header-actions">
-        <button class="icon-button">◔</button>
-        <button class="help">? <span>Ajuda</span></button>
+        <button class="icon-button" title="Atualizar estado" on:click={async()=>{await refresh(); await loadServers();}}>↻</button>
+        <button class="help" on:click={()=>helpOpen=true}>? <span>Ajuda</span></button>
       </div>
     </header>
 
-    {#if notice}<div class="notice">{notice}</div>{/if}
+    {#if notice}
+      <div class="notice">
+        <span>{notice}</span>
+        <button class="notice-close" title="Dispensar" on:click={()=>notice=''}>✕</button>
+      </div>
+    {/if}
     {#if saved}<div class="notice success-notice">Configuração salva.</div>{/if}
+    {#if server.installing}
+      <div class="install-banner"><div class="spinner"></div> Instalação em andamento. Acompanhe os detalhes no console.</div>
+    {/if}
 
     {#if activeTab==='overview'}
       {#if !server.installed}
@@ -711,20 +985,24 @@
         <div class="hero">
           <div class="hero-copy">
             <div class="eyebrow">
-              <span class:online={server.status==='online'} class="status-dot"></span>
-              {server.status==='online'?'SERVIDOR ONLINE':'SERVIDOR OFFLINE'}
+              <span class:online={server.status==='online'} class:stopping={server.status==='stopping'} class="status-dot"></span>
+              {server.status==='online'?'SERVIDOR ONLINE':server.status==='stopping'?'SERVIDOR PARANDO':'SERVIDOR OFFLINE'}
             </div>
             <h2>{server.server_name}</h2>
-            <p>Minecraft Java Edition · {server.version || 'sem versão instalada'}</p>
+            <p>Minecraft Java Edition · {server.version || 'sem versão instalada'} · {server.loader}</p>
           </div>
           <div class="orb"><div class="orb-inner">☾</div><i></i><i></i></div>
 
           <div class="hero-bottom">
             <div class="hero-actions">
-              <button class="primary" on:click={toggleServer} disabled={loading}>
-                {loading?'CARREGANDO...':server.status==='online'?'PARAR SERVIDOR':'INICIAR SERVIDOR'} <span>→</span>
+              <button class="primary" on:click={toggleServer} disabled={loading || server.installing || server.status==='stopping'}>
+                {server.installing ? 'INSTALANDO...' : loading ? 'CARREGANDO...' : server.status==='online' ? 'PARAR SERVIDOR' : server.status==='stopping' ? 'PARANDO...' : 'INICIAR SERVIDOR'} <span>→</span>
               </button>
-              <button class="secondary" on:click={acceptEula}>ACEITAR EULA</button>
+              {#if !server.eula_accepted}
+                <button class="secondary" on:click={acceptEula}>ACEITAR EULA</button>
+              {:else}
+                <span class="eula-ok">✓ EULA aceita</span>
+              {/if}
               <button class="secondary" on:click={()=>activeTab='setup'}>＋ Nova instalação</button>
               <button class="secondary danger-outline" on:click={openDelete}>EXCLUIR SERVIDOR</button>
             </div>
@@ -777,10 +1055,10 @@
             <div class="card-head">
               <div><h3>Ações rápidas</h3><p>Atalhos de administração</p></div>
             </div>
-            <button class="quick" on:click={toggleServer} disabled={loading}>
+            <button class="quick" on:click={toggleServer} disabled={loading || server.installing || server.status==='stopping'}>
               <span class="q-icon">{server.status==='online'?'■':'▶'}</span>
-              <div><b>{server.status==='online'?'Parar':'Iniciar'} servidor</b>
-                <small>Controle seguro do processo Java</small></div>
+              <div><b>{server.status==='online'?'Parar':server.status==='stopping'?'Parando':'Iniciar'} servidor</b>
+                <small>{server.installing ? 'Instalação em andamento' : 'Controle seguro do processo Java'}</small></div>
               <span>›</span>
             </button>
             <button class="quick" on:click={()=>activeTab='content'}>
@@ -825,6 +1103,19 @@
             </button>
           {/each}
         </div>
+
+        <div class="source-switch">
+          <button class:active={contentSource==='modrinth'} on:click={()=>setContentSource('modrinth')}>Modrinth</button>
+          <button class:active={contentSource==='curseforge'} on:click={()=>setContentSource('curseforge')}>CurseForge</button>
+          <span class="source-hint">
+            {contentSource==='curseforge'
+              ? (cfStatus?.message || 'Proxy público do CurseForge')
+              : 'Catálogo oficial do Modrinth'}
+          </span>
+        </div>
+        {#if contentSource==='curseforge' && contentKind==='datapacks'}
+          <div class="inline-warning">O CurseForge não oferece datapacks. Troque para o Modrinth para gerenciar datapacks.</div>
+        {/if}
 
         <div class="content-filters">
           <label>
@@ -884,7 +1175,10 @@
                   {/if}
                 </div>
                 <div class="installed-meta">
-                  <b title={file.title || file.filename}>{file.title || file.filename}</b>
+                  <b title={file.title || file.filename}>
+                    {file.title || file.filename}
+                    {#if file.source === 'curseforge'}<span class="source-badge cf">CurseForge</span>{/if}
+                  </b>
                   <small>{#if file.installed_version}Versão: {file.installed_version} · {/if}{formatBytes(file.size)} · {file.filename}</small>
                 </div>
               </div>
@@ -893,7 +1187,7 @@
 
           {#if selectedItems.size > 0}
             <div class="bulk-actions">
-              <button class="danger" on:click={deleteSelectedContent}>
+              <button class="danger" on:click={openContentDelete}>
                 Remover {selectedItems.size} arquivo(s) selecionado(s)
               </button>
             </div>
@@ -913,9 +1207,14 @@
             </div>
 
             <div class="catalog-search-container">
+              <div class="source-switch compact">
+                <button class:active={contentSource==='modrinth'} on:click={()=>setContentSource('modrinth')}>Modrinth</button>
+                <button class:active={contentSource==='curseforge'} on:click={()=>setContentSource('curseforge')}>CurseForge</button>
+                <span class="source-hint">{contentSource==='curseforge' ? (cfStatus?.message || 'Proxy público do CurseForge') : 'Catálogo oficial'}</span>
+              </div>
               <div class="catalog-search">
                 <input bind:value={catalogQuery}
-                       placeholder="Pesquisar no Modrinth (ex.: sodium, worldedit)..."
+                       placeholder={contentSource==='curseforge' ? 'Pesquisar no CurseForge (ex.: jei, create)...' : 'Pesquisar no Modrinth (ex.: sodium, worldedit)...'}
                        on:keydown={(e)=>e.key==='Enter'&&runCatalogSearch()}/>
                 <button class="secondary" on:click={() => showCatalogFilters = !showCatalogFilters} title="Filtros Avançados">⚙ Filtros</button>
                 <button class="primary" on:click={() => runCatalogSearch()} disabled={catalogLoading || !contentVersion}>
@@ -925,22 +1224,26 @@
 
               {#if showCatalogFilters}
                 <div class="catalog-advanced-filters">
-                  <label>
-                    Categoria
-                    <select bind:value={catalogCategory} on:change={() => runCatalogSearch()}>
-                      <option value="all">Todas as categorias</option>
-                      <option value="adventure">Aventura</option>
-                      <option value="exploration">Exploração</option>
-                      <option value="worldgen">Geração de Mundo</option>
-                      <option value="magic">Magia</option>
-                      <option value="technology">Tecnologia</option>
-                      <option value="decoration">Decoração</option>
-                      <option value="equipment">Equipamentos</option>
-                      <option value="optimization">Otimização</option>
-                      <option value="utility">Utilidades</option>
-                      <option value="library">Biblioteca (APIs)</option>
-                    </select>
-                  </label>
+                  {#if contentSource === 'modrinth'}
+                    <label>
+                      Categoria
+                      <select bind:value={catalogCategory} on:change={() => runCatalogSearch()}>
+                        <option value="all">Todas as categorias</option>
+                        <option value="adventure">Aventura</option>
+                        <option value="exploration">Exploração</option>
+                        <option value="worldgen">Geração de Mundo</option>
+                        <option value="magic">Magia</option>
+                        <option value="technology">Tecnologia</option>
+                        <option value="decoration">Decoração</option>
+                        <option value="equipment">Equipamentos</option>
+                        <option value="optimization">Otimização</option>
+                        <option value="utility">Utilidades</option>
+                        <option value="library">Biblioteca (APIs)</option>
+                      </select>
+                    </label>
+                  {:else}
+                    <span class="source-hint">O CurseForge filtra automaticamente por versão e modloader.</span>
+                  {/if}
                 </div>
               {/if}
             </div>
@@ -948,9 +1251,9 @@
             {#if catalogError}<div class="notice">{catalogError}</div>{/if}
 
             {#if catalogLoading}
-              <div class="catalog-loading"><div class="spinner"></div> Consultando Modrinth…</div>
+              <div class="catalog-loading"><div class="spinner"></div> Consultando {contentSource === 'curseforge' ? 'CurseForge' : 'Modrinth'}…</div>
             {:else if results.length===0}
-              <div class="empty">Nenhum resultado para <b>{contentVersion}</b> em <b>{contentLoader}</b>.</div>
+              <div class="empty">Nenhum resultado para <b>{contentVersion}</b> em <b>{contentLoader}</b> na fonte <b>{contentSource === 'curseforge' ? 'CurseForge' : 'Modrinth'}</b>.</div>
             {:else}
               <div class="catalog-grid" bind:this={catalogScroll}>
                 {#each results as item}
@@ -958,9 +1261,9 @@
                        class:selected={catalogSelected.has(item.project_id)}
                        class:installed={isInstalled(item.project_id)}
                        role="button" tabindex="0"
-                       on:click={() => !isInstalled(item.project_id) && (catalogDetail=item, loadModVersions(item.project_id))}
+                       on:click={() => !isInstalled(item.project_id) && (catalogDetail=item, loadModVersions(item.project_id, item.source))}
                        on:dblclick|stopPropagation={() => toggleCatalogSelection(item)}
-                       on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&!isInstalled(item.project_id)&&(catalogDetail=item, loadModVersions(item.project_id))}>
+                       on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&!isInstalled(item.project_id)&&(catalogDetail=item, loadModVersions(item.project_id, item.source))}>
                     {#if !isInstalled(item.project_id)}
                       <input type="checkbox" class="item-checkbox"
                              checked={catalogSelected.has(item.project_id)}
@@ -971,9 +1274,9 @@
                       {:else}<span>{item.title.slice(0,1).toUpperCase()}</span>{/if}
                     </div>
                     <div class="catalog-text">
-                      <b>{item.title}</b>
-                      <small>{item.description || 'Projeto Modrinth'}</small>
-                      <span class="catalog-downloads">⇩ {item.downloads.toLocaleString('pt-BR')}</span>
+                      <b>{item.title} <span class="source-badge" class:cf={item.source==='curseforge'}>{item.source === 'curseforge' ? 'CF' : 'MR'}</span></b>
+                      <small>{item.description || `Projeto ${item.source === 'curseforge' ? 'CurseForge' : 'Modrinth'}`}</small>
+                      <span class="catalog-downloads">⇩ {item.downloads.toLocaleString('pt-BR')}{#if item.author} · por {item.author}{/if}</span>
                     </div>
                     {#if isInstalled(item.project_id)}
                       <span class="installed-badge">Já instalado</span>
@@ -992,9 +1295,9 @@
                     {:else}<span>{catalogDetail.title.slice(0,1).toUpperCase()}</span>{/if}
                   </div>
                   <div>
-                    <h4>{catalogDetail.title}</h4>
+                    <h4>{catalogDetail.title} <span class="source-badge" class:cf={catalogDetail.source==='curseforge'}>{catalogDetail.source === 'curseforge' ? 'CF' : 'MR'}</span></h4>
                     {#if catalogDetail.version_number}<small class="version-tag">Versão: {catalogDetail.version_number}</small>{/if}
-                    <small>{catalogDetail.downloads.toLocaleString('pt-BR')} downloads</small>
+                    <small>{catalogDetail.downloads.toLocaleString('pt-BR')} downloads{#if catalogDetail.author} · por {catalogDetail.author}{/if}</small>
                   </div>
                   <button class="modal-close" on:click={()=>{catalogDetail=null; modVersions=[];}}>✕</button>
                 </div>
@@ -1002,7 +1305,7 @@
 
                 {#if modVersions.length > 0}
                   <div class="version-picker">
-                    <label for="content-version-select">Selecionar versão do mod</label>
+                    <label for="content-version-select">Selecionar versão do projeto</label>
                     <select id="content-version-select" bind:value={selectedModVersion} on:change={()=>catalogDetail && (selectedModVersions={...selectedModVersions,[catalogDetail.project_id]:selectedModVersion})}>
                       {#each modVersions as v}
                         <option value={v.id}>{v.version_number} ({v.game_versions.join(', ')})</option>
@@ -1016,7 +1319,7 @@
                   <button class="primary"
                           on:click={async () => {
                             if (catalogDetail) {
-                              await installContent(catalogDetail.project_id, selectedModVersion);
+                              await installContent(catalogDetail.project_id, selectedModVersion, catalogDetail.source || contentSource);
                               catalogDetail=null;
                               modVersions=[];
                             }
@@ -1028,7 +1331,7 @@
             {/if}
 
             <div class="modal-footer-batch">
-              <span>{catalogSelected.size} mod(s) selecionado(s)</span>
+              <span>{catalogSelected.size} item(ns) selecionado(s)</span>
               <button class="primary" on:click={installBatch} disabled={catalogSelected.size === 0 || installingBatch}>
                 {installingBatch ? 'Instalando...' : 'Instalar Selecionados'}
               </button>
@@ -1048,8 +1351,21 @@
         <div class="form-grid">
           <label>Nome do servidor<input bind:value={server.server_name}/></label>
           <label>Versão atual<input bind:value={server.version}/></label>
+          <label>
+            Tipo / modloader
+            <select bind:value={server.loader}>
+              <option value="vanilla">Vanilla</option>
+              <option value="paper">Paper</option>
+              <option value="purpur">Purpur</option>
+              <option value="fabric">Fabric</option>
+              <option value="forge">Forge</option>
+              <option value="neoforge">NeoForge</option>
+              <option value="quilt">Quilt</option>
+            </select>
+          </label>
           <label>Pasta do servidor<input bind:value={server.server_dir}/></label>
           <label>Memória (GB)<input type="number" min="1" max="64" bind:value={server.memory_limit_gb}/></label>
+          <label>Executável do Java<input bind:value={server.java_path} placeholder="java"/></label>
         </div>
         <div class="java-check">
           <span class:ok={server.java_detected}>●</span>
@@ -1059,6 +1375,82 @@
           </div>
         </div>
         <button class="primary" on:click={saveConfig}>SALVAR CONFIGURAÇÃO <span>→</span></button>
+      </section>
+
+      <section class="settings-card">
+        <div class="card-head">
+          <div><h3>CurseForge</h3><p>Use o proxy público ou informe uma chave oficial da API.</p></div>
+          <span class="mod-badge">CURSEFORGE</span>
+        </div>
+        <div class="cf-status-line">
+          <span class="status-dot" class:online={cfStatus?.ok}></span>
+          <span>
+            {#if cfChecking}
+              Verificando conexão…
+            {:else if cfStatus}
+              {cfStatus.mode === 'official' ? 'API oficial' : 'Proxy público'} · {cfStatus.configured ? 'chave configurada' : 'sem chave'} · {cfStatus.ok ? 'disponível' : 'indisponível'}
+            {:else}
+              Status não verificado
+            {/if}
+          </span>
+          <button class="secondary" on:click={checkCurseForge} disabled={cfChecking}>Verificar</button>
+        </div>
+        {#if cfStatus?.message}<div class="cf-status-message">{cfStatus.message}</div>{/if}
+        <div class="cf-key-row">
+          <input type="password" bind:value={cfKey}
+                 placeholder={server.curseforge_configured ? 'Chave salva — informe outra para substituir' : 'Cole sua API key oficial (opcional)'}/>
+          <button class="primary" on:click={()=>saveCurseForgeKey(false)} disabled={cfSaving || !cfKey.trim()}>
+            {cfSaving ? 'VALIDANDO...' : 'VALIDAR E SALVAR'}
+          </button>
+          {#if server.curseforge_configured}
+            <button class="secondary" on:click={()=>saveCurseForgeKey(true)} disabled={cfSaving}>REMOVER CHAVE</button>
+          {/if}
+        </div>
+        <p class="field-hint">Sem chave, o painel usa api.curse.tools. A chave oficial evita limites do proxy e é armazenada apenas no config local.</p>
+      </section>
+
+      <section class="settings-card">
+        <div class="card-head">
+          <div><h3>Backups</h3><p>Cópias ZIP da pasta do servidor, sem logs, bibliotecas e arquivos baixáveis.</p></div>
+          <button class="secondary" on:click={()=>loadBackups(true)} disabled={backupsLoading}>
+            {backupsLoading ? 'Carregando...' : 'Atualizar'}
+          </button>
+        </div>
+        <div class="backup-create">
+          <input bind:value={backupName} placeholder="Nome opcional (padrão: data e hora)"/>
+          <button class="primary" on:click={createBackup}
+                  disabled={backupCreating || server.installing || server.status !== 'offline'}>
+            {backupCreating ? 'CRIANDO...' : 'CRIAR BACKUP'}
+          </button>
+        </div>
+        {#if server.status !== 'offline' || server.installing}
+          <div class="inline-warning">Pare o servidor e aguarde instalações terminarem para criar um backup consistente.</div>
+        {/if}
+        {#if backupsLoading}
+          <div class="catalog-loading"><div class="spinner"></div> Lendo backups…</div>
+        {:else if backups.length === 0}
+          <div class="empty">Nenhum backup encontrado.</div>
+        {:else}
+          <div class="backup-list">
+            {#each backups as backup (backup.name)}
+              <div class="backup-row">
+                <div>
+                  <b>{backup.name}</b>
+                  <small>{backup.created} · {formatBytes(backup.size)}</small>
+                </div>
+                <div class="backup-actions">
+                  {#if backupPendingDelete === backup.name}
+                    <button class="danger" on:click={()=>confirmDeleteBackup(backup.name)}>CONFIRMAR</button>
+                    <button class="secondary" on:click={()=>backupPendingDelete=''}>CANCELAR</button>
+                  {:else}
+                    <button class="secondary" on:click={()=>downloadBackup(backup.name)}>BAIXAR</button>
+                    <button class="secondary danger-outline" on:click={()=>backupPendingDelete=backup.name}>EXCLUIR</button>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </section>
 
       <section class="settings-card">
@@ -1337,15 +1729,26 @@
         <div class="card-head">
           <div>
             <h3>Instalação inicial do servidor</h3>
-            <p>Escolha a versão do Minecraft, o tipo de servidor e a pasta. O ShadowPainel baixa e prepara os arquivos automaticamente.</p>
+            <p>Instale manualmente ou aplique um modpack completo do Modrinth ou do CurseForge.</p>
           </div>
           <span class="mod-badge">ASSISTENTE</span>
         </div>
 
+        <div class="setup-modes">
+          <button class:active={setupMode==='manual'} on:click={()=>setSetupMode('manual')}>
+            <b>Instalação manual</b>
+            <small>Escolha versão, loader e pasta</small>
+          </button>
+          <button class:active={setupMode==='modpack'} on:click={()=>setSetupMode('modpack')}>
+            <b>Modpack</b>
+            <small>Mods, configurações e loader de uma vez</small>
+          </button>
+        </div>
+
         <div class="setup-steps">
-          <span class="current">1. Identidade</span>
-          <span>2. Versão e loader</span>
-          <span>3. Conteúdo filtrado por versão</span>
+          <span class="current">1. Identidade e pasta</span>
+          <span>2. {setupMode==='manual' ? 'Versão e loader' : 'Escolha do modpack'}</span>
+          <span>3. Instalação automática</span>
         </div>
 
         <div class="form-grid">
@@ -1359,42 +1762,199 @@
             <input bind:value={setup.server_dir}/>
             <small style="color: var(--faint); font-size: 11px; margin-top: 4px;">Onde os arquivos do mundo serão salvos. Use o caminho completo.</small>
           </label>
-          <label>
-            Versão do Minecraft
-            <select bind:value={setupVersion}>
-              {#each versions as version}
-                <option value={version.id}>{version.id}</option>
-              {/each}
-            </select>
-          </label>
-          <label>
-            Tipo / modloader
-            <select bind:value={setup.loader}>
-              <option value="vanilla">Vanilla — servidor oficial (recomendado para iniciantes)</option>
-              <option value="fabric">Fabric — para usar mods</option>
-              <option value="paper">Paper — para usar plugins (melhor desempenho)</option>
-              <option value="purpur">Purpur — plugins + customizações</option>
-            </select>
-          </label>
           <label>Memória inicial (GB)
             <input type="number" min="1" max="64" bind:value={setup.memory_limit_gb}/>
           </label>
         </div>
 
-        <div class="setup-note">
-          <b>Depois da instalação</b>
-          <span>Você poderá administrar mods, plugins e datapacks na área de conteúdo, com busca por versão no Modrinth.</span>
-        </div>
+        {#if setupMode === 'manual'}
+          <div class="form-grid">
+            <label>
+              Versão do Minecraft
+              <select bind:value={setupVersion}>
+                {#each versions as version}
+                  <option value={version.id}>{version.id}</option>
+                {/each}
+              </select>
+            </label>
+            <label>
+              Tipo / modloader
+              <select bind:value={setup.loader}>
+                <option value="vanilla">Vanilla — servidor oficial (recomendado para iniciantes)</option>
+                <option value="fabric">Fabric — para usar mods</option>
+                <option value="forge">Forge — mods clássicos</option>
+                <option value="neoforge">NeoForge — mods modernos</option>
+                <option value="quilt">Quilt — variante do Fabric</option>
+                <option value="paper">Paper — para usar plugins (melhor desempenho)</option>
+                <option value="purpur">Purpur — plugins + customizações</option>
+              </select>
+            </label>
+          </div>
 
-        <button class="primary" on:click={createServer} disabled={loading || !setupVersion}>
-          {#if loading}
-            <span class="spinner" style="width: 14px; height: 14px; border-width: 2px; margin-right: 8px;"></span>
-            BAIXANDO ARQUIVOS...
+          <div class="setup-note">
+            <b>Depois da instalação</b>
+            <span>Você poderá administrar mods, plugins e datapacks na área de conteúdo, escolhendo entre Modrinth e CurseForge.</span>
+          </div>
+
+          <button class="primary" on:click={createServer} disabled={loading || !setupVersion || server.installing}>
+            {#if loading}
+              <span class="spinner" style="width: 14px; height: 14px; border-width: 2px; margin-right: 8px;"></span>
+              BAIXANDO ARQUIVOS...
+            {:else}
+              INSTALAR E ABRIR PAINEL <span>→</span>
+            {/if}
+          </button>
+        {:else}
+          <div class="settings-subhead"><h4>Buscar modpack</h4><p>O instalador baixa o pacote, aplica overrides, instala o loader e prepara o EULA.</p></div>
+
+          <div class="source-switch">
+            <button class:active={modpackSource==='modrinth'} on:click={()=>setModpackSource('modrinth')}>Modrinth</button>
+            <button class:active={modpackSource==='curseforge'} on:click={()=>setModpackSource('curseforge')}>CurseForge</button>
+            <span class="source-hint">{modpackSource === 'curseforge' ? 'Proxy público ou chave oficial' : 'Catálogo oficial do Modrinth'}</span>
+          </div>
+
+          <div class="modpack-filters">
+            <input bind:value={modpackQuery} placeholder="Buscar modpack (ex.: RLCraft, Fabulously Optimized)"
+                   on:keydown={(e)=>e.key==='Enter'&&searchModpacks()}/>
+            <select bind:value={modpackVersionFilter}>
+              <option value="">Todas as versões</option>
+              {#each versions as version}<option value={version.id}>{version.id}</option>{/each}
+            </select>
+            <select bind:value={modpackLoaderFilter}>
+              <option value="">Todos os loaders</option>
+              <option value="fabric">Fabric</option>
+              <option value="forge">Forge</option>
+              <option value="neoforge">NeoForge</option>
+              <option value="quilt">Quilt</option>
+            </select>
+            <button class="primary" on:click={searchModpacks} disabled={modpackLoading || server.installing}>
+              {modpackLoading ? 'BUSCANDO...' : 'BUSCAR'}
+            </button>
+          </div>
+
+          {#if modpackError}<div class="inline-warning">{modpackError}</div>{/if}
+
+          {#if modpackLoading}
+            <div class="catalog-loading"><div class="spinner"></div> Consultando {modpackSource === 'curseforge' ? 'CurseForge' : 'Modrinth'}…</div>
+          {:else if modpackResults.length === 0}
+            <div class="empty">Nenhum modpack encontrado. Faça uma busca ou ajuste os filtros.</div>
           {:else}
-            INSTALAR E ABRIR PAINEL <span>→</span>
+            <div class="modpack-list">
+              {#each modpackResults as item (item.project_id)}
+                <button class="modpack-card" class:selected={modpackSelected?.project_id === item.project_id}
+                        on:click={()=>openModpack(item)} disabled={modpackInstalling || server.installing}>
+                  <div class="catalog-icon">
+                    {#if item.icon_url}<img src={item.icon_url} alt="" loading="lazy"/>
+                    {:else}<span>{item.title.slice(0,1).toUpperCase()}</span>{/if}
+                  </div>
+                  <div>
+                    <b>{item.title} <span class="source-badge" class:cf={item.source==='curseforge'}>{item.source === 'curseforge' ? 'CF' : 'MR'}</span></b>
+                    <small>{item.description || 'Modpack'}</small>
+                    <span class="catalog-downloads">⇩ {(item.downloads || 0).toLocaleString('pt-BR')}{#if item.author} · por {item.author}{/if}</span>
+                  </div>
+                </button>
+              {/each}
+            </div>
           {/if}
-        </button>
+
+          {#if modpackSelected}
+            <div class="modpack-detail">
+              <div class="modpack-detail-head">
+                <div>
+                  <b>{modpackSelected.title}</b>
+                  <small>{modpackSelected.description || 'Modpack selecionado'}</small>
+                </div>
+                <span class="source-badge" class:cf={modpackSelected.source==='curseforge'}>{modpackSelected.source === 'curseforge' ? 'CURSEFORGE' : 'MODRINTH'}</span>
+              </div>
+
+              {#if modpackVersionsLoading}
+                <div class="catalog-loading"><div class="spinner"></div> Carregando versões…</div>
+              {:else if modpackVersions.length > 0}
+                <label class="modpack-version">
+                  Versão do modpack
+                  <select bind:value={modpackVersion}>
+                    {#each modpackVersions as v}
+                      <option value={v.id}>{v.version_number}{#if v.game_versions?.length} · {v.game_versions.join(', ')}{/if}{#if v.loaders?.length} · {v.loaders.join(', ')}{/if}</option>
+                    {/each}
+                  </select>
+                </label>
+              {:else}
+                <div class="inline-warning">Nenhuma versão compatível com os filtros. A instalação usará a versão mais recente disponível.</div>
+              {/if}
+
+              <label class="check-label modpack-eula">
+                <span><input type="checkbox" bind:checked={modpackAcceptEula}/>Aceitar o EULA do Minecraft durante a instalação.</span>
+                <small>Se não marcar, aceite depois na tela inicial antes de iniciar o servidor.</small>
+              </label>
+
+              <button class="primary" on:click={installModpack}
+                      disabled={modpackInstalling || server.installing || modpackVersionsLoading || !setup.server_name.trim() || !setup.server_dir.trim()}>
+                {#if modpackInstalling || server.installing}
+                  <span class="spinner" style="width: 14px; height: 14px; border-width: 2px; margin-right: 8px;"></span>
+                  INSTALANDO MODPACK...
+                {:else}
+                  INSTALAR MODPACK <span>→</span>
+                {/if}
+              </button>
+            </div>
+          {/if}
+
+          <div class="setup-note">
+            <b>Como funciona</b>
+            <span>O servidor é criado na pasta informada. Se o modpack tiver server pack, ele é usado; caso contrário, os mods do manifesto são baixados no servidor. O EULA só é gravado se você marcar a opção acima.</span>
+          </div>
+        {/if}
       </section>
+    {/if}
+
+    {#if contentDeleteOpen}
+      <div class="modal-overlay" role="presentation" on:click|self={()=>!deletingContent&&(contentDeleteOpen=false)} on:keydown={(e)=>e.key==='Escape'&&!deletingContent&&(contentDeleteOpen=false)}>
+        <div class="modal danger-modal">
+          <div class="modal-head">
+            <div>
+              <h3>Remover conteúdo</h3>
+              <p>Os arquivos selecionados serão apagados de <b>{contentKind}/</b>.</p>
+            </div>
+            <button class="modal-close" on:click={()=>contentDeleteOpen=false} disabled={deletingContent}>✕</button>
+          </div>
+          <div class="danger-summary">
+            <div><span>Arquivos</span><b>{selectedItems.size}</b></div>
+            <div><span>Tipo</span><b>{contentKind}</b></div>
+          </div>
+          <p class="danger-warning">Esta ação não pode ser desfeita.</p>
+          <div class="modal-actions">
+            <button class="secondary" on:click={()=>contentDeleteOpen=false} disabled={deletingContent}>Cancelar</button>
+            <button class="danger" on:click={deleteSelectedContent} disabled={deletingContent}>
+              {deletingContent ? 'REMOVENDO...' : 'REMOVER DEFINITIVAMENTE'}
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if helpOpen}
+      <div class="modal-overlay" role="presentation" on:click|self={()=>helpOpen=false} on:keydown={(e)=>e.key==='Escape'&&(helpOpen=false)}>
+        <div class="modal help-modal">
+          <div class="modal-head">
+            <div>
+              <h3>Como usar o ShadowPainel</h3>
+              <p>Guia rápido das áreas principais.</p>
+            </div>
+            <button class="modal-close" on:click={()=>helpOpen=false}>✕</button>
+          </div>
+          <div class="help-grid">
+            <div><b>Visão geral</b><p>Inicie, pare e acompanhe o console do servidor ativo. O EULA precisa ser aceito antes do primeiro início.</p></div>
+            <div><b>Conteúdo</b><p>Instale mods, plugins e datapacks pelo Modrinth ou CurseForge. A versão e o loader vêm do servidor ativo.</p></div>
+            <div><b>Configurações</b><p>Ajuste memória, Java, server.properties, CurseForge, e4all e backups. Backups exigem o servidor parado.</p></div>
+            <div><b>Criar servidor</b><p>Use a instalação manual ou escolha um modpack. O painel baixa arquivos, aplica overrides e configura o loader.</p></div>
+            <div><b>CurseForge</b><p>Sem chave, o painel usa o proxy api.curse.tools. Uma chave oficial pode ser validada e salva nas configurações.</p></div>
+            <div><b>Segurança</b><p>Exclusões de servidor, conteúdo e backups pedem confirmação. O fechamento do app solicita o desligamento do servidor.</p></div>
+          </div>
+          <div class="modal-actions">
+            <button class="primary" on:click={()=>helpOpen=false}>ENTENDI</button>
+          </div>
+        </div>
+      </div>
     {/if}
 
     {#if deleteOpen}

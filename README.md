@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-0.7.2-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/version-0.8.0-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
 <img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
 <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
 <img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
@@ -24,7 +24,9 @@ aplicativo**, sem navegador externo.
 | | Recurso | Descrição |
 |---|---|---|
 | 🚀 | **Criar o servidor do zero** | Baixe o `server.jar` da versão desejada e aceite a EULA direto pelo painel. |
-| 🧩 | **Instalar mods do Modrinth** | Busque, filtre por versão/loader e instale mods direto na pasta `mods`. |
+| 🧩 | **Mods do Modrinth e CurseForge** | Busque, filtre por versão/loader e instale mods ou plugins das duas fontes. |
+| 📦 | **Instalar modpacks** | Aplique modpacks completos do Modrinth ou CurseForge, com overrides e loader automáticos. |
+| 💾 | **Backups** | Crie, baixe e exclua backups ZIP do servidor sem sair do painel. |
 | 📦 | **Instalar em lote** | Selecione vários projetos e instale todos de uma vez com um clique. |
 | 🖱️ | **Seleção por duplo clique** | Dê duplo clique no nome de um projeto ou arquivo instalado para selecioná-lo; o item fica destacado para ações em lote. |
 | ♾️ | **Catálogo com scroll infinito** | Ao chegar ao fim da janela de resultados, mais mods, plugins ou datapacks são carregados automaticamente. |

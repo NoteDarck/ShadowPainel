@@ -1,4 +1,5 @@
 use axum::{
+    body::Body,
     extract::{Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
@@ -13,8 +14,9 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
     fs,
+    io::Read,
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Stdio,
     sync::Arc,
     time::Duration,
@@ -23,14 +25,32 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{oneshot, Mutex},
+    sync::{oneshot, Mutex, Semaphore},
+    task::JoinSet,
 };
 use tower_http::services::ServeDir;
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.7.9";
+const APP_VERSION: &str = "0.8.0";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+const PACK_DOWNLOAD_CONCURRENCY: usize = 4;
+const PACK_INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// Id do Minecraft no CurseForge.
+const CF_GAME_ID: &str = "432";
+
+/// Classes usadas pelo catálogo do CurseForge.
+const CF_CLASS_MODS: &str = "6";
+const CF_CLASS_PLUGINS: &str = "5";
+const CF_CLASS_MODPACKS: &str = "4471";
+
+/// API oficial do CurseForge. Exige uma chave de API no cabeçalho `x-api-key`.
+const CF_OFFICIAL_BASE: &str = "https://api.curseforge.com/v1";
+
+/// Proxy público que expõe o mesmo contrato da API v1 do CurseForge, sem exigir chave.
+const CF_PROXY_BASE: &str = "https://api.curse.tools/v1/cf";
 
 type ApiErr = (StatusCode, Json<Value>);
 type ApiResult = Result<Json<View>, ApiErr>;
@@ -104,9 +124,11 @@ impl Default for E4allConfig {
 struct Config {
     server_name: String,
     version: String,
+    loader: String,
     server_dir: String,
     memory_limit_gb: u64,
     java_path: String,
+    curseforge_api_key: String,
     e4all: E4allConfig,
 }
 
@@ -118,9 +140,11 @@ impl Default for Config {
         Self {
             server_name: "Sobrevivência principal".into(),
             version: "1.21.1".into(),
+            loader: "vanilla".into(),
             server_dir: "~/Minecraft/MeuServidor".into(),
             memory_limit_gb: 4,
             java_path,
+            curseforge_api_key: String::new(),
             e4all: E4allConfig::default(),
         }
     }
@@ -582,6 +606,261 @@ async fn detect_java(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn eula_accepted(dir: &Path) -> bool {
+    fs::read_to_string(dir.join("eula.txt"))
+        .ok()
+        .is_some_and(|contents| {
+            contents
+                .lines()
+                .any(|line| line.trim().eq_ignore_ascii_case("eula=true"))
+        })
+}
+
+#[derive(Clone, Debug)]
+enum Launch {
+    Jar(String),
+    Args(String),
+}
+
+fn first_dir_entry(dir: &Path, predicate: impl Fn(&str) -> bool) -> Option<String> {
+    fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        (entry.path().is_dir() && predicate(&name)).then_some(name)
+    })
+}
+
+fn detect_launch(dir: &Path) -> Option<Launch> {
+    for jar in [
+        "fabric-server-launch.jar",
+        "quilt-server-launch.jar",
+        "server.jar",
+    ] {
+        if dir.join(jar).is_file() {
+            return Some(Launch::Jar(jar.to_string()));
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.path().is_file()
+                && name.starts_with("forge-")
+                && name.ends_with(".jar")
+                && !name.contains("installer")
+                && !name.contains("sources")
+            {
+                return Some(Launch::Jar(name));
+            }
+        }
+    }
+
+    let args_file = if cfg!(windows) {
+        "win_args.txt"
+    } else {
+        "unix_args.txt"
+    };
+    for root in [
+        dir.join("libraries")
+            .join("net")
+            .join("minecraftforge")
+            .join("forge"),
+        dir.join("libraries")
+            .join("net")
+            .join("neoforged")
+            .join("neoforge"),
+        dir.join("libraries")
+            .join("net")
+            .join("neoforged")
+            .join("forge"),
+    ] {
+        if let Some(version) = first_dir_entry(&root, |_| true) {
+            let args = root.join(version).join(args_file);
+            if args.is_file() {
+                let relative = args
+                    .strip_prefix(dir)
+                    .unwrap_or(&args)
+                    .to_string_lossy()
+                    .into_owned();
+                return Some(Launch::Args(relative));
+            }
+        }
+    }
+    None
+}
+
+fn infer_loader(dir: &Path) -> String {
+    if dir.join("fabric-server-launch.jar").is_file() {
+        return "fabric".into();
+    }
+    if dir.join("quilt-server-launch.jar").is_file() {
+        return "quilt".into();
+    }
+    if let Some(Launch::Args(path)) = detect_launch(dir) {
+        if path.contains("neoforge") {
+            return "neoforge".into();
+        }
+        if path.contains("minecraftforge") {
+            return "forge".into();
+        }
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with("forge-") && name.ends_with(".jar") {
+                return "forge".into();
+            }
+            if name.starts_with("paper-") || name == "paper.jar" {
+                return "paper".into();
+            }
+            if name.starts_with("purpur-") || name == "purpur.jar" {
+                return "purpur".into();
+            }
+        }
+    }
+    "vanilla".into()
+}
+
+fn safe_pack_path(base: &Path, relative: &str) -> Option<PathBuf> {
+    let rel = Path::new(relative);
+    if rel.is_absolute() {
+        return None;
+    }
+    let mut out = base.to_path_buf();
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (out != base).then_some(out)
+}
+
+fn safe_filename(filename: &str) -> Option<&str> {
+    Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| *name == filename && !name.is_empty())
+}
+
+fn valid_loader(loader: &str) -> bool {
+    matches!(
+        loader,
+        "vanilla" | "fabric" | "quilt" | "forge" | "neoforge" | "paper" | "purpur"
+    )
+}
+
+fn content_loader(kind: &str, loader: &str) -> String {
+    match kind {
+        "plugins" => match loader {
+            "purpur" => "purpur".into(),
+            _ => "paper".into(),
+        },
+        "datapacks" => "datapack".into(),
+        _ => loader.into(),
+    }
+}
+
+fn content_class_id(kind: &str) -> Result<&'static str, ApiErr> {
+    match kind {
+        "mods" => Ok(CF_CLASS_MODS),
+        "plugins" => Ok(CF_CLASS_PLUGINS),
+        "modpacks" => Ok(CF_CLASS_MODPACKS),
+        _ => Err(err(
+            StatusCode::BAD_REQUEST,
+            "Tipo de conteúdo inválido para o CurseForge.",
+        )),
+    }
+}
+
+fn cf_loader_type(loader: &str) -> Option<u8> {
+    match loader {
+        "forge" => Some(1),
+        "fabric" => Some(4),
+        "quilt" => Some(5),
+        "neoforge" => Some(6),
+        _ => None,
+    }
+}
+
+fn split_loader_id(id: &str) -> Option<(String, String)> {
+    let (kind, version) = id.split_once('-')?;
+    let kind = match kind.to_ascii_lowercase().as_str() {
+        "forge" => "forge",
+        "neoforge" => "neoforge",
+        "fabric" => "fabric",
+        "quilt" => "quilt",
+        _ => return None,
+    };
+    Some((kind.into(), version.into()))
+}
+
+// ───────────────────────── Cliente CurseForge ─────────────────────────
+
+#[derive(Clone)]
+struct CurseForge {
+    http: reqwest::Client,
+    base: &'static str,
+    key: Option<String>,
+}
+
+impl CurseForge {
+    fn new(http: &reqwest::Client, key: &str) -> Self {
+        let key = key.trim();
+        if key.is_empty() {
+            Self {
+                http: http.clone(),
+                base: CF_PROXY_BASE,
+                key: None,
+            }
+        } else {
+            Self {
+                http: http.clone(),
+                base: CF_OFFICIAL_BASE,
+                key: Some(key.to_string()),
+            }
+        }
+    }
+
+    fn mode(&self) -> &'static str {
+        if self.key.is_some() {
+            "oficial"
+        } else {
+            "proxy"
+        }
+    }
+
+    async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value, ApiErr> {
+        let url = format!("{}{}", self.base, path);
+        let mut request = self
+            .http
+            .get(url)
+            .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+            .header("Accept", "application/json")
+            .query(query);
+        if let Some(key) = &self.key {
+            request = request.header("x-api-key", key);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("CurseForge: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let detail: String = body.chars().take(240).collect();
+            return Err(err(
+                StatusCode::BAD_GATEWAY,
+                format!("CurseForge respondeu {status}. {detail}"),
+            ));
+        }
+        response
+            .json()
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("CurseForge JSON: {e}")))
+    }
+}
+
 // ───────────────────────── Estado ─────────────────────────
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq)]
@@ -611,6 +890,7 @@ struct Inner {
     pid: Option<u32>,
     stdin: Option<ChildStdin>,
     kill_tx: Option<oneshot::Sender<()>>,
+    installing: bool,
     sys: System,
 }
 
@@ -628,6 +908,7 @@ impl Inner {
             pid: None,
             stdin: None,
             kill_tx: None,
+            installing: false,
             sys: System::new(),
         };
         s.push("ShadowPainel pronto. Aguardando inicialização.", "muted");
@@ -657,10 +938,7 @@ impl Inner {
         {
             *existing = self.cfg.clone();
         } else if self.cfg.server_name != Config::default().server_name
-            || expand(&self.cfg.server_dir).join("server.jar").is_file()
-            || expand(&self.cfg.server_dir)
-                .join("fabric-server-launch.jar")
-                .is_file()
+            || detect_launch(&expand(&self.cfg.server_dir)).is_some()
         {
             self.profiles.push(self.cfg.clone());
         }
@@ -690,10 +968,15 @@ struct View {
     uptime_seconds: u64,
     server_name: String,
     version: String,
+    loader: String,
     server_dir: String,
     java_path: String,
     java_detected: bool,
     installed: bool,
+    eula_accepted: bool,
+    installing: bool,
+    curseforge_mode: String,
+    curseforge_configured: bool,
     e4all: E4allConfig,
     logs: Vec<LogLine>,
 }
@@ -712,8 +995,8 @@ fn view(i: &mut Inner) -> View {
         }
     }
     let dir = expand(&i.cfg.server_dir);
-    let installed =
-        dir.join("server.jar").is_file() || dir.join("fabric-server-launch.jar").is_file();
+    let installed = detect_launch(&dir).is_some();
+    let eula = eula_accepted(&dir);
     let uptime_seconds = i
         .started
         .map(|s| (Utc::now() - s).num_seconds().max(0) as u64)
@@ -729,10 +1012,19 @@ fn view(i: &mut Inner) -> View {
         uptime_seconds,
         server_name: i.cfg.server_name.clone(),
         version: i.cfg.version.clone(),
+        loader: i.cfg.loader.clone(),
         server_dir: i.cfg.server_dir.clone(),
         java_path: i.cfg.java_path.clone(),
         java_detected: i.java_detected,
         installed,
+        eula_accepted: eula,
+        installing: i.installing,
+        curseforge_mode: if i.cfg.curseforge_api_key.trim().is_empty() {
+            "proxy".into()
+        } else {
+            "oficial".into()
+        },
+        curseforge_configured: !i.cfg.curseforge_api_key.trim().is_empty(),
         e4all: i.cfg.e4all.clone(),
         logs: i.logs.iter().cloned().collect(),
     }
@@ -851,9 +1143,7 @@ fn summary(profile: &Config, active_dir: &str, active_status: Status) -> ServerS
         server_name: profile.server_name.clone(),
         version: profile.version.clone(),
         server_dir: profile.server_dir.clone(),
-        installed: dir.join("server.jar").is_file()
-            || dir.join("fabric-server-launch.jar").is_file()
-            || dir.join("server.properties").is_file(),
+        installed: detect_launch(&dir).is_some() || dir.join("server.properties").is_file(),
         active: profile.server_dir == active_dir,
         status: if profile.server_dir == active_dir {
             active_status
@@ -886,10 +1176,10 @@ async fn switch_server(
 ) -> ApiResult {
     let selected = {
         let i = app.0.lock().await;
-        if i.status != Status::Offline {
+        if i.status != Status::Offline || i.installing {
             return Err(err(
                 StatusCode::CONFLICT,
-                "Pare o servidor atual antes de trocar de servidor.",
+                "Pare o servidor atual e aguarde instalações antes de trocar de servidor.",
             ));
         }
         i.profiles
@@ -900,10 +1190,10 @@ async fn switch_server(
     };
     let java_detected = detect_java(&selected.java_path).await;
     let mut i = app.0.lock().await;
-    if i.status != Status::Offline {
+    if i.status != Status::Offline || i.installing {
         return Err(err(
             StatusCode::CONFLICT,
-            "Pare o servidor atual antes de trocar de servidor.",
+            "Pare o servidor atual e aguarde instalações antes de trocar de servidor.",
         ));
     }
     i.cfg = selected;
@@ -940,6 +1230,12 @@ async fn download_server(
     Json(req): Json<DownloadRequest>,
 ) -> ApiResult {
     let mut i = app.0.lock().await;
+    if i.status != Status::Offline || i.installing {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor e aguarde instalações antes de baixar arquivos.",
+        ));
+    }
     let dir = expand(&i.cfg.server_dir);
     tokio::fs::create_dir_all(&dir).await.map_err(|e| {
         err(
@@ -949,10 +1245,10 @@ async fn download_server(
     })?;
     let jar_path = dir.join("server.jar");
 
-    if jar_path.exists() {
+    if detect_launch(&dir).is_some() || jar_path.exists() {
         return Err(err(
             StatusCode::CONFLICT,
-            "O server.jar já existe nesta pasta",
+            "Esta pasta já possui uma instalação de servidor",
         ));
     }
 
@@ -1104,26 +1400,26 @@ async fn accept_eula(State(app): State<AppState>) -> Result<Json<Value>, ApiErr>
 
 async fn start(State(app): State<AppState>) -> ApiResult {
     let mut i = app.0.lock().await;
-    if i.status != Status::Offline {
-        return Err(err(StatusCode::CONFLICT, "O servidor já está em execução"));
-    }
-    let dir = expand(&i.cfg.server_dir);
-    if !dir.join("server.jar").is_file() && !dir.join("fabric-server-launch.jar").is_file() {
+    if i.installing {
         return Err(err(
-            StatusCode::BAD_REQUEST,
-            "server.jar não encontrado. Use a tela de download.",
+            StatusCode::CONFLICT,
+            "Aguarde a instalação terminar antes de iniciar.",
         ));
     }
-    let eula_path = dir.join("eula.txt");
-    let eula_accepted = tokio::fs::read_to_string(&eula_path)
-        .await
-        .ok()
-        .is_some_and(|contents| {
-            contents
-                .lines()
-                .any(|line| line.trim().eq_ignore_ascii_case("eula=true"))
-        });
-    if !eula_accepted {
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "O servidor já está em execução ou parando.",
+        ));
+    }
+    let dir = expand(&i.cfg.server_dir);
+    let launch = detect_launch(&dir).ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "Nenhum servidor instalado nesta pasta. Use o assistente de criação.",
+        )
+    })?;
+    if !eula_accepted(&dir) {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "Aceite a EULA antes de iniciar.",
@@ -1131,16 +1427,21 @@ async fn start(State(app): State<AppState>) -> ApiResult {
     }
 
     let mut cmd = Command::new(&i.cfg.java_path);
-    let jar_name = if dir.join("fabric-server-launch.jar").is_file() {
-        "fabric-server-launch.jar"
-    } else {
-        "server.jar"
-    };
-
     cmd.current_dir(&dir)
         .arg(format!("-Xmx{}G", i.cfg.memory_limit_gb))
-        .args(["-jar", jar_name, "nogui"])
-        .stdin(Stdio::piped())
+        .arg("-Dfile.encoding=UTF-8");
+    let launch_name = match launch {
+        Launch::Jar(jar) => {
+            cmd.args(["-jar", &jar, "nogui"]);
+            jar
+        }
+        Launch::Args(args) => {
+            cmd.arg(format!("@{args}")).arg("nogui");
+            args
+        }
+    };
+
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -1165,7 +1466,7 @@ async fn start(State(app): State<AppState>) -> ApiResult {
     i.status = Status::Online;
     i.started = Some(Utc::now());
     i.players = 0;
-    i.push(format!("Iniciando servidor com {}", jar_name), "success");
+    i.push(format!("Iniciando servidor com {launch_name}"), "success");
     tokio::spawn(wait_child(app.clone(), child, rx));
     Ok(Json(view(&mut i)))
 }
@@ -1196,8 +1497,11 @@ async fn stop(State(app): State<AppState>) -> ApiResult {
 struct ConfigRequest {
     server_name: String,
     version: String,
+    loader: Option<String>,
     server_dir: String,
     memory_limit_gb: u64,
+    java_path: Option<String>,
+    curseforge_api_key: Option<String>,
 }
 
 fn validate_config(req: &ConfigRequest) -> Result<(), String> {
@@ -1206,6 +1510,16 @@ fn validate_config(req: &ConfigRequest) -> Result<(), String> {
         || req.server_dir.trim().is_empty()
     {
         return Err("Nome, versão e pasta são obrigatórios".into());
+    }
+    if let Some(loader) = req.loader.as_deref() {
+        if !valid_loader(loader) {
+            return Err("Tipo de servidor inválido.".into());
+        }
+    }
+    if let Some(java_path) = req.java_path.as_deref() {
+        if java_path.trim().is_empty() {
+            return Err("Informe o caminho do Java.".into());
+        }
     }
     if !(1..=64).contains(&req.memory_limit_gb) {
         return Err("Memória deve ficar entre 1 e 64 GB".into());
@@ -1216,10 +1530,39 @@ fn validate_config(req: &ConfigRequest) -> Result<(), String> {
 async fn save_config(State(app): State<AppState>, Json(req): Json<ConfigRequest>) -> ApiResult {
     validate_config(&req).map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
     let mut i = app.0.lock().await;
+    if i.status != Status::Offline || i.installing {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor e aguarde instalações para alterar a instalação.",
+        ));
+    }
+    let java_path = req
+        .java_path
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or(&i.cfg.java_path)
+        .to_string();
     i.cfg.server_name = req.server_name.trim().into();
     i.cfg.version = req.version.trim().into();
+    if let Some(loader) = req.loader.as_deref() {
+        i.cfg.loader = loader.trim().into();
+    }
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
+    if java_path != i.cfg.java_path {
+        i.cfg.java_path = java_path;
+        i.java_detected = detect_java(&i.cfg.java_path).await;
+    }
+    if let Some(key) = req.curseforge_api_key.as_deref() {
+        let key = key.trim();
+        if key.chars().any(char::is_control) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "A chave do CurseForge contém caracteres inválidos.",
+            ));
+        }
+        i.cfg.curseforge_api_key = key.to_string();
+    }
     if let Err(e) = i.persist().await {
         return Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1288,10 +1631,10 @@ async fn delete_server(
 ) -> ApiResult {
     let mut i = app.0.lock().await;
 
-    if i.status != Status::Offline {
+    if i.status != Status::Offline || i.installing {
         return Err(err(
             StatusCode::CONFLICT,
-            "Pare o servidor antes de excluí-lo.",
+            "Pare o servidor e aguarde instalações antes de excluí-lo.",
         ));
     }
 
@@ -1305,8 +1648,7 @@ async fn delete_server(
 
     let dir = expand(&i.cfg.server_dir);
     if dir.exists() {
-        let looks_like_server = dir.join("server.jar").is_file()
-            || dir.join("fabric-server-launch.jar").is_file()
+        let looks_like_server = detect_launch(&dir).is_some()
             || dir.join("server.properties").is_file()
             || dir.join("eula.txt").is_file();
         if !looks_like_server {
@@ -1707,174 +2049,6 @@ async fn save_server_icon(
     ))
 }
 
-// ───────────────────────── Mods / Fabric ─────────────────────────
-
-#[derive(Deserialize)]
-struct ModSearchRequest {
-    query: String,
-    loader: String,
-    version: String,
-}
-
-async fn search_mods(Json(req): Json<ModSearchRequest>) -> Result<Json<Value>, ApiErr> {
-    let client = reqwest::Client::new();
-    let facets = format!(
-        r#"[["categories:{}"],["versions:{}"]]"#,
-        req.loader, req.version
-    );
-    let url = format!(
-        "https://api.modrinth.com/v2/search?query={}&facets={}&limit=10",
-        urlencoding::encode(&req.query),
-        urlencoding::encode(&facets)
-    );
-
-    let resp = client
-        .get(&url)
-        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
-        .send()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Rede: {e}")))?
-        .error_for_status()
-        .map_err(|e| {
-            err(
-                StatusCode::BAD_GATEWAY,
-                format!("Serviço externo retornou erro: {e}"),
-            )
-        })?;
-    let data: Value = resp
-        .json()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON: {e}")))?;
-    Ok(Json(data))
-}
-
-#[derive(Deserialize)]
-struct ModInstallRequest {
-    project_id: String,
-    loader: String,
-    version: String,
-}
-
-async fn install_mod(
-    State(app): State<AppState>,
-    Json(req): Json<ModInstallRequest>,
-) -> Result<Json<Value>, ApiErr> {
-    let i = app.0.lock().await;
-    let dir = expand(&i.cfg.server_dir);
-    let mods_dir = dir.join("mods");
-    tokio::fs::create_dir_all(&mods_dir).await.map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Pasta mods: {e}"),
-        )
-    })?;
-
-    let client = reqwest::Client::new();
-    let url = format!(
-        "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
-        req.project_id, req.loader, req.version
-    );
-    let resp = client
-        .get(&url)
-        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
-        .send()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Rede: {e}")))?
-        .error_for_status()
-        .map_err(|e| {
-            err(
-                StatusCode::BAD_GATEWAY,
-                format!("Serviço externo retornou erro: {e}"),
-            )
-        })?;
-    let versions: Vec<Value> = resp
-        .json()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON: {e}")))?;
-
-    if versions.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, "Mod incompatível."));
-    }
-
-    let file = &versions[0]["files"][0];
-    let download_url = file["url"]
-        .as_str()
-        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "URL faltando"))?;
-    let filename = file["filename"]
-        .as_str()
-        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "Nome faltando"))?;
-
-    let bytes = client
-        .get(download_url)
-        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
-        .send()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Download: {e}")))?
-        .error_for_status()
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Leitura: {e}")))?;
-
-    let safe_name = std::path::Path::new(filename)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| *name == filename && !name.is_empty())
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de arquivo do mod inválido"))?;
-    let path = mods_dir.join(safe_name);
-    tokio::fs::write(&path, bytes)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Salvar: {e}")))?;
-
-    Ok(Json(json!({ "ok": true, "file": filename })))
-}
-
-async fn install_fabric(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
-    let i = app.0.lock().await;
-    let dir = expand(&i.cfg.server_dir);
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Pasta: {e}")))?;
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("https://meta.fabricmc.net/v2/versions/installer")
-        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
-        .send()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Rede: {e}")))?;
-    let installers: Vec<Value> = resp
-        .json()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON: {e}")))?;
-
-    if installers.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, "Instalador não encontrado."));
-    }
-    let download_url = installers[0]["url"]
-        .as_str()
-        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "URL faltando"))?;
-
-    let bytes = client
-        .get(download_url)
-        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
-        .send()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Download: {e}")))?
-        .error_for_status()
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Leitura: {e}")))?;
-
-    let path = dir.join("fabric-server-launch.jar");
-    tokio::fs::write(&path, bytes)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("Salvar: {e}")))?;
-
-    Ok(Json(json!({ "ok": true })))
-}
-
 // ───────────────────────── Instalação e conteúdo ─────────────────────────
 
 #[derive(Serialize)]
@@ -1938,28 +2112,385 @@ struct CreateServerRequest {
     memory_limit_gb: u64,
 }
 
-fn valid_loader(loader: &str) -> bool {
-    matches!(loader, "vanilla" | "fabric" | "paper" | "purpur")
-}
-
-async fn download_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, ApiErr> {
-    client
+async fn save_download(client: &reqwest::Client, url: &str, path: &Path) -> Result<(), ApiErr> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao criar pasta: {e}"),
+            )
+        })?;
+    }
+    let mut response = client
         .get(url)
         .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
         .send()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Falha no download: {e}")))?
         .error_for_status()
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?
-        .bytes()
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?;
+    let mut file = tokio::fs::File::create(path).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao criar {}: {e}", path.display()),
+        )
+    })?;
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            format!("Falha ao ler download: {e}"),
+        )
+    })? {
+        file.write_all(&chunk).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao salvar {}: {e}", path.display()),
+            )
+        })?;
+    }
+    file.flush().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao finalizar {}: {e}", path.display()),
+        )
+    })
+}
+
+async fn fabric_loader_version(client: &reqwest::Client, mc: &str) -> Result<String, ApiErr> {
+    let loaders: Vec<Value> = client
+        .get(format!("https://meta.fabricmc.net/v2/versions/loader/{mc}"))
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
         .await
-        .map(|bytes| bytes.to_vec())
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Fabric: {e}")))?
+        .error_for_status()
         .map_err(|e| {
             err(
                 StatusCode::BAD_GATEWAY,
-                format!("Falha ao ler download: {e}"),
+                format!("Fabric retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Fabric JSON: {e}")))?;
+    loaders
+        .first()
+        .and_then(|v| v["loader"]["version"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("Fabric não possui loader para Minecraft {mc}."),
             )
         })
+}
+
+async fn install_fabric(
+    client: &reqwest::Client,
+    dir: &Path,
+    mc: &str,
+    loader: Option<&str>,
+) -> Result<(), ApiErr> {
+    let loader = match loader.filter(|v| !v.trim().is_empty()) {
+        Some(value) => value.to_string(),
+        None => fabric_loader_version(client, mc).await?,
+    };
+    let installers: Vec<Value> = client
+        .get("https://meta.fabricmc.net/v2/versions/installer")
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Instalador Fabric: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Fabric retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Instalador Fabric JSON: {e}"),
+            )
+        })?;
+    let installer_version = installers
+        .first()
+        .and_then(|v| v["version"].as_str())
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Instalador Fabric não encontrado."))?;
+    let url = format!(
+        "https://meta.fabricmc.net/v2/versions/loader/{mc}/{loader}/{installer_version}/server/jar"
+    );
+    save_download(client, &url, &dir.join("fabric-server-launch.jar")).await
+}
+
+async fn run_installer(
+    java: &str,
+    dir: &Path,
+    installer: &Path,
+    args: &[&str],
+) -> Result<(), ApiErr> {
+    let mut command = Command::new(java);
+    command
+        .current_dir(dir)
+        .arg("-jar")
+        .arg(installer)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(PACK_INSTALL_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            err(
+                StatusCode::GATEWAY_TIMEOUT,
+                "O instalador do modloader demorou demais e foi interrompido.",
+            )
+        })?
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao executar o instalador: {e}"),
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let mut log = String::from_utf8_lossy(&output.stdout).into_owned();
+    log.push_str(&String::from_utf8_lossy(&output.stderr));
+    let log: String = log
+        .chars()
+        .rev()
+        .take(1600)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    Err(err(
+        StatusCode::BAD_GATEWAY,
+        format!("O instalador falhou. Saída:\n{log}"),
+    ))
+}
+
+async fn install_forge(
+    client: &reqwest::Client,
+    java: &str,
+    dir: &Path,
+    mc: &str,
+    loader: &str,
+) -> Result<(), ApiErr> {
+    let url = format!(
+        "https://maven.minecraftforge.net/net/minecraftforge/forge/{mc}-{loader}/forge-{mc}-{loader}-installer.jar"
+    );
+    let installer = dir.join(".shadowpainel-forge-installer.jar");
+    save_download(client, &url, &installer).await?;
+    let result = run_installer(java, dir, &installer, &["--installServer"]).await;
+    let _ = tokio::fs::remove_file(&installer).await;
+    result
+}
+
+async fn install_neoforge(
+    client: &reqwest::Client,
+    java: &str,
+    dir: &Path,
+    loader: &str,
+) -> Result<(), ApiErr> {
+    let url = format!(
+        "https://maven.neoforged.net/releases/net/neoforged/neoforge/{loader}/neoforge-{loader}-installer.jar"
+    );
+    let installer = dir.join(".shadowpainel-neoforge-installer.jar");
+    save_download(client, &url, &installer).await?;
+    let result = run_installer(java, dir, &installer, &["--installServer"]).await;
+    let _ = tokio::fs::remove_file(&installer).await;
+    result
+}
+
+async fn install_quilt(
+    client: &reqwest::Client,
+    java: &str,
+    dir: &Path,
+    mc: &str,
+    loader: Option<&str>,
+) -> Result<(), ApiErr> {
+    let installers: Vec<Value> = client
+        .get("https://meta.quiltmc.org/v3/versions/installer")
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Instalador Quilt: {e}")))?
+        .error_for_status()
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Quilt retornou erro: {e}")))?
+        .json()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Instalador Quilt JSON: {e}"),
+            )
+        })?;
+    let url = installers
+        .first()
+        .and_then(|v| v["url"].as_str())
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Instalador Quilt não encontrado."))?;
+    let installer = dir.join(".shadowpainel-quilt-installer.jar");
+    save_download(client, url, &installer).await?;
+    let installdir = format!("--install-dir={}", dir.display());
+    let mut args = vec!["install", "server", mc, "--download-server", &installdir];
+    if let Some(loader) = loader.filter(|v| !v.trim().is_empty()) {
+        args.insert(3, loader);
+    }
+    let result = run_installer(java, dir, &installer, &args).await;
+    let _ = tokio::fs::remove_file(&installer).await;
+    result?;
+    if detect_launch(dir).is_none() {
+        return Err(err(
+            StatusCode::BAD_GATEWAY,
+            "O instalador do Quilt terminou sem gerar um servidor inicializável.",
+        ));
+    }
+    Ok(())
+}
+
+async fn install_vanilla(client: &reqwest::Client, dir: &Path, mc: &str) -> Result<(), ApiErr> {
+    let manifest: Value = client
+        .get("https://launchermeta.mojang.com/mc/game/version_manifest.json")
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Mojang: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Mojang retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Manifesto Mojang: {e}")))?;
+    let metadata_url = manifest["versions"]
+        .as_array()
+        .and_then(|list| list.iter().find(|v| v["id"] == mc))
+        .and_then(|v| v["url"].as_str())
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Versão Minecraft não encontrada."))?;
+    let metadata: Value = client
+        .get(metadata_url)
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Mojang: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Mojang retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Metadados Mojang: {e}")))?;
+    let url = metadata["downloads"]["server"]["url"]
+        .as_str()
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "Esta versão não oferece server.jar oficial.",
+            )
+        })?;
+    save_download(client, url, &dir.join("server.jar")).await
+}
+
+async fn install_paper(
+    client: &reqwest::Client,
+    dir: &Path,
+    mc: &str,
+    kind: &str,
+) -> Result<(), ApiErr> {
+    let url = if kind == "paper" {
+        let builds: Value = client
+            .get(format!(
+                "https://api.papermc.io/v2/projects/paper/versions/{mc}"
+            ))
+            .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+            .send()
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Paper: {e}")))?
+            .error_for_status()
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Paper retornou erro: {e}")))?
+            .json()
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Paper JSON: {e}")))?;
+        let build = builds["builds"]
+            .as_array()
+            .and_then(|b| b.last())
+            .and_then(|b| b.as_i64())
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "Build Paper não encontrada."))?;
+        format!(
+            "https://api.papermc.io/v2/projects/paper/versions/{mc}/builds/{build}/downloads/paper-{mc}-{build}.jar"
+        )
+    } else {
+        let builds: Value = client
+            .get(format!("https://api.purpurmc.org/v2/purpur/{mc}"))
+            .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+            .send()
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Purpur: {e}")))?
+            .error_for_status()
+            .map_err(|e| {
+                err(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Purpur retornou erro: {e}"),
+                )
+            })?
+            .json()
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Purpur JSON: {e}")))?;
+        let build = builds["builds"]
+            .as_array()
+            .and_then(|b| b.last())
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "Build Purpur não encontrada."))?;
+        format!("https://api.purpurmc.org/v2/purpur/{mc}/{build}/download")
+    };
+    save_download(client, &url, &dir.join("server.jar")).await
+}
+
+async fn install_loader(
+    client: &reqwest::Client,
+    java: &str,
+    dir: &Path,
+    mc: &str,
+    loader: &str,
+    loader_version: Option<&str>,
+) -> Result<(), ApiErr> {
+    match loader {
+        "fabric" => install_fabric(client, dir, mc, loader_version).await,
+        "quilt" => install_quilt(client, java, dir, mc, loader_version).await,
+        "forge" => {
+            let version = loader_version.unwrap_or_default().trim();
+            if version.is_empty() {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "A versão do Forge não foi informada.",
+                ));
+            }
+            install_forge(client, java, dir, mc, version).await
+        }
+        "neoforge" => {
+            let version = loader_version.unwrap_or_default().trim();
+            if version.is_empty() {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "A versão do NeoForge não foi informada.",
+                ));
+            }
+            install_neoforge(client, java, dir, version).await
+        }
+        "paper" | "purpur" => install_paper(client, dir, mc, loader).await,
+        _ => install_vanilla(client, dir, mc).await,
+    }
 }
 
 async fn create_server(
@@ -1978,7 +2509,7 @@ async fn create_server(
     if !valid_loader(&req.loader) {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "Loader não suportado nesta versão. Use Vanilla, Fabric, Paper ou Purpur.",
+            "Tipo de servidor não suportado.",
         ));
     }
     if !(1..=64).contains(&req.memory_limit_gb) {
@@ -1994,245 +2525,47 @@ async fn create_server(
             format!("Falha ao criar pasta: {e}"),
         )
     })?;
-    let client = reqwest::Client::new();
-    let jar_path = dir.join("server.jar");
-    if jar_path.exists() || dir.join("fabric-server-launch.jar").exists() {
+    if detect_launch(&dir).is_some() || dir.join("server.properties").is_file() {
         return Err(err(
             StatusCode::CONFLICT,
             "Esta pasta já possui uma instalação de servidor.",
         ));
     }
 
-    match req.loader.as_str() {
-        "vanilla" => {
-            let manifest: Value = client
-                .get("https://launchermeta.mojang.com/mc/game/version_manifest.json")
-                .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
-                .send()
-                .await
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Falha ao consultar Mojang: {e}"),
-                    )
-                })?
-                .error_for_status()
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Mojang retornou erro: {e}"),
-                    )
-                })?
-                .json()
-                .await
-                .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Manifesto inválido: {e}")))?;
-            let metadata_url = manifest["versions"]
-                .as_array()
-                .and_then(|list| list.iter().find(|v| v["id"] == req.version))
-                .and_then(|v| v["url"].as_str())
-                .ok_or_else(|| err(StatusCode::NOT_FOUND, "Versão Minecraft não encontrada."))?;
-            let metadata: Value = client
-                .get(metadata_url)
-                .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
-                .send()
-                .await
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Falha ao consultar versão: {e}"),
-                    )
-                })?
-                .error_for_status()
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Mojang retornou erro: {e}"),
-                    )
-                })?
-                .json()
-                .await
-                .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Metadados inválidos: {e}")))?;
-            let url = metadata["downloads"]["server"]["url"]
-                .as_str()
-                .ok_or_else(|| {
-                    err(
-                        StatusCode::NOT_FOUND,
-                        "Esta versão não oferece server.jar oficial.",
-                    )
-                })?;
-            tokio::fs::write(&jar_path, download_bytes(&client, url).await?)
-                .await
-                .map_err(|e| {
-                    err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Falha ao salvar server.jar: {e}"),
-                    )
-                })?;
+    let java_path = {
+        let mut i = app.0.lock().await;
+        if i.status != Status::Offline || i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Pare o servidor e aguarde instalações antes de criar outro.",
+            ));
         }
-        "fabric" => {
-            let loaders: Vec<Value> = client
-                .get(format!(
-                    "https://meta.fabricmc.net/v2/versions/loader/{}",
-                    req.version
-                ))
-                .send()
-                .await
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Falha ao consultar Fabric: {e}"),
-                    )
-                })?
-                .error_for_status()
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Fabric retornou erro: {e}"),
-                    )
-                })?
-                .json()
-                .await
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Resposta Fabric inválida: {e}"),
-                    )
-                })?;
-            let loader = loaders
-                .first()
-                .and_then(|v| v["loader"]["version"].as_str())
-                .ok_or_else(|| {
-                    err(
-                        StatusCode::NOT_FOUND,
-                        "Fabric não possui loader para esta versão.",
-                    )
-                })?;
-            let installer: Vec<Value> = client
-                .get("https://meta.fabricmc.net/v2/versions/installer")
-                .send()
-                .await
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Falha ao consultar instalador Fabric: {e}"),
-                    )
-                })?
-                .error_for_status()
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Fabric retornou erro: {e}"),
-                    )
-                })?
-                .json()
-                .await
-                .map_err(|e| {
-                    err(
-                        StatusCode::BAD_GATEWAY,
-                        format!("Instalador Fabric inválido: {e}"),
-                    )
-                })?;
-            let installer_version = installer
-                .first()
-                .and_then(|v| v["version"].as_str())
-                .ok_or_else(|| err(StatusCode::NOT_FOUND, "Instalador Fabric não encontrado."))?;
-            let url = format!("https://meta.fabricmc.net/v2/versions/loader/{}/{loader}/{installer_version}/server/jar", req.version);
-            tokio::fs::write(
-                &dir.join("fabric-server-launch.jar"),
-                download_bytes(&client, &url).await?,
-            )
-            .await
-            .map_err(|e| {
-                err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Falha ao salvar servidor Fabric: {e}"),
-                )
-            })?;
-        }
-        "paper" | "purpur" => {
-            let url = if req.loader == "paper" {
-                let builds: Value = client
-                    .get(format!(
-                        "https://api.papermc.io/v2/projects/paper/versions/{}",
-                        req.version
-                    ))
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        err(
-                            StatusCode::BAD_GATEWAY,
-                            format!("Falha ao consultar Paper: {e}"),
-                        )
-                    })?
-                    .error_for_status()
-                    .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Paper retornou erro: {e}")))?
-                    .json()
-                    .await
-                    .map_err(|e| {
-                        err(
-                            StatusCode::BAD_GATEWAY,
-                            format!("Resposta Paper inválida: {e}"),
-                        )
-                    })?;
-                let build = builds["builds"]
-                    .as_array()
-                    .and_then(|b| b.last())
-                    .and_then(|b| b.as_i64())
-                    .ok_or_else(|| err(StatusCode::NOT_FOUND, "Build Paper não encontrada."))?;
-                format!("https://api.papermc.io/v2/projects/paper/versions/{}/builds/{}/downloads/paper-{}-{}.jar", req.version, build, req.version, build)
-            } else {
-                let builds: Value = client
-                    .get(format!(
-                        "https://api.purpurmc.org/v2/purpur/{}",
-                        req.version
-                    ))
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        err(
-                            StatusCode::BAD_GATEWAY,
-                            format!("Falha ao consultar Purpur: {e}"),
-                        )
-                    })?
-                    .error_for_status()
-                    .map_err(|e| {
-                        err(
-                            StatusCode::BAD_GATEWAY,
-                            format!("Purpur retornou erro: {e}"),
-                        )
-                    })?
-                    .json()
-                    .await
-                    .map_err(|e| {
-                        err(
-                            StatusCode::BAD_GATEWAY,
-                            format!("Resposta Purpur inválida: {e}"),
-                        )
-                    })?;
-                let build = builds["builds"]
-                    .as_array()
-                    .and_then(|b| b.last())
-                    .and_then(|b| b.as_str())
-                    .ok_or_else(|| err(StatusCode::NOT_FOUND, "Build Purpur não encontrada."))?;
-                format!(
-                    "https://api.purpurmc.org/v2/purpur/{}/{}/download",
-                    req.version, build
-                )
-            };
-            tokio::fs::write(&jar_path, download_bytes(&client, &url).await?)
-                .await
-                .map_err(|e| {
-                    err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Falha ao salvar servidor: {e}"),
-                    )
-                })?;
-        }
-        _ => unreachable!(),
-    }
+        i.installing = true;
+        i.cfg.java_path.clone()
+    };
+
+    let client = reqwest::Client::new();
+    let result = install_loader(
+        &client,
+        &java_path,
+        &dir,
+        req.version.trim(),
+        req.loader.trim(),
+        None,
+    )
+    .await;
+
     let mut i = app.0.lock().await;
+    i.installing = false;
+    result.inspect_err(|_| {
+        i.push(
+            "Falha ao instalar o servidor. Veja os detalhes no aviso.",
+            "error",
+        );
+    })?;
     i.cfg.server_name = req.server_name.trim().into();
     i.cfg.version = req.version.trim().into();
+    i.cfg.loader = req.loader.trim().into();
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
     i.persist().await.map_err(|e| {
@@ -2272,6 +2605,7 @@ struct ContentItem {
     version_number: Option<String>,
     icon_url: Option<String>,
     installed_version: Option<String>,
+    source: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -2286,7 +2620,40 @@ struct InstalledContent {
     version_number: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     icon_url: Option<String>,
+    #[serde(default = "default_content_source")]
+    source: String,
 }
+
+fn default_content_source() -> String {
+    "modrinth".into()
+}
+
+fn content_source(source: Option<&str>) -> Result<&'static str, ApiErr> {
+    match source.unwrap_or("modrinth").trim().to_lowercase().as_str() {
+        "modrinth" | "" => Ok("modrinth"),
+        "curseforge" | "curse" | "cf" => Ok("curseforge"),
+        _ => Err(err(
+            StatusCode::BAD_REQUEST,
+            "Fonte de conteúdo inválida (use modrinth ou curseforge).",
+        )),
+    }
+}
+
+fn valid_project_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+fn value_id(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_i64().map(|id| id.to_string()))
+        .or_else(|| value.as_u64().map(|id| id.to_string()))
+}
+
 fn content_manifest(base: &std::path::Path) -> PathBuf {
     base.join(".shadowpainel-content.json")
 }
@@ -2304,7 +2671,9 @@ async fn enrich_installed_content(
     let mut changed = false;
     let project_ids: Vec<String> = items
         .iter()
-        .filter(|item| item.title.is_none() || item.icon_url.is_none())
+        .filter(|item| {
+            item.source == "modrinth" && (item.title.is_none() || item.icon_url.is_none())
+        })
         .map(|item| item.project_id.clone())
         .filter(|id| !id.is_empty())
         .collect::<std::collections::HashSet<_>>()
@@ -2354,7 +2723,7 @@ async fn enrich_installed_content(
 
     let version_ids: Vec<String> = items
         .iter()
-        .filter(|item| item.version_number.is_none())
+        .filter(|item| item.source == "modrinth" && item.version_number.is_none())
         .map(|item| item.version_id.clone())
         .filter(|id| !id.is_empty())
         .collect::<std::collections::HashSet<_>>()
@@ -2478,6 +2847,7 @@ async fn list_content(
                 version_number: version_number.clone(),
                 icon_url: stored.and_then(|item| item.icon_url.clone()),
                 installed_version: version_number,
+                source: stored.map(|item| item.source.clone()),
             });
         }
     }
@@ -2549,6 +2919,8 @@ struct ContentSearchRequest {
     version: String,
     category: Option<String>,
     #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
     offset: usize,
     #[serde(default = "default_content_limit")]
     limit: usize,
@@ -2558,10 +2930,207 @@ fn default_content_limit() -> usize {
     12
 }
 
+fn cf_search_hit(item: &Value, installed: bool) -> Value {
+    let id = item.get("id").and_then(value_id).unwrap_or_default();
+    let author = item
+        .get("authors")
+        .and_then(Value::as_array)
+        .and_then(|authors| authors.first())
+        .and_then(|author| author.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let icon = item
+        .get("logo")
+        .and_then(|logo| logo.get("thumbnailUrl").or_else(|| logo.get("url")))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let latest = item
+        .get("latestFilesIndexes")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first());
+    let version_number = latest
+        .and_then(|file| file.get("filename"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let game_versions: Vec<String> = item
+        .get("latestFilesIndexes")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|file| file.get("gameVersion").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "project_id": id,
+        "title": item.get("name").and_then(Value::as_str).unwrap_or("Projeto CurseForge"),
+        "description": item.get("summary").and_then(Value::as_str).unwrap_or_default(),
+        "icon_url": icon,
+        "downloads": item.get("downloadCount").and_then(Value::as_u64).unwrap_or(0),
+        "author": author,
+        "version_number": version_number,
+        "game_versions": game_versions,
+        "url": item.get("links").and_then(|links| links.get("websiteUrl")).and_then(Value::as_str),
+        "installed": installed,
+        "source": "curseforge",
+    })
+}
+
+fn cf_version_item(file: &Value, loader: &str) -> Value {
+    let game_versions: Vec<&str> = file
+        .get("gameVersions")
+        .and_then(Value::as_array)
+        .map(|versions| {
+            versions
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|version| version.starts_with(|c: char| c.is_ascii_digit()))
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "id": file.get("id").and_then(value_id).unwrap_or_default(),
+        "version_number": file.get("displayName").and_then(Value::as_str)
+            .or_else(|| file.get("fileName").and_then(Value::as_str))
+            .unwrap_or("Versão"),
+        "filename": file.get("fileName").and_then(Value::as_str),
+        "game_versions": game_versions,
+        "loaders": [loader],
+        "date_published": file.get("fileDate").and_then(Value::as_str),
+        "downloads": file.get("downloadCount").and_then(Value::as_u64).unwrap_or(0),
+        "source": "curseforge",
+    })
+}
+
+async fn cf_file_metadata(
+    cf: &CurseForge,
+    project_id: &str,
+    file_id: &str,
+) -> Result<Value, ApiErr> {
+    let data = cf
+        .get(
+            &format!("/mods/{project_id}/files/{file_id}"),
+            &[("gameId", CF_GAME_ID.to_string())],
+        )
+        .await?;
+    data.get("data").cloned().ok_or_else(|| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            "CurseForge não retornou o arquivo.",
+        )
+    })
+}
+
+async fn cf_file_download_url(
+    cf: &CurseForge,
+    project_id: &str,
+    file_id: &str,
+) -> Result<String, ApiErr> {
+    let data = cf
+        .get(
+            &format!("/mods/{project_id}/files/{file_id}/download-url"),
+            &[("gameId", CF_GAME_ID.to_string())],
+        )
+        .await?;
+    data.get("data")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|url| url.starts_with("http"))
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "O autor desativou o download deste arquivo no CurseForge.",
+            )
+        })
+}
+
+async fn search_curseforge_content(
+    app: &AppState,
+    req: &ContentSearchRequest,
+) -> Result<Json<Value>, ApiErr> {
+    let class_id = content_class_id(&req.kind)?;
+    let (base, key) = {
+        let i = app.0.lock().await;
+        (expand(&i.cfg.server_dir), i.cfg.curseforge_api_key.clone())
+    };
+    let client = reqwest::Client::new();
+    let cf = CurseForge::new(&client, &key);
+    let limit = req.limit.clamp(1, 24);
+    let mut query: Vec<(&str, String)> = vec![
+        ("gameId", CF_GAME_ID.to_string()),
+        ("classId", class_id.to_string()),
+        ("index", req.offset.to_string()),
+        ("pageSize", limit.to_string()),
+        ("sortField", "2".into()),
+        ("sortOrder", "desc".into()),
+    ];
+    if !req.query.trim().is_empty() {
+        query.push(("searchFilter", req.query.trim().to_string()));
+    }
+    if !req.version.trim().is_empty() {
+        query.push(("gameVersion", req.version.trim().to_string()));
+    }
+    if req.kind == "mods" {
+        let loader = content_loader(&req.kind, &req.loader);
+        if let Some(loader_type) = cf_loader_type(&loader) {
+            query.push(("modLoaderType", loader_type.to_string()));
+        }
+    }
+    if let Some(category) = req
+        .category
+        .as_deref()
+        .filter(|category| *category != "all")
+        .and_then(|category| category.parse::<u32>().ok())
+    {
+        query.push(("categoryId", category.to_string()));
+    }
+
+    let data = cf.get("/mods/search", &query).await?;
+    let installed: std::collections::HashSet<String> = read_installed_content(&base)
+        .await
+        .into_iter()
+        .filter(|item| item.kind == req.kind && item.source == "curseforge")
+        .map(|item| item.project_id)
+        .collect();
+    let hits: Vec<Value> = data["data"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    let id = item.get("id").and_then(value_id).unwrap_or_default();
+                    cf_search_hit(item, installed.contains(&id))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let total = data
+        .get("pagination")
+        .and_then(|pagination| pagination.get("totalCount"))
+        .cloned()
+        .unwrap_or(json!(0));
+    Ok(Json(json!({
+        "hits": hits,
+        "source": "curseforge",
+        "total_hits": total,
+        "offset": req.offset,
+        "limit": limit,
+    })))
+}
+
 async fn search_content(
     State(app): State<AppState>,
     Json(req): Json<ContentSearchRequest>,
 ) -> Result<Json<Value>, ApiErr> {
+    let source = content_source(req.source.as_deref())?;
+    if source == "curseforge" {
+        return search_curseforge_content(&app, &req).await;
+    }
+
     let project_type = match req.kind.as_str() {
         "plugins" => "plugin",
         "datapacks" => "datapack",
@@ -2577,10 +3146,15 @@ async fn search_content(
         Some(cat) if !cat.is_empty() && cat != "all" => format!(r#",["categories:{}"]"#, cat),
         _ => String::new(),
     };
+    let version_facet = if req.version.trim().is_empty() {
+        String::new()
+    } else {
+        format!(r#",["versions:{}"]"#, req.version)
+    };
 
     let facets = format!(
-        r#"[["project_type:{}"],["versions:{}"]{}{}]"#,
-        project_type, req.version, loader_facet, category_facet
+        r#"[["project_type:{}"]{}{}{}]"#,
+        project_type, version_facet, loader_facet, category_facet
     );
 
     let limit = req.limit.clamp(1, 24);
@@ -2615,9 +3189,10 @@ async fn search_content(
     let installed: std::collections::HashSet<String> = read_installed_content(&base)
         .await
         .into_iter()
-        .filter(|x| x.kind == req.kind)
+        .filter(|x| x.kind == req.kind && x.source == "modrinth")
         .map(|x| x.project_id)
         .collect();
+    data["source"] = Value::String("modrinth".into());
     if let Some(hits) = data.get_mut("hits").and_then(Value::as_array_mut) {
         for hit in hits {
             let id = hit
@@ -2625,24 +3200,31 @@ async fn search_content(
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             hit["installed"] = Value::Bool(installed.contains(id));
+            hit["source"] = Value::String("modrinth".into());
         }
     }
     Ok(Json(data))
 }
 
-async fn get_content_versions(
-    axum::extract::Query(query): axum::extract::Query<ContentSearchRequest>,
-) -> Result<Json<Value>, ApiErr> {
-    let url = format!(
-        "https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]",
-        urlencoding::encode(&query.query),
-        urlencoding::encode(&query.loader),
-        urlencoding::encode(&query.version)
-    );
-
-    let data: Value = reqwest::Client::new()
-        .get(url)
-        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+async fn modrinth_versions(
+    client: &reqwest::Client,
+    project_id: &str,
+    loader: &str,
+    version: &str,
+) -> Result<Vec<Value>, ApiErr> {
+    let mut request = client
+        .get(format!(
+            "https://api.modrinth.com/v2/project/{}/version",
+            urlencoding::encode(project_id)
+        ))
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"));
+    if !loader.trim().is_empty() {
+        request = request.query(&[("loaders", json!([loader]).to_string())]);
+    }
+    if !version.trim().is_empty() {
+        request = request.query(&[("game_versions", json!([version]).to_string())]);
+    }
+    let data: Value = request
         .send()
         .await
         .map_err(|e| {
@@ -2661,8 +3243,79 @@ async fn get_content_versions(
         .json()
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
+    let mut versions = match data {
+        Value::Array(items) => items,
+        item => vec![item],
+    };
+    for item in &mut versions {
+        item["source"] = Value::String("modrinth".into());
+    }
+    Ok(versions)
+}
 
-    Ok(Json(data))
+#[derive(Deserialize)]
+struct ContentVersionsQuery {
+    query: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    loader: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+async fn get_content_versions(
+    State(app): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ContentVersionsQuery>,
+) -> Result<Json<Value>, ApiErr> {
+    let source = content_source(query.source.as_deref())?;
+    if !valid_project_id(&query.query) {
+        return Err(err(StatusCode::BAD_REQUEST, "Projeto inválido."));
+    }
+    if source == "curseforge" {
+        if query.kind == "datapacks" {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "O CurseForge não possui catálogo de datapacks.",
+            ));
+        }
+        let key = app.0.lock().await.cfg.curseforge_api_key.clone();
+        let client = reqwest::Client::new();
+        let cf = CurseForge::new(&client, &key);
+        let loader = content_loader(&query.kind, &query.loader);
+        let mut params: Vec<(&str, String)> = vec![("pageSize", "50".into())];
+        if !query.version.trim().is_empty() {
+            params.push(("gameVersion", query.version.trim().to_string()));
+        }
+        if let Some(loader_type) = cf_loader_type(&loader) {
+            params.push(("modLoaderType", loader_type.to_string()));
+        }
+        let data = cf
+            .get(&format!("/mods/{}/files", query.query), &params)
+            .await?;
+        let items: Vec<Value> = data["data"]
+            .as_array()
+            .map(|files| {
+                files
+                    .iter()
+                    .map(|file| cf_version_item(file, &loader))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Ok(Json(Value::Array(items)));
+    }
+
+    let loader = content_loader(&query.kind, &query.loader);
+    let versions = modrinth_versions(
+        &reqwest::Client::new(),
+        &query.query,
+        &loader,
+        &query.version,
+    )
+    .await?;
+    Ok(Json(Value::Array(versions)))
 }
 
 #[derive(Deserialize)]
@@ -2672,65 +3325,77 @@ struct ContentInstallRequest {
     loader: String,
     version: String,
     version_id: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
 }
 
-async fn install_content(
-    State(app): State<AppState>,
-    Json(req): Json<ContentInstallRequest>,
-) -> Result<Json<Value>, ApiErr> {
-    let i = app.0.lock().await;
-    let base = expand(&i.cfg.server_dir);
-    let dir = content_dir(&base, &req.kind)
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
-    drop(i);
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+async fn remember_content(base: &Path, record: InstalledContent) -> Result<(), ApiErr> {
+    let mut installed = read_installed_content(base).await;
+    installed.retain(|item| {
+        !(item.kind == record.kind
+            && item.filename == record.filename
+            && item.source == record.source)
+    });
+    installed.push(record);
+    write_installed_content(base, &installed).await?;
+    Ok(())
+}
+
+async fn install_modrinth_content(
+    client: &reqwest::Client,
+    dir: &Path,
+    req: &ContentInstallRequest,
+) -> Result<InstalledContent, ApiErr> {
+    let version = if let Some(version_id) = req.version_id.as_deref().filter(|id| !id.is_empty()) {
+        let data: Value = client
+            .get(format!(
+                "https://api.modrinth.com/v2/version/{}",
+                urlencoding::encode(version_id)
+            ))
+            .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+            .send()
+            .await
+            .map_err(|e| {
+                err(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Falha ao consultar versão: {e}"),
+                )
+            })?
+            .error_for_status()
+            .map_err(|e| {
+                err(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Modrinth retornou erro: {e}"),
+                )
+            })?
+            .json()
+            .await
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
+        Some(data)
+    } else {
+        modrinth_versions(
+            client,
+            &req.project_id,
+            &content_loader(&req.kind, &req.loader),
+            &req.version,
+        )
+        .await?
+        .into_iter()
+        .next()
+    };
+    let version = version.ok_or_else(|| {
         err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Falha na pasta: {e}"),
+            StatusCode::NOT_FOUND,
+            "Nenhuma versão compatível encontrada.",
         )
     })?;
-    let client = reqwest::Client::new();
-    let url = if let Some(version_id) = req.version_id.as_deref().filter(|id| !id.is_empty()) {
-        format!(
-            "https://api.modrinth.com/v2/version/{}",
-            urlencoding::encode(version_id)
-        )
-    } else {
-        format!("https://api.modrinth.com/v2/project/{}/version?loaders=[\"{}\"]&game_versions=[\"{}\"]", urlencoding::encode(&req.project_id), urlencoding::encode(&req.loader), urlencoding::encode(&req.version))
-    };
-    let version_data: Value = client
-        .get(url)
-        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
-        .send()
-        .await
-        .map_err(|e| {
-            err(
-                StatusCode::BAD_GATEWAY,
-                format!("Falha ao consultar projeto: {e}"),
-            )
-        })?
-        .error_for_status()
-        .map_err(|e| {
-            err(
-                StatusCode::BAD_GATEWAY,
-                format!("Modrinth retornou erro: {e}"),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
-    let versions: Vec<Value> = match version_data {
-        Value::Array(items) => items,
-        item => vec![item],
-    };
-    let version = versions.first();
 
-    let file = version
-        .and_then(|v| v["files"].as_array())
+    let file = version["files"]
+        .as_array()
         .and_then(|files| {
             files
                 .iter()
-                .find(|f| f["primary"].as_bool().unwrap_or(false))
+                .find(|file| file["primary"].as_bool().unwrap_or(false))
                 .or_else(|| files.first())
         })
         .ok_or_else(|| {
@@ -2742,44 +3407,1468 @@ async fn install_content(
     let filename = file["filename"]
         .as_str()
         .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Nome de arquivo ausente."))?;
-    let safe = std::path::Path::new(filename)
-        .file_name()
-        .and_then(|x| x.to_str())
-        .filter(|x| *x == filename)
+    let safe = safe_filename(filename)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de arquivo inválido."))?;
     let download = file["url"]
         .as_str()
         .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "URL de download ausente."))?;
-    tokio::fs::write(dir.join(safe), download_bytes(&client, download).await?)
+    save_download(client, download, &dir.join(safe)).await?;
+
+    Ok(InstalledContent {
+        project_id: req.project_id.clone(),
+        kind: req.kind.clone(),
+        filename: safe.to_string(),
+        version_id: version["id"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| req.version_id.clone())
+            .unwrap_or_default(),
+        title: None,
+        version_number: version["version_number"].as_str().map(str::to_owned),
+        icon_url: None,
+        source: "modrinth".into(),
+    })
+}
+
+async fn install_curseforge_content(
+    cf: &CurseForge,
+    client: &reqwest::Client,
+    dir: &Path,
+    req: &ContentInstallRequest,
+) -> Result<InstalledContent, ApiErr> {
+    if req.kind == "datapacks" {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "O CurseForge não possui catálogo de datapacks.",
+        ));
+    }
+    let loader = content_loader(&req.kind, &req.loader);
+    let file = if let Some(file_id) = req.version_id.as_deref().filter(|id| !id.is_empty()) {
+        cf_file_metadata(cf, &req.project_id, file_id).await?
+    } else {
+        let mut params: Vec<(&str, String)> = vec![("pageSize", "50".into())];
+        if !req.version.trim().is_empty() {
+            params.push(("gameVersion", req.version.trim().to_string()));
+        }
+        if let Some(loader_type) = cf_loader_type(&loader) {
+            params.push(("modLoaderType", loader_type.to_string()));
+        }
+        let data = cf
+            .get(&format!("/mods/{}/files", req.project_id), &params)
+            .await?;
+        data["data"]
+            .as_array()
+            .and_then(|files| files.first())
+            .cloned()
+            .ok_or_else(|| {
+                err(
+                    StatusCode::NOT_FOUND,
+                    "Nenhum arquivo compatível encontrado.",
+                )
+            })?
+    };
+    let file_id = file.get("id").and_then(value_id).ok_or_else(|| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            "CurseForge não retornou o arquivo.",
+        )
+    })?;
+    let filename = file["fileName"]
+        .as_str()
+        .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Nome de arquivo ausente."))?;
+    let safe = safe_filename(filename)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de arquivo inválido."))?;
+    let download = match cf_file_download_url(cf, &req.project_id, &file_id).await {
+        Ok(url) => url,
+        Err(error) => file["downloadUrl"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or(error)?,
+    };
+    save_download(client, &download, &dir.join(safe)).await?;
+
+    let project = cf
+        .get(&format!("/mods/{}", req.project_id), &[])
+        .await
+        .ok()
+        .and_then(|data| data.get("data").cloned());
+    Ok(InstalledContent {
+        project_id: req.project_id.clone(),
+        kind: req.kind.clone(),
+        filename: safe.to_string(),
+        version_id: file_id,
+        title: project
+            .as_ref()
+            .and_then(|project| project.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        version_number: file["displayName"].as_str().map(str::to_owned),
+        icon_url: project
+            .as_ref()
+            .and_then(|project| project.get("logo"))
+            .and_then(|logo| logo.get("thumbnailUrl").or_else(|| logo.get("url")))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        source: "curseforge".into(),
+    })
+}
+
+async fn install_content(
+    State(app): State<AppState>,
+    Json(req): Json<ContentInstallRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let source = content_source(req.source.as_deref())?;
+    if !valid_project_id(&req.project_id) {
+        return Err(err(StatusCode::BAD_REQUEST, "Projeto inválido."));
+    }
+    let (base, key) = {
+        let i = app.0.lock().await;
+        if i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Aguarde a instalação em andamento antes de adicionar conteúdo.",
+            ));
+        }
+        let base = expand(&i.cfg.server_dir);
+        (base, i.cfg.curseforge_api_key.clone())
+    };
+    let dir = content_dir(&base, &req.kind)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha na pasta: {e}"),
+        )
+    })?;
+    let client = reqwest::Client::new();
+    let mut record = if source == "curseforge" {
+        let cf = CurseForge::new(&client, &key);
+        install_curseforge_content(&cf, &client, &dir, &req).await?
+    } else {
+        install_modrinth_content(&client, &dir, &req).await?
+    };
+    if record.source == "modrinth" {
+        enrich_installed_content(&client, std::slice::from_mut(&mut record)).await;
+    }
+    let filename = record.filename.clone();
+    remember_content(&base, record).await?;
+    Ok(Json(json!({"ok": true, "filename": filename})))
+}
+
+// ───────────────────────── CurseForge ─────────────────────────
+
+async fn curseforge_status(State(app): State<AppState>) -> Json<Value> {
+    let key = app.0.lock().await.cfg.curseforge_api_key.clone();
+    let client = reqwest::Client::new();
+    let cf = CurseForge::new(&client, &key);
+    let probe = cf
+        .get(
+            "/mods/search",
+            &[
+                ("gameId", CF_GAME_ID.to_string()),
+                ("classId", CF_CLASS_MODS.to_string()),
+                ("pageSize", "1".into()),
+            ],
+        )
+        .await;
+    let (ok, message) = match probe {
+        Ok(_) => (
+            true,
+            if cf.mode() == "oficial" {
+                "Chave oficial validada. O catálogo usa a API do CurseForge.".to_string()
+            } else {
+                "Usando o proxy público api.curse.tools (sem chave oficial).".to_string()
+            },
+        ),
+        Err((_, Json(value))) => (
+            false,
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("CurseForge indisponível no momento.")
+                .to_string(),
+        ),
+    };
+    Json(json!({
+        "mode": cf.mode(),
+        "configured": cf.key.is_some(),
+        "ok": ok,
+        "message": message,
+    }))
+}
+
+#[derive(Deserialize)]
+struct CurseForgeConfigRequest {
+    api_key: String,
+}
+
+async fn save_curseforge_config(
+    State(app): State<AppState>,
+    Json(req): Json<CurseForgeConfigRequest>,
+) -> ApiResult {
+    let key = req.api_key.trim().to_string();
+    if key.chars().any(char::is_control) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "A chave do CurseForge contém caracteres inválidos.",
+        ));
+    }
+    if !key.is_empty() {
+        let client = reqwest::Client::new();
+        let cf = CurseForge::new(&client, &key);
+        if let Err((_, Json(value))) = cf
+            .get(
+                "/mods/search",
+                &[
+                    ("gameId", CF_GAME_ID.to_string()),
+                    ("classId", CF_CLASS_MODS.to_string()),
+                    ("pageSize", "1".into()),
+                ],
+            )
+            .await
+        {
+            let detail = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("chave recusada");
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("Não foi possível validar a chave: {detail}"),
+            ));
+        }
+    }
+    let mut i = app.0.lock().await;
+    i.cfg.curseforge_api_key = key.clone();
+    i.persist().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar a chave: {e}"),
+        )
+    })?;
+    i.push(
+        if key.is_empty() {
+            "CurseForge: usando o proxy público."
+        } else {
+            "CurseForge: chave oficial validada e salva."
+        },
+        "success",
+    );
+    Ok(Json(view(&mut i)))
+}
+
+// ───────────────────────── Modpacks ─────────────────────────
+
+#[derive(Deserialize)]
+struct ModpackSearchRequest {
+    #[serde(default)]
+    query: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    loader: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_content_limit")]
+    limit: usize,
+}
+
+async fn search_modpacks(
+    State(app): State<AppState>,
+    Json(req): Json<ModpackSearchRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let source = content_source(req.source.as_deref())?;
+    let limit = req.limit.clamp(1, 24);
+    let client = reqwest::Client::new();
+    if source == "curseforge" {
+        let key = app.0.lock().await.cfg.curseforge_api_key.clone();
+        let cf = CurseForge::new(&client, &key);
+        let mut query: Vec<(&str, String)> = vec![
+            ("gameId", CF_GAME_ID.to_string()),
+            ("classId", CF_CLASS_MODPACKS.to_string()),
+            ("index", req.offset.to_string()),
+            ("pageSize", limit.to_string()),
+            ("sortField", "2".into()),
+            ("sortOrder", "desc".into()),
+        ];
+        if !req.query.trim().is_empty() {
+            query.push(("searchFilter", req.query.trim().to_string()));
+        }
+        if !req.version.trim().is_empty() {
+            query.push(("gameVersion", req.version.trim().to_string()));
+        }
+        if let Some(loader_type) = cf_loader_type(&req.loader) {
+            query.push(("modLoaderType", loader_type.to_string()));
+        }
+        let data = cf.get("/mods/search", &query).await?;
+        let hits: Vec<Value> = data["data"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| cf_search_hit(item, false))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let total = data
+            .get("pagination")
+            .and_then(|pagination| pagination.get("totalCount"))
+            .cloned()
+            .unwrap_or(json!(0));
+        return Ok(Json(json!({
+            "hits": hits,
+            "source": "curseforge",
+            "total_hits": total,
+            "offset": req.offset,
+            "limit": limit,
+        })));
+    }
+
+    let mut facets = vec![json!(["project_type:modpack"])];
+    if !req.version.trim().is_empty() {
+        facets.push(json!(format!("versions:{}", req.version.trim())));
+    }
+    if !req.loader.trim().is_empty() && req.loader != "vanilla" {
+        facets.push(json!(format!("categories:{}", req.loader.trim())));
+    }
+    let data: Value = client
+        .get("https://api.modrinth.com/v2/search")
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .query(&[
+            ("query", req.query.trim().to_string()),
+            (
+                "facets",
+                serde_json::to_string(&facets).unwrap_or_else(|_| "[]".into()),
+            ),
+            ("limit", limit.to_string()),
+            ("offset", req.offset.to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Falha na busca: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Modrinth retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?;
+    let mut data = data;
+    data["source"] = Value::String("modrinth".into());
+    if let Some(hits) = data.get_mut("hits").and_then(Value::as_array_mut) {
+        for hit in hits {
+            hit["source"] = Value::String("modrinth".into());
+        }
+    }
+    Ok(Json(data))
+}
+
+#[derive(Deserialize)]
+struct ModpackVersionsQuery {
+    project_id: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    loader: String,
+}
+
+async fn modpack_versions(
+    State(app): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ModpackVersionsQuery>,
+) -> Result<Json<Value>, ApiErr> {
+    let source = content_source(query.source.as_deref())?;
+    if !valid_project_id(&query.project_id) {
+        return Err(err(StatusCode::BAD_REQUEST, "Projeto inválido."));
+    }
+    let client = reqwest::Client::new();
+    if source == "curseforge" {
+        let key = app.0.lock().await.cfg.curseforge_api_key.clone();
+        let cf = CurseForge::new(&client, &key);
+        let mut params: Vec<(&str, String)> = vec![("pageSize", "50".into())];
+        if !query.version.trim().is_empty() {
+            params.push(("gameVersion", query.version.trim().to_string()));
+        }
+        if let Some(loader_type) = cf_loader_type(&query.loader) {
+            params.push(("modLoaderType", loader_type.to_string()));
+        }
+        let data = cf
+            .get(&format!("/mods/{}/files", query.project_id), &params)
+            .await?;
+        let loader = if query.loader.trim().is_empty() {
+            "modpack"
+        } else {
+            query.loader.trim()
+        };
+        let items: Vec<Value> = data["data"]
+            .as_array()
+            .map(|files| {
+                files
+                    .iter()
+                    .map(|file| cf_version_item(file, loader))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Ok(Json(Value::Array(items)));
+    }
+    let loader = if query.loader == "vanilla" || query.loader.trim().is_empty() {
+        ""
+    } else {
+        query.loader.trim()
+    };
+    let versions = modrinth_versions(&client, &query.project_id, loader, &query.version).await?;
+    Ok(Json(Value::Array(versions)))
+}
+
+struct ModpackPlan {
+    minecraft: String,
+    loader: String,
+    loader_version: Option<String>,
+    mrpack_files: Vec<(String, String)>,
+    curseforge_files: Vec<(String, String)>,
+}
+
+impl ModpackPlan {
+    fn empty(minecraft: String, loader: String, loader_version: Option<String>) -> Self {
+        Self {
+            minecraft,
+            loader,
+            loader_version,
+            mrpack_files: Vec::new(),
+            curseforge_files: Vec::new(),
+        }
+    }
+}
+
+fn parse_mrpack(index: &Value) -> Result<ModpackPlan, ApiErr> {
+    let dependencies = index.get("dependencies").ok_or_else(|| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            "O modpack não possui a lista de dependências.",
+        )
+    })?;
+    let minecraft = dependencies
+        .get("minecraft")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                "O modpack não informa a versão do Minecraft.",
+            )
+        })?;
+    let mut loader = "vanilla".to_string();
+    let mut loader_version = None;
+    for (key, name) in [
+        ("fabric-loader", "fabric"),
+        ("quilt-loader", "quilt"),
+        ("forge", "forge"),
+        ("neoforge", "neoforge"),
+    ] {
+        if let Some(version) = dependencies.get(key).and_then(Value::as_str) {
+            loader = name.into();
+            loader_version = Some(version.to_string());
+            break;
+        }
+    }
+    let mut plan = ModpackPlan::empty(minecraft.to_string(), loader, loader_version);
+    for file in index
+        .get("files")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        if file
+            .pointer("/env/server")
+            .and_then(Value::as_str)
+            .is_some_and(|env| env == "unsupported")
+        {
+            continue;
+        }
+        let path = file["path"].as_str().ok_or_else(|| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                "O modpack contém um arquivo sem caminho.",
+            )
+        })?;
+        if safe_pack_path(Path::new("."), path).is_none() {
+            continue;
+        }
+        let url = file["downloads"]
+            .as_array()
+            .and_then(|downloads| downloads.first())
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                err(
+                    StatusCode::BAD_GATEWAY,
+                    format!("O arquivo {path} não possui download."),
+                )
+            })?;
+        plan.mrpack_files.push((path.to_string(), url.to_string()));
+    }
+    Ok(plan)
+}
+
+fn parse_curseforge_manifest(manifest: &Value) -> Result<ModpackPlan, ApiErr> {
+    let minecraft = manifest
+        .pointer("/minecraft/version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                "O modpack não informa a versão do Minecraft.",
+            )
+        })?;
+    let loaders = manifest
+        .pointer("/minecraft/modLoaders")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                "O modpack não informa o modloader.",
+            )
+        })?;
+    let loader_id = loaders
+        .iter()
+        .find(|loader| loader["primary"].as_bool().unwrap_or(false))
+        .or_else(|| loaders.first())
+        .and_then(|loader| loader["id"].as_str())
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                "O modpack não informa o modloader.",
+            )
+        })?;
+    let (loader, loader_version) = split_loader_id(loader_id).ok_or_else(|| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            format!("Modloader desconhecido: {loader_id}"),
+        )
+    })?;
+    let mut plan = ModpackPlan::empty(minecraft.to_string(), loader, Some(loader_version));
+    for file in manifest
+        .get("files")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let project_id = file
+            .get("projectID")
+            .and_then(value_id)
+            .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Mod sem projectID."))?;
+        let file_id = file
+            .get("fileID")
+            .and_then(value_id)
+            .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Mod sem fileID."))?;
+        plan.curseforge_files.push((project_id, file_id));
+    }
+    Ok(plan)
+}
+
+async fn read_zip_json(path: &Path, entry: &str) -> Result<Option<Value>, ApiErr> {
+    let path = path.to_path_buf();
+    let entry = entry.to_string();
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+        let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+        let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let mut entry = match archive.by_name(&entry) {
+            Ok(entry) => entry,
+            Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        Ok(Some(bytes))
+    })
+    .await
+    .map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao ler o pacote: {e}"),
+        )
+    })?
+    .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Pacote inválido: {e}")))?;
+    match bytes {
+        Some(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("JSON do pacote inválido: {e}"),
+            )
+        }),
+        None => Ok(None),
+    }
+}
+
+fn extract_zip_blocking(
+    zip_path: PathBuf,
+    destination: PathBuf,
+    prefixes: Vec<String>,
+) -> Result<usize, String> {
+    let file = fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+    let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut extracted = 0;
+    for index in 0..archive.len() {
+        let mut entry = match archive.by_index(index) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let relative = if prefixes.is_empty() {
+            Some(name.as_str())
+        } else {
+            prefixes.iter().find_map(|prefix| name.strip_prefix(prefix))
+        };
+        let Some(relative) = relative.map(|value| value.trim_start_matches('/')) else {
+            continue;
+        };
+        if relative.is_empty()
+            || relative.starts_with("backups/")
+            || relative.starts_with(".shadowpainel")
+        {
+            continue;
+        }
+        let Some(path) = safe_pack_path(&destination, relative) else {
+            continue;
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut output = fs::File::create(&path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
+        extracted += 1;
+    }
+    Ok(extracted)
+}
+
+async fn extract_zip(
+    zip_path: &Path,
+    destination: &Path,
+    prefixes: Vec<String>,
+) -> Result<usize, ApiErr> {
+    let zip_path = zip_path.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || extract_zip_blocking(zip_path, destination, prefixes))
         .await
         .map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Falha ao salvar conteúdo: {e}"),
+                format!("Falha ao extrair o pacote: {e}"),
             )
-        })?;
-    let mut installed = read_installed_content(&base).await;
-    installed.retain(|x| !(x.kind == req.kind && x.filename == safe));
-    let selected_version_id = version
-        .and_then(|value| value.get("id").and_then(Value::as_str))
-        .unwrap_or_else(|| req.version_id.as_deref().unwrap_or_default())
-        .to_string();
-    let selected_version_number = version
-        .and_then(|value| value.get("version_number").and_then(Value::as_str))
-        .map(str::to_owned);
-    let mut record = InstalledContent {
-        project_id: req.project_id,
-        kind: req.kind,
-        filename: safe.to_string(),
-        version_id: selected_version_id,
-        title: None,
-        version_number: selected_version_number,
-        icon_url: None,
+        })?
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Falha ao extrair o pacote: {e}"),
+            )
+        })
+}
+
+fn merge_tree_blocking(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            merge_tree_blocking(&from, &to)?;
+            continue;
+        }
+        if to.exists() {
+            if to.is_dir() {
+                fs::remove_dir_all(&to).map_err(|e| e.to_string())?;
+            } else {
+                fs::remove_file(&to).map_err(|e| e.to_string())?;
+            }
+        }
+        if fs::rename(&from, &to).is_err() {
+            fs::copy(&from, &to).map_err(|e| e.to_string())?;
+            let _ = fs::remove_file(&from);
+        }
+    }
+    Ok(())
+}
+
+async fn merge_tree(source: &Path, destination: &Path) -> Result<(), ApiErr> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || merge_tree_blocking(&source, &destination))
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao mover arquivos do modpack: {e}"),
+            )
+        })?
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao mover arquivos do modpack: {e}"),
+            )
+        })
+}
+
+async fn install_log(app: &AppState, text: impl Into<String>) {
+    let mut i = app.0.lock().await;
+    i.push(text, "info");
+}
+
+fn api_error_text(error: ApiErr) -> String {
+    let (_, Json(value)) = error;
+    value
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("erro desconhecido")
+        .to_string()
+}
+
+async fn download_modrinth_files(
+    client: &reqwest::Client,
+    destination: &Path,
+    files: Vec<(String, String)>,
+) -> Result<usize, ApiErr> {
+    if files.is_empty() {
+        return Ok(0);
+    }
+    let semaphore = Arc::new(Semaphore::new(PACK_DOWNLOAD_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+    let total = files.len();
+    for (relative, url) in files {
+        let client = client.clone();
+        let destination = destination.to_path_buf();
+        let semaphore = semaphore.clone();
+        tasks.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.map_err(|_| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Fila de downloads interrompida.",
+                )
+            })?;
+            let path = safe_pack_path(&destination, &relative).ok_or_else(|| {
+                err(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Caminho inválido no modpack: {relative}"),
+                )
+            })?;
+            save_download(&client, &url, &path).await
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha em um download do modpack: {e}"),
+            )
+        })??;
+    }
+    Ok(total)
+}
+
+async fn download_curseforge_files(
+    cf: &CurseForge,
+    client: &reqwest::Client,
+    destination: &Path,
+    files: Vec<(String, String)>,
+) -> Result<usize, ApiErr> {
+    if files.is_empty() {
+        return Ok(0);
+    }
+    let semaphore = Arc::new(Semaphore::new(PACK_DOWNLOAD_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+    let total = files.len();
+    for (project_id, file_id) in files {
+        let cf = cf.clone();
+        let client = client.clone();
+        let destination = destination.join("mods");
+        let semaphore = semaphore.clone();
+        tasks.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.map_err(|_| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Fila de downloads interrompida.",
+                )
+            })?;
+            let meta = cf_file_metadata(&cf, &project_id, &file_id).await?;
+            let filename = meta["fileName"]
+                .as_str()
+                .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Arquivo sem nome."))?;
+            let safe = safe_filename(filename)
+                .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Nome de arquivo inválido."))?;
+            let url = match cf_file_download_url(&cf, &project_id, &file_id).await {
+                Ok(url) => url,
+                Err(error) => meta["downloadUrl"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or(error)?,
+            };
+            save_download(&client, &url, &destination.join(safe)).await
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha em um download do modpack: {e}"),
+            )
+        })??;
+    }
+    Ok(total)
+}
+
+async fn cf_latest_modpack_file(
+    cf: &CurseForge,
+    project_id: &str,
+    version_id: Option<&str>,
+) -> Result<Value, ApiErr> {
+    if let Some(version_id) = version_id.filter(|id| !id.is_empty()) {
+        return cf_file_metadata(cf, project_id, version_id).await;
+    }
+    let data = cf
+        .get(
+            &format!("/mods/{project_id}/files"),
+            &[("pageSize", "50".into())],
+        )
+        .await?;
+    data["data"]
+        .as_array()
+        .and_then(|files| {
+            files.iter().max_by(|left, right| {
+                left.get("fileDate")
+                    .and_then(Value::as_str)
+                    .cmp(&right.get("fileDate").and_then(Value::as_str))
+            })
+        })
+        .cloned()
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "O modpack não possui arquivos disponíveis.",
+            )
+        })
+}
+
+struct ModpackInstallRef<'a> {
+    source: &'a str,
+    project_id: &'a str,
+    version_id: Option<&'a str>,
+    curseforge_key: &'a str,
+    accept_eula: bool,
+}
+
+async fn install_modpack_inner(
+    app: &AppState,
+    client: &reqwest::Client,
+    java_path: &str,
+    base: &Path,
+    install: ModpackInstallRef<'_>,
+) -> Result<(String, String), ApiErr> {
+    let ModpackInstallRef {
+        source,
+        project_id,
+        version_id,
+        curseforge_key,
+        accept_eula,
+    } = install;
+    let staging = base.join(".shadowpainel-pack-staging");
+    let pack_path = base.join(".shadowpainel-pack.zip");
+    let server_pack_path = base.join(".shadowpainel-pack-server.zip");
+    let _ = tokio::fs::remove_file(&pack_path).await;
+    let _ = tokio::fs::remove_file(&server_pack_path).await;
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    tokio::fs::create_dir_all(&staging).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a instalação: {e}"),
+        )
+    })?;
+
+    let outcome = async {
+        let (plan, cf, pack_file) = if source == "curseforge" {
+            let cf = CurseForge::new(client, curseforge_key);
+            let pack_file = cf_latest_modpack_file(&cf, project_id, version_id).await?;
+            let pack_file_id = pack_file
+                .get("id")
+                .and_then(value_id)
+                .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Arquivo do modpack sem id."))?;
+            install_log(app, "Baixando o modpack do CurseForge…").await;
+            let pack_url = cf_file_download_url(&cf, project_id, &pack_file_id).await?;
+            save_download(client, &pack_url, &pack_path).await?;
+            let manifest = read_zip_json(&pack_path, "manifest.json")
+                .await?
+                .ok_or_else(|| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        "O modpack do CurseForge não contém manifest.json.",
+                    )
+                })?;
+            let plan = parse_curseforge_manifest(&manifest)?;
+            (plan, Some(cf), Some(pack_file))
+        } else {
+            install_log(app, "Baixando o modpack do Modrinth…").await;
+            let versions = modrinth_versions(client, project_id, "", "").await?;
+            let version = if let Some(version_id) = version_id.filter(|id| !id.is_empty()) {
+                versions
+                    .into_iter()
+                    .find(|version| version["id"].as_str() == Some(version_id))
+                    .ok_or_else(|| {
+                        err(StatusCode::NOT_FOUND, "Versão do modpack não encontrada.")
+                    })?
+            } else {
+                versions.into_iter().next().ok_or_else(|| {
+                    err(
+                        StatusCode::NOT_FOUND,
+                        "O modpack não possui versões disponíveis.",
+                    )
+                })?
+            };
+            let file = version["files"]
+                .as_array()
+                .and_then(|files| {
+                    files
+                        .iter()
+                        .find(|file| file["primary"].as_bool().unwrap_or(false))
+                        .or_else(|| files.first())
+                })
+                .ok_or_else(|| {
+                    err(
+                        StatusCode::NOT_FOUND,
+                        "O modpack não possui arquivo para download.",
+                    )
+                })?;
+            let url = file["url"]
+                .as_str()
+                .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "URL do modpack ausente."))?;
+            save_download(client, url, &pack_path).await?;
+            let index = read_zip_json(&pack_path, "modrinth.index.json")
+                .await?
+                .ok_or_else(|| {
+                    err(
+                        StatusCode::BAD_GATEWAY,
+                        "O modpack não contém modrinth.index.json.",
+                    )
+                })?;
+            let plan = parse_mrpack(&index)?;
+            (plan, None, None)
+        };
+
+        install_log(
+            app,
+            format!("Instalando {} {}…", plan.loader, plan.minecraft),
+        )
+        .await;
+
+        let mut server_pack_used = false;
+        if let (Some(cf), Some(pack_file)) = (cf.as_ref(), pack_file.as_ref()) {
+            if let Some(server_pack_id) = pack_file
+                .get("serverPackFileId")
+                .and_then(value_id)
+                .filter(|id| id != "0")
+            {
+                install_log(app, "Baixando o server pack oficial…").await;
+                match cf_file_download_url(cf, project_id, &server_pack_id).await {
+                    Ok(url) => match save_download(client, &url, &server_pack_path).await {
+                        Ok(()) => {
+                            match extract_zip(&server_pack_path, &staging, Vec::new()).await {
+                                Ok(count) => {
+                                    server_pack_used = true;
+                                    install_log(
+                                        app,
+                                        format!("Server pack extraído ({count} arquivos)."),
+                                    )
+                                    .await;
+                                }
+                                Err(error) => {
+                                    install_log(
+                                        app,
+                                        format!(
+                                            "Server pack inválido; usando o manifest. {}",
+                                            api_error_text(error)
+                                        ),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            install_log(
+                                app,
+                                format!(
+                                    "Falha ao baixar o server pack; usando o manifest. {}",
+                                    api_error_text(error)
+                                ),
+                            )
+                            .await;
+                        }
+                    },
+                    Err(error) => {
+                        install_log(
+                            app,
+                            format!(
+                                "Server pack indisponível; usando o manifest. {}",
+                                api_error_text(error)
+                            ),
+                        )
+                        .await;
+                    }
+                }
+                let _ = tokio::fs::remove_file(&server_pack_path).await;
+            }
+        }
+
+        if !server_pack_used {
+            install_log(app, "Extraindo overrides do modpack…").await;
+            extract_zip(&pack_path, &staging, vec!["overrides/".into()]).await?;
+            extract_zip(&pack_path, &staging, vec!["server-overrides/".into()]).await?;
+            if let Some(cf) = cf.as_ref() {
+                install_log(
+                    app,
+                    format!(
+                        "Baixando {} mods do CurseForge…",
+                        plan.curseforge_files.len()
+                    ),
+                )
+                .await;
+                download_curseforge_files(cf, client, &staging, plan.curseforge_files).await?;
+            } else {
+                install_log(
+                    app,
+                    format!("Baixando {} arquivos do modpack…", plan.mrpack_files.len()),
+                )
+                .await;
+                download_modrinth_files(client, &staging, plan.mrpack_files).await?;
+            }
+        }
+
+        let _ = tokio::fs::remove_file(&pack_path).await;
+        install_loader(
+            client,
+            java_path,
+            base,
+            &plan.minecraft,
+            &plan.loader,
+            plan.loader_version.as_deref(),
+        )
+        .await?;
+        merge_tree(&staging, base).await?;
+        if accept_eula {
+            tokio::fs::write(base.join("eula.txt"), "eula=true\n")
+                .await
+                .map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Falha ao aceitar o EULA: {e}"),
+                    )
+                })?;
+        }
+        if detect_launch(base).is_none() {
+            return Err(err(
+                StatusCode::BAD_GATEWAY,
+                "A instalação terminou sem gerar um servidor inicializável.",
+            ));
+        }
+        Ok((plan.minecraft, plan.loader))
+    }
+    .await;
+
+    let _ = tokio::fs::remove_file(&pack_path).await;
+    let _ = tokio::fs::remove_file(&server_pack_path).await;
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    outcome
+}
+
+#[derive(Deserialize)]
+struct ModpackInstallRequest {
+    #[serde(default)]
+    source: Option<String>,
+    project_id: String,
+    version_id: Option<String>,
+    server_name: String,
+    server_dir: String,
+    memory_limit_gb: u64,
+    #[serde(default)]
+    accept_eula: bool,
+}
+
+async fn install_modpack(
+    State(app): State<AppState>,
+    Json(req): Json<ModpackInstallRequest>,
+) -> ApiResult {
+    let source = content_source(req.source.as_deref())?;
+    if !valid_project_id(&req.project_id) {
+        return Err(err(StatusCode::BAD_REQUEST, "Projeto inválido."));
+    }
+    if req.server_name.trim().is_empty() || req.server_dir.trim().is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Nome e pasta do servidor são obrigatórios.",
+        ));
+    }
+    if !(1..=64).contains(&req.memory_limit_gb) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Memória deve ficar entre 1 e 64 GB.",
+        ));
+    }
+    let base = expand(&req.server_dir);
+    tokio::fs::create_dir_all(&base).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao criar a pasta do servidor: {e}"),
+        )
+    })?;
+    if detect_launch(&base).is_some() || base.join("server.properties").is_file() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Esta pasta já possui uma instalação de servidor.",
+        ));
+    }
+    let (java_path, curseforge_key) = {
+        let mut i = app.0.lock().await;
+        if i.status != Status::Offline || i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Pare o servidor e aguarde instalações antes de criar outro.",
+            ));
+        }
+        i.installing = true;
+        (i.cfg.java_path.clone(), i.cfg.curseforge_api_key.clone())
     };
-    enrich_installed_content(&client, std::slice::from_mut(&mut record)).await;
-    installed.push(record);
-    write_installed_content(&base, &installed).await?;
-    Ok(Json(json!({"ok": true, "filename": safe})))
+
+    let client = reqwest::Client::new();
+    let result = install_modpack_inner(
+        &app,
+        &client,
+        &java_path,
+        &base,
+        ModpackInstallRef {
+            source,
+            project_id: &req.project_id,
+            version_id: req.version_id.as_deref(),
+            curseforge_key: &curseforge_key,
+            accept_eula: req.accept_eula,
+        },
+    )
+    .await;
+
+    let mut i = app.0.lock().await;
+    i.installing = false;
+    match result {
+        Ok((minecraft, loader)) => {
+            i.cfg.server_name = req.server_name.trim().to_string();
+            i.cfg.version = minecraft;
+            i.cfg.loader = loader;
+            i.cfg.server_dir = req.server_dir.trim().to_string();
+            i.cfg.memory_limit_gb = req.memory_limit_gb;
+            let server_dir = i.cfg.server_dir.clone();
+            i.persist().await.map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Modpack instalado, mas falhou ao salvar a configuração: {e}"),
+                )
+            })?;
+            let eula_note = if req.accept_eula {
+                "EULA aceita."
+            } else {
+                "Aceite o EULA para iniciar."
+            };
+            i.push(
+                format!("Modpack instalado em {server_dir}. {eula_note}"),
+                "success",
+            );
+            Ok(Json(view(&mut i)))
+        }
+        Err(error) => {
+            i.push(
+                "Falha ao instalar o modpack. Os detalhes estão no erro exibido.",
+                "error",
+            );
+            Err(error)
+        }
+    }
+}
+
+// ───────────────────────── Backups ─────────────────────────
+
+#[derive(Serialize)]
+struct BackupItem {
+    name: String,
+    size: u64,
+    created: String,
+    #[serde(skip)]
+    modified: Option<std::time::SystemTime>,
+}
+
+fn backups_dir(base: &Path) -> PathBuf {
+    base.join("backups")
+}
+
+async fn backup_items(base: &Path) -> Result<Vec<BackupItem>, ApiErr> {
+    let dir = backups_dir(base);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a pasta de backups: {e}"),
+        )
+    })?;
+    let mut items = Vec::new();
+    let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao listar backups: {e}"),
+        )
+    })?;
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao ler backups: {e}"),
+        )
+    })? {
+        let metadata = match entry.metadata().await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => continue,
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".zip") {
+            continue;
+        }
+        let modified = metadata.modified().ok();
+        let created = modified
+            .map(|time| {
+                let datetime: DateTime<Local> = time.into();
+                datetime.format("%d/%m/%Y %H:%M").to_string()
+            })
+            .unwrap_or_default();
+        items.push(BackupItem {
+            name,
+            size: metadata.len(),
+            created,
+            modified,
+        });
+    }
+    items.sort_by_key(|item| std::cmp::Reverse(item.modified));
+    Ok(items)
+}
+
+async fn list_backups(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    let base = {
+        let i = app.0.lock().await;
+        expand(&i.cfg.server_dir)
+    };
+    Ok(Json(json!({"items": backup_items(&base).await?})))
+}
+
+fn create_backup_blocking(base: &Path, destination: &Path) -> Result<u64, String> {
+    let file = fs::File::create(destination).map_err(|e| e.to_string())?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    fn add_path(
+        zip: &mut ZipWriter<fs::File>,
+        path: &Path,
+        relative: &Path,
+        options: SimpleFileOptions,
+        top_level: bool,
+    ) -> Result<(), String> {
+        let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Ok(());
+        }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if top_level {
+            let skip = matches!(
+                name.as_str(),
+                "backups" | "logs" | "cache" | "libraries" | "versions" | "crash-reports"
+            ) || name.starts_with(".shadowpainel")
+                || name.ends_with(".jar")
+                || name.ends_with(".log")
+                || name.ends_with(".log.gz");
+            if skip {
+                return Ok(());
+            }
+        }
+        if metadata.is_dir() {
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    add_path(
+                        zip,
+                        &entry.path(),
+                        &relative.join(entry.file_name()),
+                        options,
+                        false,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+        if !metadata.is_file() {
+            return Ok(());
+        }
+        let entry_name = relative.to_string_lossy().replace('\\', "/");
+        zip.start_file(entry_name, options)
+            .map_err(|e| e.to_string())?;
+        let mut source = fs::File::open(path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut source, zip).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    for entry in fs::read_dir(base).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        add_path(
+            &mut zip,
+            &entry.path(),
+            Path::new(&entry.file_name()),
+            options,
+            true,
+        )?;
+    }
+    zip.finish().map_err(|e| e.to_string())?;
+    fs::metadata(destination)
+        .map(|metadata| metadata.len())
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Deserialize)]
+struct BackupCreateRequest {
+    name: Option<String>,
+}
+
+async fn create_backup(
+    State(app): State<AppState>,
+    Json(req): Json<BackupCreateRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let base = {
+        let i = app.0.lock().await;
+        if i.status != Status::Offline || i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Pare o servidor e aguarde instalações para criar um backup.",
+            ));
+        }
+        expand(&i.cfg.server_dir)
+    };
+    let requested = req.name.as_deref().unwrap_or("").trim();
+    let name = if requested.is_empty() {
+        format!("backup-{}.zip", Local::now().format("%Y%m%d-%H%M%S"))
+    } else {
+        let name = if requested.ends_with(".zip") {
+            requested.to_string()
+        } else {
+            format!("{requested}.zip")
+        };
+        safe_filename(&name)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de backup inválido."))?
+            .to_string()
+    };
+    let dir = backups_dir(&base);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a pasta de backups: {e}"),
+        )
+    })?;
+    let destination = dir.join(&name);
+    if destination.exists() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Já existe um backup com esse nome.",
+        ));
+    }
+    let base_copy = base.clone();
+    let destination_copy = destination.clone();
+    let size =
+        tokio::task::spawn_blocking(move || create_backup_blocking(&base_copy, &destination_copy))
+            .await
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Falha ao criar o backup: {e}"),
+                )
+            })?
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Falha ao criar o backup: {e}"),
+                )
+            })?;
+    let mut i = app.0.lock().await;
+    i.push(format!("Backup criado: {name}"), "success");
+    drop(i);
+    Ok(Json(json!({
+        "ok": true,
+        "name": name,
+        "size": size,
+        "items": backup_items(&base).await?,
+    })))
+}
+
+#[derive(Deserialize)]
+struct BackupDeleteRequest {
+    name: String,
+}
+
+async fn delete_backup(
+    State(app): State<AppState>,
+    Json(req): Json<BackupDeleteRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let base = {
+        let i = app.0.lock().await;
+        expand(&i.cfg.server_dir)
+    };
+    let name = safe_filename(req.name.trim())
+        .filter(|name| name.ends_with(".zip"))
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Backup inválido."))?;
+    let path = backups_dir(&base).join(name);
+    tokio::fs::remove_file(&path).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao excluir o backup: {e}"),
+        )
+    })?;
+    Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct BackupNameQuery {
+    name: String,
+}
+
+async fn download_backup(
+    State(app): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<BackupNameQuery>,
+) -> Result<Response, ApiErr> {
+    let base = {
+        let i = app.0.lock().await;
+        expand(&i.cfg.server_dir)
+    };
+    let name = safe_filename(query.name.trim())
+        .filter(|name| name.ends_with(".zip"))
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Backup inválido."))?;
+    let path = backups_dir(&base).join(name);
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| err(StatusCode::NOT_FOUND, format!("Backup não encontrado: {e}")))?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao preparar o backup: {e}"),
+            )
+        })
 }
 
 // ───────────────────────── Infra ─────────────────────────
@@ -2843,12 +4932,43 @@ async fn shutdown_server(app: &AppState) {
         i.status = Status::Stopping;
         send_line(&mut i, "stop").await;
     }
-    for _ in 0..60 {
+    for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if app.0.lock().await.status == Status::Offline {
-            break;
+            return;
         }
     }
+    let sender = {
+        let mut i = app.0.lock().await;
+        if i.status == Status::Stopping {
+            let sender = i.kill_tx.take();
+            if sender.is_some() {
+                i.push("Encerrando o servidor à força.", "warning");
+            }
+            sender
+        } else {
+            None
+        }
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(());
+    }
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if app.0.lock().await.status == Status::Offline {
+            return;
+        }
+    }
+}
+
+async fn shutdown(State(app): State<AppState>) -> Json<Value> {
+    let state = app.clone();
+    tokio::spawn(async move {
+        shutdown_server(&state).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        std::process::exit(0);
+    });
+    Json(json!({"ok": true}))
 }
 
 #[tokio::main]
@@ -2858,6 +4978,10 @@ async fn main() -> anyhow::Result<()> {
 
     let loaded = load_e4all(&cfg.e4all.minecraft_dir);
     cfg.e4all = loaded;
+
+    if detect_launch(&expand(&cfg.server_dir)).is_some() {
+        cfg.loader = infer_loader(&expand(&cfg.server_dir));
+    }
 
     let profiles = load_profiles(&cfg_path, &cfg).await;
     let java_detected = detect_java(&cfg.java_path).await;
@@ -2899,7 +5023,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/server/delete", post(delete_server))
         .route("/api/server/download", post(download_server))
         .route("/api/server/eula", post(accept_eula))
-        .route("/api/server/install-fabric", post(install_fabric))
         .route(
             "/api/server/properties",
             get(get_server_properties).post(save_server_properties),
@@ -2912,8 +5035,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/content/search", post(search_content))
         .route("/api/content/versions", get(get_content_versions))
         .route("/api/content/install", post(install_content))
-        .route("/api/mods/search", post(search_mods))
-        .route("/api/mods/install", post(install_mod))
+        .route("/api/curseforge/status", get(curseforge_status))
+        .route("/api/curseforge/config", post(save_curseforge_config))
+        .route("/api/modpacks/search", post(search_modpacks))
+        .route("/api/modpacks/versions", get(modpack_versions))
+        .route("/api/modpacks/install", post(install_modpack))
+        .route("/api/backups", get(list_backups))
+        .route("/api/backups/create", post(create_backup))
+        .route("/api/backups/delete", post(delete_backup))
+        .route("/api/backups/download", get(download_backup))
+        .route("/api/shutdown", post(shutdown))
         .route("/api/config", post(save_config))
         .route("/api/e4all/config", post(save_e4all))
         .route("/api/e4all/status", post(e4all_status))
