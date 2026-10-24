@@ -35,7 +35,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.8.2";
+const APP_VERSION: &str = "0.8.3";
 
 const MAX_LOGS: usize = 500;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -667,18 +667,20 @@ fn java_major_for_version(version: &str) -> u32 {
         .filter(|part| !part.is_empty())
         .filter_map(|part| part.parse().ok())
         .collect();
-    if parts.first() == Some(&1) {
-        let minor = parts.get(1).copied().unwrap_or(21);
-        let patch = parts.get(2).copied().unwrap_or(0);
-        if minor >= 21 || (minor == 20 && patch >= 5) {
-            21
-        } else if minor >= 17 {
-            17
-        } else {
-            8
+    match parts.first() {
+        Some(1) => {
+            let minor = parts.get(1).copied().unwrap_or(21);
+            let patch = parts.get(2).copied().unwrap_or(0);
+            if minor >= 21 || (minor == 20 && patch >= 5) {
+                21
+            } else if minor >= 17 {
+                17
+            } else {
+                8
+            }
         }
-    } else {
-        21
+        Some(year) if *year >= 26 => 25,
+        _ => 21,
     }
 }
 
@@ -4232,9 +4234,9 @@ async fn install_paper(
     kind: &str,
 ) -> Result<(), ApiErr> {
     let url = if kind == "paper" {
-        let builds: Value = client
+        let build: Value = client
             .get(format!(
-                "https://api.papermc.io/v2/projects/paper/versions/{mc}"
+                "https://fill.papermc.io/v3/projects/paper/versions/{mc}/builds/latest"
             ))
             .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
             .send()
@@ -4245,14 +4247,10 @@ async fn install_paper(
             .json()
             .await
             .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Paper JSON: {e}")))?;
-        let build = builds["builds"]
-            .as_array()
-            .and_then(|b| b.last())
-            .and_then(|b| b.as_i64())
-            .ok_or_else(|| err(StatusCode::NOT_FOUND, "Build Paper não encontrada."))?;
-        format!(
-            "https://api.papermc.io/v2/projects/paper/versions/{mc}/builds/{build}/downloads/paper-{mc}-{build}.jar"
-        )
+        build["downloads"]["server:default"]["url"]
+            .as_str()
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "Build Paper não encontrada."))?
+            .to_string()
     } else {
         let builds: Value = client
             .get(format!("https://api.purpurmc.org/v2/purpur/{mc}"))
@@ -4270,10 +4268,14 @@ async fn install_paper(
             .json()
             .await
             .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Purpur JSON: {e}")))?;
-        let build = builds["builds"]
-            .as_array()
-            .and_then(|b| b.last())
-            .and_then(|b| b.as_str())
+        let build = builds["builds"]["latest"]
+            .as_str()
+            .or_else(|| {
+                builds["builds"]["all"]
+                    .as_array()
+                    .and_then(|b| b.last())
+                    .and_then(Value::as_str)
+            })
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "Build Purpur não encontrada."))?;
         format!("https://api.purpurmc.org/v2/purpur/{mc}/{build}/download")
     };
@@ -7310,8 +7312,8 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_e4all_link, offline_uuid, parse_java_major, qr_svg, update_checksum_from_sums,
-        version_parts,
+        extract_e4all_link, java_major_for_version, offline_uuid, parse_java_major, qr_svg,
+        update_checksum_from_sums, version_parts,
     };
 
     #[test]
@@ -7353,6 +7355,18 @@ mod tests {
     }
 
     #[test]
+    fn picks_java_for_minecraft_versions() {
+        assert_eq!(java_major_for_version("26.1"), 25);
+        assert_eq!(java_major_for_version("26.2"), 25);
+        assert_eq!(java_major_for_version("26.3"), 25);
+        assert_eq!(java_major_for_version("1.21.11"), 21);
+        assert_eq!(java_major_for_version("1.20.5"), 21);
+        assert_eq!(java_major_for_version("1.20.4"), 17);
+        assert_eq!(java_major_for_version("1.16.5"), 8);
+        assert_eq!(java_major_for_version("desconhecida"), 21);
+    }
+
+    #[test]
     fn parses_java_versions() {
         assert_eq!(parse_java_major("openjdk version \"1.8.0_402\""), Some(8));
         assert_eq!(parse_java_major("openjdk version \"17.0.10\""), Some(17));
@@ -7364,7 +7378,7 @@ mod tests {
     fn compares_update_versions() {
         assert!(version_parts("0.10.0") > version_parts("0.9.9"));
         assert!(version_parts("v1.0.0") > version_parts("0.99.99"));
-        assert_eq!(version_parts("0.8.2"), (0, 8, 2));
+        assert_eq!(version_parts("0.8.3"), (0, 8, 3));
     }
 
     #[test]

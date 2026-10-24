@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.8.2';
+  const APP_VERSION = '0.8.3';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -184,6 +184,7 @@
   $: resolvedE4allLink = server.e4all_link || e4allLink;
   $: resolvedE4allSource = server.e4all_link ? 'console do servidor' : e4allLinkSource;
   $: setupPathConflict = server.installed && sameDir(setup.server_dir, server.server_dir);
+  $: setupJavaMajor = javaMajorForVersion(setupVersion);
 
   let launcherCandidates: LauncherCandidate[] = [];
   let scanningLaunchers = false;
@@ -311,6 +312,7 @@
       if (minor >= 21 || (minor === 20 && patch >= 5)) return 21;
       return minor >= 17 ? 17 : 8;
     }
+    if (parts[0] >= 26) return 25;
     return parts[0] >= 21 ? 21 : 17;
   }
 
