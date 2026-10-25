@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.8.3';
+  const APP_VERSION = '0.8.4';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -163,9 +163,13 @@
   let consoleEl:HTMLDivElement | undefined;
   let consolePinned = true;
   let iconInput:HTMLInputElement | undefined;
+  let jarInput:HTMLInputElement | undefined;
+  let jarImporting = false;
 
   let catalogSelected: Set<string> = new Set();
+  let catalogSources:Record<string,string> = {};
   let modVersions: ModVersion[] = [];
+  let modVersionsRequest = 0;
   let selectedModVersion = '';
   let selectedModVersions:Record<string,string> = {};
   let installingBatch = false;
@@ -279,6 +283,73 @@
       notice = e instanceof Error ? e.message : 'Falha ao salvar o ícone.';
     } finally {
       input.value = '';
+    }
+  }
+
+  async function importServerJar(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.jar')) {
+      setNotice('Escolha um arquivo .jar baixado do Minecraft ou do seu modloader.');
+      return;
+    }
+    if (!setup.server_name.trim() || !setup.server_dir.trim()) {
+      setNotice('Informe o nome e a pasta do servidor antes de importar o server.jar.');
+      return;
+    }
+    if (!setupVersion) {
+      setNotice('Escolha a versão do Minecraft antes de importar o server.jar.');
+      return;
+    }
+    if (setupPathConflict) {
+      setNotice('Esta pasta pertence ao servidor ativo. Escolha outra pasta para importar o jar.');
+      return;
+    }
+    if (file.size > 256 * 1024 * 1024) {
+      setNotice('O server.jar não pode passar de 256 MB.');
+      return;
+    }
+
+    jarImporting = true;
+    notice = '';
+    noticeActions = [];
+    try {
+      const params = new URLSearchParams({
+        server_name: setup.server_name.trim(),
+        version: setupVersion,
+        loader: setup.loader,
+        server_dir: setup.server_dir.trim(),
+        memory_limit_gb: String(setup.memory_limit_gb),
+        filename: file.name,
+      });
+      const response = await fetch(`/api/server/import-jar?${params}`, {
+        method:'POST',
+        headers:{'Content-Type':'application/java-archive'},
+        body:file,
+      });
+      const text = await response.text();
+      let data:any = {};
+      if (text) {
+        try { data = JSON.parse(text); }
+        catch { if (response.ok) throw new Error('Resposta inválida do servidor.'); }
+      }
+      if (!response.ok) throw new Error(
+        typeof data.error === 'string' ? data.error : (text || `Erro ${response.status}`)
+      );
+      server = data as Server;
+      activeTab = 'overview';
+      setNotice('server.jar importado. Aceite a EULA e inicie o servidor.');
+      await loadContent();
+      await loadServers();
+    } catch(e) {
+      fail(e, 'Falha ao importar o server.jar.', [
+        { label:'Escolher outro arquivo', run:()=>jarInput?.click() },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
+    } finally {
+      jarImporting = false;
     }
   }
 
@@ -652,7 +723,7 @@
     try {
       const data = await api<{items:ContentItem[]}>(`/content?kind=${contentKind}`);
       content = data.items;
-      selectedItems.clear();
+      selectedItems = new Set();
     } catch(e) {
       fail(e, 'Falha ao listar conteúdo.', [
         { label:'Tentar novamente', run:loadContent },
@@ -785,38 +856,28 @@
     }
   }
 
-  async function installContent(project_id:string, version_id?: string, source = contentSource) {
-    try {
-      const version = contentVersion || server.version;
-      await api('/content/install', json({
-        project_id, kind:contentKind, loader:contentLoader, version,
-        version_id, source,
-      }));
-      notice = 'Conteúdo instalado.';
-      await loadContent();
-      await runCatalogSearch();
-    } catch(e) {
-      fail(e, 'Falha ao instalar conteúdo.', [
-        { label:'Tentar novamente', run:()=>installContent(project_id, version_id, source) },
-        { label:'Abrir pasta', run:openServerFolder },
-      ]);
-    }
+  function clearCatalogSelection() {
+    catalogSelected = new Set();
+    catalogSources = {};
   }
 
   async function installBatch() {
     if (catalogSelected.size === 0) return;
     installingBatch = true;
     notice = '';
+    noticeActions = [];
     let success = 0;
     let errors: string[] = [];
+    const selected = Array.from(catalogSelected);
 
-    for (const projectId of catalogSelected) {
+    for (const projectId of selected) {
       try {
         const version = contentVersion || server.version;
         const versionId = selectedModVersions[projectId] || undefined;
+        const source = catalogSources[projectId] || contentSource;
         await api('/content/install', json({
           project_id: projectId, kind: contentKind, loader: contentLoader, version,
-          version_id: versionId, source: contentSource,
+          version_id: versionId, source,
         }));
         success++;
       } catch (e) {
@@ -826,10 +887,13 @@
 
     installingBatch = false;
     if (errors.length > 0) {
-      notice = `${success} instalado(s). Erros: ${errors.join(', ')}`;
+      const failed = new Set(selected.filter(id => errors.some(error => error.startsWith(`${id}:`))));
+      catalogSelected = failed;
+      catalogSources = Object.fromEntries(Object.entries(catalogSources).filter(([id]) => failed.has(id)));
+      setNotice(`${success} instalado(s). ${errors.length} falhou(aram): ${errors.join(', ')}`);
     } else {
-      notice = `${success} mod(s) instalado(s) com sucesso!`;
-      catalogSelected.clear();
+      clearCatalogSelection();
+      setNotice(`${success} mod(s) instalado(s) com sucesso!`);
     }
     await loadContent();
     await runCatalogSearch();
@@ -862,15 +926,26 @@
   }
 
   function toggleSelection(filename: string) {
-    if (selectedItems.has(filename)) selectedItems.delete(filename);
-    else selectedItems.add(filename);
-    selectedItems = selectedItems;
+    const next = new Set(selectedItems);
+    if (next.has(filename)) next.delete(filename);
+    else next.add(filename);
+    selectedItems = next;
   }
 
   function selectAll() {
-    if (selectedItems.size === content.length) selectedItems.clear();
-    else content.forEach(c => selectedItems.add(c.filename));
-    selectedItems = selectedItems;
+    if (selectedItems.size === content.length) {
+      selectedItems = new Set();
+      return;
+    }
+    selectedItems = new Set(content.map(c => c.filename));
+  }
+
+  function closeCatalog() {
+    if (installingBatch) return;
+    catalogOpen = false;
+    catalogDetail = null;
+    modVersions = [];
+    clearCatalogSelection();
   }
 
   async function openCatalog() {
@@ -880,7 +955,7 @@
     }
     catalogOpen = true;
     catalogDetail = null;
-    catalogSelected.clear();
+    clearCatalogSelection();
     selectedModVersions = {};
     catalogOffset = 0;
     catalogHasMore = true;
@@ -941,6 +1016,7 @@
   }
 
   async function loadModVersions(projectId: string, source = contentSource) {
+    const requestId = ++modVersionsRequest;
     modVersions = [];
     selectedModVersion = '';
     if (!projectId) return;
@@ -951,13 +1027,14 @@
         version, source,
       });
       const data = await api<ModVersion[]>(`/content/versions?${params}`);
+      if (requestId !== modVersionsRequest) return;
       modVersions = data;
       if (modVersions.length > 0) {
         selectedModVersion = selectedModVersions[projectId] || modVersions[0].id;
         selectedModVersions = {...selectedModVersions, [projectId]:selectedModVersion};
       }
     } catch (e) {
-      console.error(e);
+      if (requestId === modVersionsRequest) console.error(e);
     }
   }
 
@@ -965,12 +1042,32 @@
     return results.some(item => item.project_id === projectId && item.installed === true);
   }
 
-  async function toggleCatalogSelection(item: ContentResult) {
+  function toggleCatalogSelection(item: ContentResult) {
     if (isInstalled(item.project_id)) return;
-    if (!selectedModVersions[item.project_id]) await loadModVersions(item.project_id);
-    if (catalogSelected.has(item.project_id)) catalogSelected.delete(item.project_id);
-    else catalogSelected.add(item.project_id);
-    catalogSelected = catalogSelected;
+    const next = new Set(catalogSelected);
+    const sources = { ...catalogSources };
+    const source = item.source || contentSource;
+    if (next.has(item.project_id)) {
+      next.delete(item.project_id);
+      delete sources[item.project_id];
+    } else {
+      next.add(item.project_id);
+      sources[item.project_id] = source;
+      if (!selectedModVersions[item.project_id]) loadModVersions(item.project_id, source);
+    }
+    catalogSelected = next;
+    catalogSources = sources;
+  }
+
+  async function openCatalogDetail(item: ContentResult) {
+    catalogDetail = item;
+    await loadModVersions(item.project_id, item.source || contentSource);
+  }
+
+  function closeCatalogDetail() {
+    catalogDetail = null;
+    modVersions = [];
+    selectedModVersion = '';
   }
 
   function openDelete() {
@@ -1178,8 +1275,8 @@
     contentSource = source;
     catalogCategory = 'all';
     results = [];
-    catalogSelected.clear();
-    catalogDetail = null;
+    clearCatalogSelection();
+    closeCatalogDetail();
     if (catalogOpen) runCatalogSearch();
   }
 
@@ -1298,8 +1395,8 @@
   $: if (activeTab === 'content') loadContent();
   $: if (contentKind || contentVersion || contentLoader || contentSource) {
     results = [];
-    catalogDetail = null;
-    catalogSelected.clear();
+    closeCatalogDetail();
+    clearCatalogSelection();
   }
   $: if (activeTab === 'config' && configSection === 'e4all' && !e4status) checkE4all();
   $: if (activeTab === 'config' && configSection === 'integrations' && !cfStatus && !cfChecking) checkCurseForge();
@@ -1682,11 +1779,11 @@
               <div class="installed-card"
                    class:selected={selectedItems.has(file.filename)}
                    role="button" tabindex="0"
-                   on:dblclick={() => toggleSelection(file.filename)}
+                   on:click={() => toggleSelection(file.filename)}
                    on:keydown={(event) => (event.key === 'Enter' || event.key === ' ') && toggleSelection(file.filename)}>
                 <input type="checkbox" class="item-checkbox"
                        checked={selectedItems.has(file.filename)}
-                       on:change={() => toggleSelection(file.filename)} />
+                       on:click|stopPropagation={() => toggleSelection(file.filename)} />
                 <div class="catalog-icon" style="width:36px; height:36px; font-size:14px;">
                   {#if file.icon_url}
                     <img src={file.icon_url} alt=""/>
@@ -1716,14 +1813,14 @@
       </section>
 
       {#if catalogOpen}
-        <div class="modal-overlay" role="presentation" on:click|self={()=>{catalogOpen=false;catalogDetail=null;}} on:keydown={(e)=>e.key==='Escape'&&(catalogOpen=false,catalogDetail=null)}>
+        <div class="modal-overlay" role="presentation" on:click|self={closeCatalog} on:keydown={(e)=>e.key==='Escape'&&closeCatalog()}>
           <div class="modal catalog-modal">
             <div class="modal-head">
               <div>
                 <h3>Adicionar {contentKind}</h3>
                 <p>Explore por nome, autor ou descrição. Filtros: {contentVersion || '—'} · {contentLoader}</p>
               </div>
-              <button class="modal-close" on:click={()=>{catalogOpen=false;catalogDetail=null;}}>✕</button>
+              <button class="modal-close" on:click={closeCatalog} disabled={installingBatch}>✕</button>
             </div>
 
             <div class="catalog-search-container">
@@ -1781,9 +1878,9 @@
                        class:selected={catalogSelected.has(item.project_id)}
                        class:installed={isInstalled(item.project_id)}
                        role="button" tabindex="0"
-                       on:click={() => !isInstalled(item.project_id) && (catalogDetail=item, loadModVersions(item.project_id, item.source))}
-                       on:dblclick|stopPropagation={() => toggleCatalogSelection(item)}
-                       on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&!isInstalled(item.project_id)&&(catalogDetail=item, loadModVersions(item.project_id, item.source))}>
+                       aria-pressed={catalogSelected.has(item.project_id)}
+                       on:click={() => toggleCatalogSelection(item)}
+                       on:keydown={(e)=>(e.key==='Enter'||e.key===' ')&&toggleCatalogSelection(item)}>
                     {#if !isInstalled(item.project_id)}
                       <input type="checkbox" class="item-checkbox"
                              checked={catalogSelected.has(item.project_id)}
@@ -1797,6 +1894,9 @@
                       <b>{item.title} <span class="source-badge" class:cf={item.source==='curseforge'}>{item.source === 'curseforge' ? 'CF' : 'MR'}</span></b>
                       <small>{item.description || `Projeto ${item.source === 'curseforge' ? 'CurseForge' : 'Modrinth'}`}</small>
                       <span class="catalog-downloads">⇩ {item.downloads.toLocaleString('pt-BR')}{#if item.author} · por {item.author}{/if}</span>
+                      {#if !isInstalled(item.project_id)}
+                        <button type="button" class="catalog-details" on:click|stopPropagation={() => openCatalogDetail(item)}>Detalhes e versões</button>
+                      {/if}
                     </div>
                     {#if isInstalled(item.project_id)}
                       <span class="installed-badge">Já instalado</span>
@@ -1819,13 +1919,13 @@
                     {#if catalogDetail.version_number}<small class="version-tag">Versão: {catalogDetail.version_number}</small>{/if}
                     <small>{catalogDetail.downloads.toLocaleString('pt-BR')} downloads{#if catalogDetail.author} · por {catalogDetail.author}{/if}</small>
                   </div>
-                  <button class="modal-close" on:click={()=>{catalogDetail=null; modVersions=[];}}>✕</button>
+                  <button class="modal-close" on:click={closeCatalogDetail}>✕</button>
                 </div>
                 <p>{catalogDetail.description || 'Sem descrição fornecida.'}</p>
 
                 {#if modVersions.length > 0}
                   <div class="version-picker">
-                    <label for="content-version-select">Selecionar versão do projeto</label>
+                    <label for="content-version-select">Versão usada ao instalar</label>
                     <select id="content-version-select" bind:value={selectedModVersion} on:change={()=>catalogDetail && (selectedModVersions={...selectedModVersions,[catalogDetail.project_id]:selectedModVersion})}>
                       {#each modVersions as v}
                         <option value={v.id}>{v.version_number} ({v.game_versions.join(', ')})</option>
@@ -1834,27 +1934,22 @@
                   </div>
                 {/if}
 
-                <div class="detail-actions">
-                  <button class="secondary" on:click={()=>{catalogDetail=null; modVersions=[];}}>Cancelar</button>
-                  <button class="primary"
-                          on:click={async () => {
-                            if (catalogDetail) {
-                              await installContent(catalogDetail.project_id, selectedModVersion, catalogDetail.source || contentSource);
-                              catalogDetail=null;
-                              modVersions=[];
-                            }
-                          }}>
-                    Confirmar Instalação
-                  </button>
-                </div>
+                <p class="detail-hint">
+                  {catalogSelected.has(catalogDetail.project_id)
+                    ? 'Selecionado. Use Instalar Selecionados no rodapé.'
+                    : 'Clique no cartão para selecionar. Depois use Instalar Selecionados.'}
+                </p>
               </div>
             {/if}
 
             <div class="modal-footer-batch">
               <span>{catalogSelected.size} item(ns) selecionado(s)</span>
-              <button class="primary" on:click={installBatch} disabled={catalogSelected.size === 0 || installingBatch}>
-                {installingBatch ? 'Instalando...' : 'Instalar Selecionados'}
-              </button>
+              <div class="batch-actions">
+                <button class="secondary" on:click={closeCatalog} disabled={installingBatch}>Cancelar</button>
+                <button class="primary" on:click={installBatch} disabled={catalogSelected.size === 0 || installingBatch}>
+                  {installingBatch ? 'Instalando...' : 'Instalar Selecionados'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -2509,6 +2604,17 @@
           <div class="setup-note">
             <b>Depois da instalação</b>
             <span>Você poderá administrar mods, plugins e datapacks na área de conteúdo, escolhendo entre Modrinth e CurseForge.</span>
+          </div>
+
+          <div class="setup-import">
+            <div>
+              <b>Já tem um server.jar?</b>
+              <small>Use o arquivo que você baixou. Ele será salvo como <code>server.jar</code> na pasta acima; ela precisa estar vazia.</small>
+            </div>
+            <button class="secondary" type="button" on:click={()=>jarInput?.click()} disabled={jarImporting || server.installing || setupPathConflict}>
+              {jarImporting ? 'ENVIANDO...' : 'USAR MEU SERVER.JAR'}
+            </button>
+            <input bind:this={jarInput} type="file" accept=".jar,application/java-archive" hidden on:change={importServerJar} />
           </div>
 
           <button class="primary" on:click={createServer} disabled={loading || !setupVersion || server.installing || setupPathConflict}>

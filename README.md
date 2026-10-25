@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-0.8.3-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/version-0.8.4-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
 <img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
 <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
 <img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
@@ -23,13 +23,13 @@ aplicativo**, sem navegador externo.
 
 | | Recurso | Descrição |
 |---|---|---|
-| 🚀 | **Criar o servidor do zero** | Baixe o `server.jar` da versão desejada e aceite a EULA direto pelo painel. |
+| 🚀 | **Criar o servidor do zero** | Baixe o `server.jar` da versão desejada ou importe um arquivo que você já tenha baixado. |
 | 🧩 | **Mods do Modrinth e CurseForge** | Busque, filtre por versão/loader e instale mods ou plugins das duas fontes. |
 | 📦 | **Instalar modpacks** | Aplique modpacks completos do Modrinth ou CurseForge, com overrides e loader automáticos. |
 | ☕ | **Java gerenciado** | Detecta a versão exigida pelo Minecraft/loader — incluindo Java 25 para 26.x —, baixa o runtime correto do Adoptium e usa automaticamente, sem pedir caminhos. |
 | 💾 | **Backups e desfazer** | Backup automático antes de instalar conteúdo, restauração em um clique e lixeira temporária para conteúdo e backups. |
 | 📦 | **Instalar em lote** | Selecione vários projetos e instale todos de uma vez com um clique. |
-| 🖱️ | **Seleção por duplo clique** | Dê duplo clique no nome de um projeto ou arquivo instalado para selecioná-lo; o item fica destacado para ações em lote. |
+| 🖱️ | **Seleção com um clique** | Clique em um projeto ou arquivo instalado para selecioná-lo; use o rodapé para instalar ou remover em lote. |
 | ♾️ | **Catálogo com scroll infinito** | Ao chegar ao fim da janela de resultados, mais mods, plugins ou datapacks são carregados automaticamente. |
 | 🎯 | **Escolher a versão do mod** | Diferente da versão do Minecraft: escolha a build exata que o servidor vai rodar. |
 | 🔌 | **Plugins e datapacks** | Suporte a Paper, Purpur e datapacks no mesmo catálogo. |

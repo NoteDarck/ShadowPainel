@@ -1,6 +1,6 @@
 use axum::{
-    body::Body,
-    extract::{Request, State},
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -35,9 +35,10 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.8.3";
+const APP_VERSION: &str = "0.8.4";
 
 const MAX_LOGS: usize = 500;
+const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const PACK_DOWNLOAD_CONCURRENCY: usize = 4;
 const PACK_INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
@@ -2014,6 +2015,127 @@ async fn download_server(
         format!("server.jar da versão {} baixado.", req.version),
         "success",
     );
+    Ok(Json(view(&mut i)))
+}
+
+fn looks_like_jar(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"PK\x03\x04")
+}
+
+#[derive(Deserialize)]
+struct ImportJarQuery {
+    server_name: String,
+    version: String,
+    loader: String,
+    server_dir: String,
+    memory_limit_gb: u64,
+    filename: Option<String>,
+}
+
+async fn import_server_jar(
+    State(app): State<AppState>,
+    axum::extract::Query(req): axum::extract::Query<ImportJarQuery>,
+    body: Bytes,
+) -> ApiResult {
+    if req.server_name.trim().is_empty()
+        || req.version.trim().is_empty()
+        || req.server_dir.trim().is_empty()
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Nome, versão e pasta são obrigatórios.",
+        ));
+    }
+    if !valid_loader(&req.loader) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Tipo de servidor não suportado.",
+        ));
+    }
+    if !(1..=64).contains(&req.memory_limit_gb) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Memória deve ficar entre 1 e 64 GB.",
+        ));
+    }
+    if !looks_like_jar(&body) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "O arquivo enviado não é um server.jar válido.",
+        ));
+    }
+    if body.len() > MAX_SERVER_JAR_BYTES {
+        return Err(err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "O server.jar não pode passar de 256 MB.",
+        ));
+    }
+
+    let dir = expand(&req.server_dir);
+    {
+        let mut i = app.0.lock().await;
+        if i.status != Status::Offline || i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Pare o servidor e aguarde instalações antes de importar outro jar.",
+            ));
+        }
+        if detect_launch(&dir).is_some() || dir.join("server.jar").is_file() {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Esta pasta já possui um servidor. Escolha outra pasta vazia.",
+            ));
+        }
+        i.installing = true;
+    }
+
+    let tmp = dir.join(".shadowpainel-import-server.jar.tmp");
+    let jar = dir.join("server.jar");
+    let write_result: std::io::Result<()> = async {
+        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::write(&tmp, &body).await?;
+        tokio::fs::rename(&tmp, &jar).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = write_result {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        let mut i = app.0.lock().await;
+        i.installing = false;
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar o server.jar: {e}"),
+        ));
+    }
+
+    let filename = req
+        .filename
+        .as_deref()
+        .unwrap_or("server.jar")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(80)
+        .collect::<String>();
+    let filename = if filename.trim().is_empty() {
+        "server.jar".to_string()
+    } else {
+        filename.trim().to_string()
+    };
+
+    let mut i = app.0.lock().await;
+    i.installing = false;
+    i.cfg.server_name = req.server_name.trim().into();
+    i.cfg.version = req.version.trim().into();
+    i.cfg.loader = req.loader.trim().into();
+    i.cfg.server_dir = req.server_dir.trim().into();
+    i.cfg.memory_limit_gb = req.memory_limit_gb;
+    i.persist().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("server.jar salvo, mas falhou ao gravar a configuração: {e}"),
+        )
+    })?;
+    i.push(format!("server.jar importado de {filename}."), "success");
     Ok(Json(view(&mut i)))
 }
 
@@ -7257,6 +7379,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/network/diagnose", get(network_diagnose))
         .route("/api/minecraft/versions", get(minecraft_versions))
         .route("/api/server/create", post(create_server))
+        .route(
+            "/api/server/import-jar",
+            post(import_server_jar).layer(DefaultBodyLimit::max(MAX_SERVER_JAR_BYTES)),
+        )
         .route("/api/content", get(list_content))
         .route("/api/content/delete", post(delete_content))
         .route("/api/content/search", post(search_content))
@@ -7312,8 +7438,8 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_e4all_link, java_major_for_version, offline_uuid, parse_java_major, qr_svg,
-        update_checksum_from_sums, version_parts,
+        extract_e4all_link, java_major_for_version, looks_like_jar, offline_uuid, parse_java_major,
+        qr_svg, update_checksum_from_sums, version_parts,
     };
 
     #[test]
@@ -7367,6 +7493,13 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_zip_jars() {
+        assert!(looks_like_jar(b"PK\x03\x04resto"));
+        assert!(!looks_like_jar(b"#!/bin/sh\necho nao"));
+        assert!(!looks_like_jar(b""));
+    }
+
+    #[test]
     fn parses_java_versions() {
         assert_eq!(parse_java_major("openjdk version \"1.8.0_402\""), Some(8));
         assert_eq!(parse_java_major("openjdk version \"17.0.10\""), Some(17));
@@ -7378,7 +7511,7 @@ mod tests {
     fn compares_update_versions() {
         assert!(version_parts("0.10.0") > version_parts("0.9.9"));
         assert!(version_parts("v1.0.0") > version_parts("0.99.99"));
-        assert_eq!(version_parts("0.8.3"), (0, 8, 3));
+        assert_eq!(version_parts("0.8.4"), (0, 8, 4));
     }
 
     #[test]
