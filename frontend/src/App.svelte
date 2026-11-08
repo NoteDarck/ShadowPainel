@@ -1501,13 +1501,13 @@
     closeCatalogDetail();
     clearCatalogSelection();
   }
-  $: if (activeTab === 'config' && configSection === 'e4all' && !e4status) checkE4all();
+  $: if (activeTab === 'config' && configSection === 'e4all' && !e4status && server.e4all.use_e4all) checkE4all();
   $: if (activeTab === 'config' && configSection === 'integrations' && !cfStatus && !cfChecking) checkCurseForge();
   $: if (activeTab === 'config' && configSection === 'backups' && !backupsLoaded && !backupsLoading) loadBackups();
   $: if (activeTab === 'config' && configSection === 'properties') loadWhitelist();
   $: if (activeTab === 'config' && configSection === 'updates' && !updateInfo && !updateChecking) checkUpdates();
-  $: if (activeTab === 'overview' && booted) loadE4allLink();
-  $: if (activeTab === 'config' && configSection === 'e4all') loadE4allLink();
+  $: if (activeTab === 'overview' && booted && server.e4all.use_e4all) loadE4allLink();
+  $: if (activeTab === 'config' && configSection === 'e4all' && server.e4all.use_e4all) loadE4allLink();
   $: lastFriendlyLog = (() => {
     for (let index = server.logs.length - 1; index >= 0; index--) {
       const friendly = humanizeLog(server.logs[index].text);
@@ -1521,7 +1521,7 @@
     loadServers();
     loadVersions();
     const timer = setInterval(() => { refresh(); loadServers(); }, 3000);
-    const e4Timer = setInterval(() => { if (activeTab === 'overview' || (activeTab === 'config' && configSection === 'e4all')) loadE4allLink(); }, 10000);
+    const e4Timer = setInterval(() => { if (server.e4all.use_e4all && (activeTab === 'overview' || (activeTab === 'config' && configSection === 'e4all'))) loadE4allLink(); }, 10000);
     const updateTimer = setTimeout(async () => {
       if (updateInfo || !navigator.onLine) return;
       const lastCheck = Number(localStorage.getItem('shadowpainel-update-check') || 0);
@@ -2501,7 +2501,9 @@
           </button>
           <button class="secondary" on:click={useNextPort}>USAR PRÓXIMA PORTA LIVRE</button>
           <button class="secondary" on:click={openServerFolder}>ABRIR PASTA</button>
-          <button class="secondary" on:click={()=>{configSection='e4all';}}>VER LINK E4ALL</button>
+           {#if server.e4all.use_e4all}
+             <button class="secondary" on:click={()=>{configSection='e4all';}}>VER LINK E4ALL</button>
+           {/if}
         </div>
         {#if networkResult}
           <div class="network-summary">
@@ -2550,7 +2552,7 @@
       </section>
       {/if}
 
-      {#if configSection==='e4all'}
+      {#if configSection==='e4all' && server.e4all.use_e4all}
       <section class="settings-card">
         <div class="card-head">
           <div><h3>e4all</h3><p>Configuração do mod para abrir um mundo LAN pela internet.</p></div>
@@ -2636,12 +2638,16 @@
           <div class="notice" style="margin:0 0 16px;">{e4status.message}</div>
         {/if}
 
-        <div class="settings-subhead"><h4>Hospedagem</h4><p>Controla como o mod compartilha o mundo com os amigos.</p></div>
+        <div class="settings-subhead"><h4>Geral</h4><p>Controla se as funcionalidades de e4all (link, configuração, hospedagem) estão ativas.</p></div>
         <div class="e4all-options">
+          <div class="prop-group" title="Ativa ou desativa as funcionalidades de e4all (link, configuração, hospedagem)."><span class="prop-label">Ativar e4all</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.use_e4all} on:click={() => server.e4all.use_e4all = !server.e4all.use_e4all}>{#if server.e4all.use_e4all}✓{:else}✕{/if}</button></div><small>useE4all</small></div>
           <div class="prop-group" title="Liga o compartilhamento LAN do e4all para amigos entrarem pelo domínio."><span class="prop-label">Compartilhar mundos LAN</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.host_enabled} on:click={() => server.e4all.host_enabled = !server.e4all.host_enabled}>{#if server.e4all.host_enabled}✓{:else}✕{/if}</button></div><small>hostEnabled</small></div>
           <div class="prop-group" title="Mantém o mundo rodando mesmo quando você abre o menu do jogo."><span class="prop-label">Não pausar enquanto hospeda</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.prevent_pause_while_hosting} on:click={() => server.e4all.prevent_pause_while_hosting = !server.e4all.prevent_pause_while_hosting}>{#if server.e4all.prevent_pause_while_hosting}✓{:else}✕{/if}</button></div><small>preventPauseWhileHosting</small></div>
           <div class="prop-group" title="Não mostra o endereço público no chat do Minecraft."><span class="prop-label">Esconder domínio no chat</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.hide_domain_in_chat} on:click={() => server.e4all.hide_domain_in_chat = !server.e4all.hide_domain_in_chat}>{#if server.e4all.hide_domain_in_chat}✓{:else}✕{/if}</button></div><small>hideDomainInChat</small></div>
         </div>
+
+        <div class="settings-subhead"><h4>Hospedagem</h4><p>Controla como o mod compartilha o mundo com os amigos.</p></div>
+        <div class="e4all-options">
 
         <div class="settings-subhead"><h4>Acesso</h4><p>Define quem pode entrar e como as contas são reconhecidas.</p></div>
         <div class="e4all-options">

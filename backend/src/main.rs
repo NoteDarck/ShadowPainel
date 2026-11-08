@@ -94,6 +94,7 @@ struct E4allConfig {
     offline_mode: bool,
     hide_domain_in_chat: bool,
     voice_p2p_enabled: bool,
+    use_e4all: bool,
 }
 
 fn default_e4all_fields() -> E4allConfig {
@@ -119,6 +120,7 @@ fn default_e4all_fields() -> E4allConfig {
         offline_mode: false,
         hide_domain_in_chat: false,
         voice_p2p_enabled: true,
+        use_e4all: true,
     }
 }
 
@@ -3027,14 +3029,24 @@ async fn e4all_link(
     State(app): State<AppState>,
     Json(req): Json<DirRequest>,
 ) -> Json<E4allLinkView> {
-    let (server_link, server_online, default_dir) = {
+    let (server_link, server_online, default_dir, use_e4all) = {
         let i = app.0.lock().await;
         (
             i.e4all_link.clone(),
             i.status == Status::Online,
             i.cfg.e4all.minecraft_dir.clone(),
+            i.cfg.e4all.use_e4all,
         )
     };
+    if !use_e4all {
+        return Json(E4allLinkView {
+            qr_svg: None,
+            link: None,
+            source: None,
+            active: false,
+            checked_at: Local::now().to_rfc3339(),
+        });
+    }
     if let Some(link) = server_link {
         return Json(E4allLinkView {
             qr_svg: qr_svg(&link),
