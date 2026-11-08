@@ -36,7 +36,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.8.6";
+const APP_VERSION: &str = "0.8.7";
 
 const MAX_LOGS: usize = 500;
 const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;
@@ -4558,6 +4558,408 @@ async fn save_server_properties(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Serialize)]
+struct WorldSummary {
+    name: String,
+    path: String,
+    active: bool,
+    size_bytes: u64,
+    has_level_dat: bool,
+    universe_configured: bool,
+}
+
+#[derive(Deserialize)]
+struct WorldRequest {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct WorldPairRequest {
+    source: String,
+    target: String,
+}
+
+#[derive(Deserialize)]
+struct WorldCreateRequest {
+    name: String,
+    seed: String,
+    level_type: String,
+}
+
+fn valid_world_name(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= 128
+        && !name.contains(['/', '\\'])
+        && !Path::new(name).is_absolute()
+        && !name.chars().any(|c| c.is_control())
+}
+
+fn world_path(base: &Path, name: &str) -> Option<PathBuf> {
+    if !valid_world_name(name) {
+        return None;
+    }
+    Some(base.join(name.trim()))
+}
+
+fn directory_size(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                directory_size(&path)
+            } else {
+                entry.metadata().map(|m| m.len()).unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
+async fn list_worlds(State(app): State<AppState>) -> Result<Json<Vec<WorldSummary>>, ApiErr> {
+    let i = app.0.lock().await;
+    let base = expand(&i.cfg.server_dir);
+    let active_name = tokio::fs::read_to_string(base.join("server.properties"))
+        .await
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.trim().strip_prefix("level-name=").map(str::to_owned))
+        })
+        .unwrap_or_else(|| "world".into());
+    let universe_configured = base.join("plugins").join("Universe").exists()
+        || base.join("plugins").join("Universe.jar").exists();
+    let mut worlds = Vec::new();
+    let mut entries = tokio::fs::read_dir(&base).await.map_err(|e| {
+        err(
+            StatusCode::BAD_REQUEST,
+            format!("Não foi possível ler a pasta do servidor: {e}"),
+        )
+    })?;
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao listar mundos: {e}"),
+        )
+    })? {
+        let path = entry.path();
+        if !path.is_dir() || path.file_name().and_then(|n| n.to_str()).is_none() {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.starts_with('.')
+            || name == "plugins"
+            || name == "mods"
+            || name == "config"
+            || name == "logs"
+            || name == "crash-reports"
+            || name == "backups"
+        {
+            continue;
+        }
+        let has_level_dat = path.join("level.dat").is_file();
+        if !has_level_dat && !path.join("region").is_dir() && name != active_name {
+            continue;
+        }
+        worlds.push(WorldSummary {
+            name: name.clone(),
+            path: path.display().to_string(),
+            active: name == active_name,
+            size_bytes: directory_size(&path),
+            has_level_dat,
+            universe_configured,
+        });
+    }
+    worlds.sort_by_key(|world| (!world.active, world.name.to_lowercase()));
+    Ok(Json(worlds))
+}
+
+async fn update_level_name(base: &Path, name: &str) -> Result<(), ApiErr> {
+    let path = base.join("server.properties");
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .unwrap_or_else(|_| "#Minecraft server properties\n".into());
+    let mut found = false;
+    let output = content
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("level-name=") {
+                found = true;
+                format!("level-name={name}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output = if found {
+        format!("{output}\n")
+    } else {
+        format!("{output}\nlevel-name={name}\n")
+    };
+    tokio::fs::write(path, &output).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar mundo ativo: {e}"),
+        )
+    })
+}
+
+async fn activate_world(
+    State(app): State<AppState>,
+    Json(req): Json<WorldRequest>,
+) -> Result<Json<Vec<WorldSummary>>, ApiErr> {
+    let i = app.0.lock().await;
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de trocar o mundo.",
+        ));
+    }
+    let base = expand(&i.cfg.server_dir);
+    let path = world_path(&base, &req.name)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de mundo inválido."))?;
+    if !path.is_dir() || !path.join("level.dat").is_file() {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "Mundo não encontrado ou inválido.",
+        ));
+    }
+    update_level_name(&base, req.name.trim()).await?;
+    drop(i);
+    list_worlds(State(app)).await
+}
+
+async fn create_world(
+    State(app): State<AppState>,
+    Json(req): Json<WorldCreateRequest>,
+) -> Result<Json<Vec<WorldSummary>>, ApiErr> {
+    let i = app.0.lock().await;
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de criar um mundo.",
+        ));
+    }
+    let base = expand(&i.cfg.server_dir);
+    let path = world_path(&base, &req.name)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de mundo inválido."))?;
+    if path.exists() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Já existe um mundo com esse nome.",
+        ));
+    }
+    tokio::fs::create_dir_all(&path).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao criar mundo: {e}"),
+        )
+    })?;
+    update_level_name(&base, req.name.trim()).await?;
+    let props = base.join("server.properties");
+    let content = tokio::fs::read_to_string(&props).await.unwrap_or_default();
+    let mut output = content.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    for (key, value) in [
+        ("level-seed", req.seed.trim()),
+        ("level-type", req.level_type.trim()),
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        if let Some(line) = output
+            .iter_mut()
+            .find(|line| line.starts_with(&format!("{key}=")))
+        {
+            *line = format!("{key}={value}");
+        } else {
+            output.push(format!("{key}={value}"));
+        }
+    }
+    tokio::fs::write(props, format!("{}\\n", output.join("\\n")))
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao salvar configuração do mundo: {e}"),
+            )
+        })?;
+    drop(i);
+    list_worlds(State(app)).await
+}
+
+async fn duplicate_world(
+    State(app): State<AppState>,
+    Json(req): Json<WorldPairRequest>,
+) -> Result<Json<Vec<WorldSummary>>, ApiErr> {
+    let i = app.0.lock().await;
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de duplicar um mundo.",
+        ));
+    }
+    let base = expand(&i.cfg.server_dir);
+    let source = world_path(&base, &req.source)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de mundo de origem inválido."))?;
+    let target = world_path(&base, &req.target).ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "Nome de mundo de destino inválido.",
+        )
+    })?;
+    if !source.is_dir() || !source.join("level.dat").is_file() {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "Mundo de origem não encontrado.",
+        ));
+    }
+    if target.exists() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Já existe um mundo com esse nome.",
+        ));
+    }
+    let source_copy = source.clone();
+    let target_copy = target.clone();
+    tokio::task::spawn_blocking(move || copy_world(&source_copy, &target_copy))
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao duplicar mundo: {e}"),
+            )
+        })?
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao copiar mundo: {e}"),
+            )
+        })?;
+    drop(i);
+    list_worlds(State(app)).await
+}
+
+fn copy_world(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.file_name().and_then(|n| n.to_str()) == Some("session.lock") {
+            continue;
+        }
+        let destination = target.join(entry.file_name());
+        if path.is_dir() {
+            copy_world(&path, &destination)?;
+        } else {
+            fs::copy(path, destination)?;
+        }
+    }
+    Ok(())
+}
+
+async fn rename_world(
+    State(app): State<AppState>,
+    Json(req): Json<WorldPairRequest>,
+) -> Result<Json<Vec<WorldSummary>>, ApiErr> {
+    let i = app.0.lock().await;
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de renomear um mundo.",
+        ));
+    }
+    let base = expand(&i.cfg.server_dir);
+    let source = world_path(&base, &req.source)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de origem inválido."))?;
+    let target = world_path(&base, &req.target)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de destino inválido."))?;
+    if !source.is_dir() || !source.join("level.dat").is_file() {
+        return Err(err(StatusCode::NOT_FOUND, "Mundo não encontrado."));
+    }
+    if target.exists() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Já existe um mundo com esse nome.",
+        ));
+    }
+    let current = tokio::fs::read_to_string(base.join("server.properties"))
+        .await
+        .unwrap_or_default();
+    let active = current
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("level-name="))
+        .unwrap_or("world");
+    tokio::fs::rename(source, target).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao renomear mundo: {e}"),
+        )
+    })?;
+    if req.source.trim() == active {
+        update_level_name(&base, req.target.trim()).await?;
+    }
+    drop(i);
+    list_worlds(State(app)).await
+}
+
+async fn delete_world(
+    State(app): State<AppState>,
+    Json(req): Json<WorldRequest>,
+) -> Result<Json<Vec<WorldSummary>>, ApiErr> {
+    let i = app.0.lock().await;
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de excluir um mundo.",
+        ));
+    }
+    let base = expand(&i.cfg.server_dir);
+    let source = world_path(&base, &req.name)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de mundo inválido."))?;
+    let current = tokio::fs::read_to_string(base.join("server.properties"))
+        .await
+        .unwrap_or_default();
+    let active = current
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("level-name="))
+        .unwrap_or("world");
+    if req.name.trim() == active {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Não é possível excluir o mundo ativo.",
+        ));
+    }
+    if !source.is_dir() {
+        return Err(err(StatusCode::NOT_FOUND, "Mundo não encontrado."));
+    }
+    let trash = base
+        .join(".shadowpainel-trash")
+        .join("worlds")
+        .join(new_trash_token());
+    tokio::fs::create_dir_all(&trash).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar lixeira: {e}"),
+        )
+    })?;
+    tokio::fs::rename(source, trash.join(req.name.trim()))
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao mover mundo para lixeira: {e}"),
+            )
+        })?;
+    drop(i);
+    list_worlds(State(app)).await
+}
+
 #[derive(Deserialize)]
 struct ServerIconRequest {
     data_url: String,
@@ -7989,6 +8391,12 @@ async fn main() -> anyhow::Result<()> {
             "/api/server/properties",
             get(get_server_properties).post(save_server_properties),
         )
+        .route("/api/worlds", get(list_worlds))
+        .route("/api/worlds/activate", post(activate_world))
+        .route("/api/worlds/create", post(create_world))
+        .route("/api/worlds/duplicate", post(duplicate_world))
+        .route("/api/worlds/rename", post(rename_world))
+        .route("/api/worlds/delete", post(delete_world))
         .route("/api/server/icon", post(save_server_icon))
         .route("/api/server/open-folder", post(open_server_folder))
         .route("/api/server/export", post(export_server))
@@ -8135,7 +8543,7 @@ mod tests {
     fn compares_update_versions() {
         assert!(version_parts("0.10.0") > version_parts("0.9.9"));
         assert!(version_parts("v1.0.0") > version_parts("0.99.99"));
-        assert_eq!(version_parts("0.8.6"), (0, 8, 6));
+        assert_eq!(version_parts("0.8.7"), (0, 8, 7));
     }
 
     #[test]
@@ -8158,7 +8566,7 @@ mod tests {
         let zip_path = root.join("export.zip");
         let manifest = ServerExportManifest {
             format: 1,
-            app_version: "0.8.6".into(),
+            app_version: "0.8.7".into(),
             exported_at: "2026-11-07 12:00:00".into(),
             server_name: "Teste".into(),
             version: "1.21.1".into(),

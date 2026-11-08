@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.8.6';
+  const APP_VERSION = '0.8.7';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -86,6 +86,7 @@
     auto_backup:boolean; health:HealthView;
   };
   type ServerSummary = { server_name:string; version:string; server_dir:string; installed:boolean; active:boolean; status:string };
+  type WorldSummary = { name:string; path:string; active:boolean; size_bytes:number; has_level_dat:boolean; universe_configured:boolean };
 
   const E4_DEFAULTS: Omit<E4allConfig, 'minecraft_dir'> = {
     use_broker:true, broker_url:'https://broker.e4mc.link/getBestRelay', relay_host:'test.e4mc.link', relay_port:25575,
@@ -111,7 +112,16 @@
   let versions:Version[] = [];
   let serverProfiles:ServerSummary[] = [];
   let switchingServer = false;
-  let activeTab:'overview'|'content'|'config'|'setup' = 'overview';
+  let activeTab:'overview'|'content'|'worlds'|'config'|'setup' = 'overview';
+  let worlds:WorldSummary[] = [];
+  let worldsLoading = false;
+  let worldBusy = false;
+  let worldName = '';
+  let worldSeed = '';
+  let worldType = 'minecraft:normal';
+  let worldTarget = '';
+  let selectedWorld = '';
+  let worldAction:'create'|'duplicate'|'rename'|'' = '';
 
   let contentKind = 'mods';
   let contentLoader = 'fabric';
@@ -831,6 +841,59 @@
         { label:'Tentar novamente', run:loadContent },
         { label:'Abrir pasta', run:openServerFolder },
       ]);
+    }
+  }
+
+  async function loadWorlds() {
+    if (worldsLoading) return;
+    worldsLoading = true;
+    try {
+      const data = await api<WorldSummary[]>('/worlds');
+      worlds = data;
+    } catch(e) {
+      fail(e, 'Falha ao listar mundos.', [{ label:'Tentar novamente', run:loadWorlds }]);
+    } finally {
+      worldsLoading = false;
+    }
+  }
+
+  async function worldRequest(path:string, payload:unknown, message:string) {
+    if (worldBusy) return;
+    worldBusy = true;
+    try {
+      worlds = await api<WorldSummary[]>(path, json(payload));
+      setNotice(message);
+      worldAction = '';
+      worldName = '';
+      worldSeed = '';
+      worldTarget = '';
+      selectedWorld = '';
+      await refresh();
+    } catch(e) {
+      fail(e, 'Não foi possível alterar os mundos.', [{ label:'Tentar novamente', run:()=>worldRequest(path, payload, message) }]);
+    } finally {
+      worldBusy = false;
+    }
+  }
+
+  async function activateWorld(name:string) {
+    await worldRequest('/worlds/activate', { name }, `Mundo ativo: ${name}.`);
+  }
+
+  async function deleteWorld(name:string) {
+    if (!window.confirm(`Mover o mundo "${name}" para a lixeira?`)) return;
+    await worldRequest('/worlds/delete', { name }, `Mundo "${name}" movido para a lixeira.`);
+  }
+
+  async function submitWorldAction() {
+    const name = worldName.trim();
+    const target = worldTarget.trim();
+    if (worldAction === 'create') {
+      await worldRequest('/worlds/create', { name, seed:worldSeed, level_type:worldType }, `Mundo "${name}" criado e selecionado.`);
+    } else if (worldAction === 'duplicate') {
+      await worldRequest('/worlds/duplicate', { source:selectedWorld, target }, `Mundo duplicado para "${target}".`);
+    } else if (worldAction === 'rename') {
+      await worldRequest('/worlds/rename', { source:selectedWorld, target }, `Mundo renomeado para "${target}".`);
     }
   }
 
@@ -1566,6 +1629,9 @@
       <button class:active={activeTab==='content'} on:click={()=>activeTab='content'}>
         <span class="nav-icon">▦</span>Mods, plugins e datapacks
       </button>
+      <button class:active={activeTab==='worlds'} on:click={()=>{activeTab='worlds';loadWorlds();}}>
+        <span class="nav-icon">◇</span>Mundos
+      </button>
       <button class:active={activeTab==='setup'} on:click={()=>openSetup(true)}>
         <span class="nav-icon">＋</span>Criar servidor
       </button>
@@ -1592,6 +1658,7 @@
         <div class="breadcrumb">SERVIDORES <span>/</span> {server.server_name}</div>
         <h1>
           {activeTab==='content' ? 'Conteúdo do servidor'
+           : activeTab==='worlds' ? 'Mundos do servidor'
            : activeTab==='config' ? 'Configurações avançadas'
            : activeTab==='setup' ? 'Criar servidor'
            : 'Olá, administrador'} <span class="wave">✦</span>
@@ -1599,6 +1666,8 @@
         <p>
           {activeTab==='content'
             ? 'Gerencie seus arquivos como no Prism Launcher.'
+            : activeTab==='worlds'
+              ? 'Troque e organize seus mundos sem abrir o terminal.'
             : activeTab==='config'
               ? 'A instalação inicial fica separada das preferências do servidor.'
               : activeTab==='setup'
@@ -2059,6 +2128,53 @@
           </div>
         </div>
       {/if}
+
+    {:else if activeTab==='worlds'}
+      <section class="settings-card">
+        <div class="card-head">
+          <div><h3>Mundos do servidor</h3><p>Troque, crie e organize mundos. Plugins como Universe continuam controlando suas conexões entre mundos.</p></div>
+          <button class="primary" on:click={()=>{worldAction='create';worldName='';}} disabled={worldBusy}>＋ Criar mundo</button>
+        </div>
+        {#if worlds.some(world => world.universe_configured)}
+          <div class="inline-warning">Universe detectado. Renomear ou excluir mundos pode exigir ajustes na configuração do plugin.</div>
+        {/if}
+        {#if worldAction}
+          <div class="settings-card" style="margin:16px 0;padding:16px;">
+            <div class="card-head"><div><h4>{worldAction==='create'?'Criar mundo':worldAction==='duplicate'?'Duplicar mundo':'Renomear mundo'}</h4><p>O servidor precisa estar desligado.</p></div></div>
+            {#if worldAction==='duplicate' || worldAction==='rename'}
+              <label>Mundo de origem<select bind:value={selectedWorld}>{#each worlds as world}<option value={world.name}>{world.name}</option>{/each}</select></label>
+            {/if}
+            <div class="form-grid">
+              <label>{worldAction==='create'?'Nome do mundo':'Novo nome'}{#if worldAction==='create'}<input bind:value={worldName} placeholder="survival-2"/>{:else}<input bind:value={worldTarget} placeholder="survival-2"/>{/if}</label>
+              {#if worldAction==='create'}
+                <label>Seed<input bind:value={worldSeed} placeholder="vazio = aleatória"/></label>
+                <label>Tipo<select bind:value={worldType}><option value="minecraft:normal">Normal</option><option value="minecraft:flat">Plano</option><option value="minecraft:amplified">Amplificado</option><option value="minecraft:large_biomes">Biomas grandes</option></select></label>
+              {/if}
+            </div>
+            <div style="display:flex;gap:10px;margin-top:14px;"><button class="primary" on:click={submitWorldAction} disabled={worldBusy}>CONFIRMAR</button><button class="secondary" on:click={()=>worldAction=''}>CANCELAR</button></div>
+          </div>
+        {/if}
+        {#if worldsLoading}
+          <div class="empty">Carregando mundos...</div>
+        {:else if worlds.length===0}
+          <div class="empty">Nenhum mundo detectado. Crie um mundo ou inicie o servidor para o Minecraft gerar o mundo padrão.</div>
+        {:else}
+          <div class="installed-grid">
+            {#each worlds as world}
+              <div class="installed-card" class:selected={world.active}>
+                <div class="catalog-icon" style="width:36px;height:36px;font-size:14px;">◇</div>
+                <div class="installed-meta"><b>{world.name}{#if world.active}<span class="source-badge">ATIVO</span>{/if}</b><small>{formatBytes(world.size_bytes)} · {world.has_level_dat ? 'level.dat encontrado' : 'sem level.dat'}</small></div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
+                  {#if !world.active}<button class="secondary" on:click={()=>activateWorld(world.name)} disabled={worldBusy}>ATIVAR</button>{/if}
+                  <button class="secondary" on:click={()=>{selectedWorld=world.name;worldTarget='';worldAction='duplicate';}} disabled={worldBusy}>DUPLICAR</button>
+                  <button class="secondary" on:click={()=>{selectedWorld=world.name;worldTarget='';worldAction='rename';}} disabled={worldBusy}>RENOMEAR</button>
+                  {#if !world.active}<button class="danger-outline" on:click={()=>deleteWorld(world.name)} disabled={worldBusy}>EXCLUIR</button>{/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </section>
 
     {:else if activeTab==='config'}
       <div class="config-tabs" role="tablist" aria-label="Seções das configurações">
