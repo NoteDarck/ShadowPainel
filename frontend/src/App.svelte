@@ -52,7 +52,7 @@
     reconnect_max_attempts:number; reconnect_base_delay_seconds:number;
     keepalive_interval_seconds:number; login_ready_timeout_ms:number;
     relay_connect_timeout_ms:number;
-    offline_mode:boolean; hide_domain_in_chat:boolean; voice_p2p_enabled:boolean;
+    offline_mode:boolean; hide_domain_in_chat:boolean; voice_p2p_enabled:boolean; use_e4all:boolean;
   };
   type E4allStatus = {
     dir_exists:boolean; config_exists:boolean; config_path:string;
@@ -92,7 +92,7 @@
     restore_dedicated_commands:true, use_whitelist:false, host_enabled:true, prevent_pause_while_hosting:true,
     dialtone_host_enabled:true, dialtone_player_enabled:true, dialtone_relay_map:'https://natives.e4mc.link/relaymap.json', dialtone_sanitize_ticket:true,
     reconnect_max_attempts:5, reconnect_base_delay_seconds:2, keepalive_interval_seconds:15,
-    login_ready_timeout_ms:15000, relay_connect_timeout_ms:15000, offline_mode:false, hide_domain_in_chat:false, voice_p2p_enabled:true,
+    login_ready_timeout_ms:15000, relay_connect_timeout_ms:15000, offline_mode:false, hide_domain_in_chat:false, voice_p2p_enabled:true, use_e4all:true,
   };
 
   let server:Server = {
@@ -185,7 +185,7 @@
   let e4allStatusLabel = 'AGUARDANDO';
   let resolvedE4allLink = '';
   let resolvedE4allSource = '';
-  $: resolvedE4allLink = server.e4all_link || e4allLink;
+  $: resolvedE4allLink = server.e4all.use_e4all ? (server.e4all_link || e4allLink) : '';
   $: resolvedE4allSource = server.e4all_link ? 'console do servidor' : e4allLinkSource;
   $: setupPathConflict = server.installed && sameDir(setup.server_dir, server.server_dir);
   $: setupJavaMajor = javaMajorForVersion(setupVersion);
@@ -2647,8 +2647,6 @@
         </div>
 
         <div class="settings-subhead"><h4>Hospedagem</h4><p>Controla como o mod compartilha o mundo com os amigos.</p></div>
-        <div class="e4all-options">
-
         <div class="settings-subhead"><h4>Acesso</h4><p>Define quem pode entrar e como as contas são reconhecidas.</p></div>
         <div class="e4all-options">
           <div class="prop-group" title="Permite entrar sem conta original. Combine com a whitelist para controlar quem entra."><span class="prop-label">Contas offline</span><div class="prop-control toggle-control"><button class="toggle-btn" class:active={server.e4all.offline_mode} on:click={() => server.e4all.offline_mode = !server.e4all.offline_mode}>{#if server.e4all.offline_mode}✓{:else}✕{/if}</button></div><small>offlineMode</small></div>

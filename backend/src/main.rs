@@ -348,6 +348,7 @@ fn apply_toml(c: &mut E4allConfig, t: &str) {
     b(t, "offlineMode", &mut c.offline_mode);
     b(t, "hideDomainInChat", &mut c.hide_domain_in_chat);
     b(t, "voiceP2PEnabled", &mut c.voice_p2p_enabled);
+    b(t, "useE4all", &mut c.use_e4all);
 }
 
 fn toml_pairs(c: &E4allConfig) -> Vec<(&'static str, String)> {
@@ -394,6 +395,7 @@ fn toml_pairs(c: &E4allConfig) -> Vec<(&'static str, String)> {
         ("offlineMode", c.offline_mode.to_string()),
         ("hideDomainInChat", c.hide_domain_in_chat.to_string()),
         ("voiceP2PEnabled", c.voice_p2p_enabled.to_string()),
+        ("useE4all", c.use_e4all.to_string()),
     ]
 }
 
