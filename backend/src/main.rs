@@ -36,7 +36,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.8.5";
+const APP_VERSION: &str = "0.8.6";
 
 const MAX_LOGS: usize = 500;
 const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;
@@ -8121,7 +8121,7 @@ mod tests {
     fn compares_update_versions() {
         assert!(version_parts("0.10.0") > version_parts("0.9.9"));
         assert!(version_parts("v1.0.0") > version_parts("0.99.99"));
-        assert_eq!(version_parts("0.8.5"), (0, 8, 5));
+        assert_eq!(version_parts("0.8.6"), (0, 8, 6));
     }
 
     #[test]
@@ -8144,7 +8144,7 @@ mod tests {
         let zip_path = root.join("export.zip");
         let manifest = ServerExportManifest {
             format: 1,
-            app_version: "0.8.5".into(),
+            app_version: "0.8.6".into(),
             exported_at: "2026-11-07 12:00:00".into(),
             server_name: "Teste".into(),
             version: "1.21.1".into(),
