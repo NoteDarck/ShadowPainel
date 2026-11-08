@@ -9,6 +9,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Local, Utc};
+use futures_util::StreamExt;
 use md5::compute as md5_digest;
 use qrcodegen::{QrCode, QrCodeEcc};
 use serde::{Deserialize, Serialize};
@@ -35,10 +36,13 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.8.4";
+const APP_VERSION: &str = "0.8.5";
 
 const MAX_LOGS: usize = 500;
 const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;
+const MAX_SERVER_EXPORT_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const MAX_SERVER_EXPORT_UNCOMPRESSED: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_SERVER_EXPORT_ENTRIES: usize = 250_000;
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const PACK_DOWNLOAD_CONCURRENCY: usize = 4;
 const PACK_INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
@@ -1251,6 +1255,7 @@ struct Inner {
     stdin: Option<ChildStdin>,
     kill_tx: Option<oneshot::Sender<()>>,
     installing: bool,
+    transferring: bool,
     e4all_link: Option<String>,
     sys: System,
 }
@@ -1277,6 +1282,7 @@ impl Inner {
             stdin: None,
             kill_tx: None,
             installing: false,
+            transferring: false,
             e4all_link: None,
             sys: System::new(),
         };
@@ -1411,6 +1417,7 @@ struct View {
     installed: bool,
     eula_accepted: bool,
     installing: bool,
+    transferring: bool,
     auto_backup: bool,
     curseforge_mode: String,
     curseforge_configured: bool,
@@ -1649,6 +1656,7 @@ fn view(i: &mut Inner) -> View {
         installed,
         eula_accepted: eula,
         installing: i.installing,
+        transferring: i.transferring,
         auto_backup: i.cfg.auto_backup,
         curseforge_mode: if i.cfg.curseforge_api_key.trim().is_empty() {
             "proxy".into()
@@ -2137,6 +2145,601 @@ async fn import_server_jar(
     })?;
     i.push(format!("server.jar importado de {filename}."), "success");
     Ok(Json(view(&mut i)))
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ServerExportManifest {
+    format: u32,
+    app_version: String,
+    exported_at: String,
+    server_name: String,
+    version: String,
+    loader: String,
+    memory_limit_gb: u64,
+}
+
+fn downloads_dir() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Downloads")
+}
+
+fn sanitize_export_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.trim().chars() {
+        if ch.is_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else if (ch.is_whitespace() || matches!(ch, '.' | '/' | '\\')) && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-').chars().take(48).collect::<String>();
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "servidor".into()
+    } else {
+        out
+    }
+}
+
+fn unique_export_path(dir: &Path, server_name: &str) -> PathBuf {
+    let base = format!(
+        "ShadowPainel-{}-{}",
+        sanitize_export_name(server_name),
+        Local::now().format("%Y%m%d-%H%M%S")
+    );
+    let mut path = dir.join(format!("{base}.zip"));
+    let mut counter = 2;
+    while path.exists() {
+        path = dir.join(format!("{base}-{counter}.zip"));
+        counter += 1;
+    }
+    path
+}
+
+fn skip_export_top_level(name: &str) -> bool {
+    matches!(
+        name,
+        "backups" | "logs" | "cache" | "crash-reports" | "exports" | ".shadowpainel"
+    ) || (name.starts_with(".shadowpainel-") && name != ".shadowpainel-content.json")
+}
+
+fn create_server_export_blocking(
+    base: &Path,
+    destination: &Path,
+    manifest: &ServerExportManifest,
+) -> Result<u64, String> {
+    let file = fs::File::create(destination).map_err(|e| e.to_string())?;
+    let mut zip = ZipWriter::new(file);
+    let default_options =
+        SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    zip.start_file(".shadowpainel-export.json", default_options)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_writer_pretty(&mut zip, manifest).map_err(|e| e.to_string())?;
+
+    fn add_path(
+        zip: &mut ZipWriter<fs::File>,
+        path: &Path,
+        relative: &Path,
+        top_level: bool,
+    ) -> Result<(), String> {
+        let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Ok(());
+        }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if top_level && skip_export_top_level(&name) {
+            return Ok(());
+        }
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                add_path(zip, &entry.path(), &relative.join(entry.file_name()), false)?;
+            }
+            return Ok(());
+        }
+        if !metadata.is_file() {
+            return Ok(());
+        }
+        let entry_name = relative.to_string_lossy().replace('\\', "/");
+        if entry_name == ".shadowpainel-export.json" {
+            return Ok(());
+        }
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .large_file(metadata.len() > u32::MAX as u64);
+        zip.start_file(entry_name, options)
+            .map_err(|e| e.to_string())?;
+        let mut source = fs::File::open(path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut source, zip).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    for entry in fs::read_dir(base).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        add_path(&mut zip, &entry.path(), Path::new(&entry.file_name()), true)?;
+    }
+    zip.finish().map_err(|e| e.to_string())?;
+    fs::metadata(destination)
+        .map(|metadata| metadata.len())
+        .map_err(|e| e.to_string())
+}
+
+fn extract_server_export_blocking(
+    zip_path: PathBuf,
+    destination: PathBuf,
+) -> Result<usize, String> {
+    fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
+    let file = fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+    let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
+    if archive.len() > MAX_SERVER_EXPORT_ENTRIES {
+        return Err("O ZIP possui arquivos demais.".into());
+    }
+
+    let mut extracted = 0usize;
+    let mut total = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+        if entry.is_dir() || entry.is_symlink() {
+            continue;
+        }
+        let name = entry.name().replace('\\', "/");
+        let relative = name.trim_start_matches('/');
+        if relative.is_empty()
+            || relative == ".shadowpainel-export.json"
+            || relative.starts_with(".shadowpainel/")
+            || relative.starts_with("backups/")
+        {
+            continue;
+        }
+        let remaining = MAX_SERVER_EXPORT_UNCOMPRESSED.saturating_sub(total);
+        if entry.size() > remaining {
+            return Err("O conteúdo do ZIP excede o limite permitido.".into());
+        }
+        let Some(path) = safe_pack_path(&destination, relative) else {
+            continue;
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut output = fs::File::create(&path).map_err(|e| e.to_string())?;
+        let mut limited = (&mut entry).take(remaining.saturating_add(1));
+        let written = std::io::copy(&mut limited, &mut output).map_err(|e| e.to_string())?;
+        if written > remaining {
+            return Err("O conteúdo do ZIP excede o limite permitido.".into());
+        }
+        total = total.saturating_add(written);
+        extracted += 1;
+    }
+    Ok(extracted)
+}
+
+fn read_server_export_manifest_blocking(path: PathBuf) -> Result<ServerExportManifest, String> {
+    let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+    let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let entry = archive
+        .by_name(".shadowpainel-export.json")
+        .map_err(|_| "O ZIP não foi exportado pelo ShadowPainel.".to_string())?;
+    if entry.size() > 1024 * 1024 {
+        return Err("O manifesto do ZIP é grande demais.".into());
+    }
+    let mut bytes = Vec::new();
+    entry
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("O manifesto do ZIP é grande demais.".into());
+    }
+    serde_json::from_slice::<ServerExportManifest>(&bytes)
+        .map_err(|_| "O manifesto do ZIP é inválido.".to_string())
+}
+
+fn validate_server_export_manifest(manifest: &ServerExportManifest) -> Result<(), ApiErr> {
+    if manifest.format != 1 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Esta versão do arquivo de exportação não é suportada.",
+        ));
+    }
+    if manifest.server_name.trim().is_empty()
+        || manifest.version.trim().is_empty()
+        || !valid_loader(&manifest.loader)
+        || !(1..=64).contains(&manifest.memory_limit_gb)
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "O manifesto da exportação está incompleto.",
+        ));
+    }
+    if manifest.server_name.chars().count() > 120 || manifest.version.chars().count() > 64 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "O manifesto da exportação contém valores inválidos.",
+        ));
+    }
+    Ok(())
+}
+
+async fn save_upload(body: Body, path: &Path, max_bytes: u64) -> Result<u64, ApiErr> {
+    let mut file = tokio::fs::File::create(path).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar o upload: {e}"),
+        )
+    })?;
+    let mut stream = body.into_data_stream();
+    let mut total = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("Falha ao receber o arquivo: {e}"),
+            )
+        })?;
+        total = total.saturating_add(chunk.len() as u64);
+        if total > max_bytes {
+            return Err(err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "O ZIP do servidor é grande demais.",
+            ));
+        }
+        file.write_all(&chunk).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao gravar o upload: {e}"),
+            )
+        })?;
+    }
+    file.flush().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao gravar o upload: {e}"),
+        )
+    })?;
+    Ok(total)
+}
+
+async fn export_server(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    let (base, server_name, version, loader, memory_limit_gb, installed) = {
+        let i = app.0.lock().await;
+        let dir = expand(&i.cfg.server_dir);
+        (
+            dir.clone(),
+            i.cfg.server_name.clone(),
+            i.cfg.version.clone(),
+            i.cfg.loader.clone(),
+            i.cfg.memory_limit_gb,
+            detect_launch(&dir).is_some(),
+        )
+    };
+    if !installed {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Nenhum servidor instalado para exportar.",
+        ));
+    }
+
+    let downloads = downloads_dir();
+    tokio::fs::create_dir_all(&downloads).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a pasta Downloads: {e}"),
+        )
+    })?;
+    let manifest = ServerExportManifest {
+        format: 1,
+        app_version: APP_VERSION.into(),
+        exported_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        server_name,
+        version,
+        loader,
+        memory_limit_gb,
+    };
+    validate_server_export_manifest(&manifest)?;
+    let destination = unique_export_path(&downloads, &manifest.server_name);
+
+    {
+        let mut i = app.0.lock().await;
+        if i.status != Status::Offline || i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Pare o servidor e aguarde instalações antes de exportar.",
+            ));
+        }
+        i.installing = true;
+        i.transferring = true;
+        i.push("Preparando exportação do servidor…", "muted");
+    }
+
+    let temp = downloads.join(format!(".shadowpainel-export-{}.zip", new_trash_token()));
+    let base_copy = base.clone();
+    let temp_copy = temp.clone();
+    let manifest_copy = manifest.clone();
+    let result = match tokio::task::spawn_blocking(move || {
+        create_server_export_blocking(&base_copy, &temp_copy, &manifest_copy)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => Err(e.to_string()),
+    };
+    let result = match result {
+        Ok(size) => match tokio::fs::rename(&temp, &destination).await {
+            Ok(()) => Ok(size),
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&temp).await;
+                Err(format!("Falha ao finalizar o arquivo: {e}"))
+            }
+        },
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            Err(e)
+        }
+    };
+
+    let mut i = app.0.lock().await;
+    i.installing = false;
+    i.transferring = false;
+    match result {
+        Ok(size) => {
+            i.push(
+                format!("Servidor exportado para {}.", destination.display()),
+                "success",
+            );
+            Ok(Json(json!({
+                "ok": true,
+                "path": destination.display().to_string(),
+                "filename": destination.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+                "size": size,
+            })))
+        }
+        Err(e) => {
+            i.push("Falha ao exportar o servidor. Veja o aviso.", "error");
+            Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao exportar o servidor: {e}"),
+            ))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ImportServerExportQuery {
+    server_dir: String,
+}
+
+async fn import_server_export(
+    State(app): State<AppState>,
+    axum::extract::Query(req): axum::extract::Query<ImportServerExportQuery>,
+    body: Body,
+) -> ApiResult {
+    if req.server_dir.trim().is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Informe a pasta de destino do servidor.",
+        ));
+    }
+    let dir = expand(req.server_dir.trim());
+    if dir.as_os_str().is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "Pasta de destino inválida."));
+    }
+    let parent = dir
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    tokio::fs::create_dir_all(&parent).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a pasta de destino: {e}"),
+        )
+    })?;
+
+    let existed = match tokio::fs::metadata(&dir).await {
+        Ok(metadata) if metadata.is_dir() => true,
+        Ok(_) => {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "O destino existe, mas não é uma pasta.",
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao verificar a pasta de destino: {e}"),
+            ));
+        }
+    };
+    if existed {
+        let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao verificar a pasta de destino: {e}"),
+            )
+        })?;
+        let has_entries = entries
+            .next_entry()
+            .await
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Falha ao verificar a pasta de destino: {e}"),
+                )
+            })?
+            .is_some();
+        if has_entries {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "A pasta de destino precisa estar vazia para importar o servidor.",
+            ));
+        }
+    }
+
+    {
+        let mut i = app.0.lock().await;
+        if i.status != Status::Offline || i.installing {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Pare o servidor e aguarde instalações antes de importar.",
+            ));
+        }
+        i.installing = true;
+        i.transferring = true;
+        i.push("Recebendo servidor exportado…", "muted");
+    }
+
+    let token = new_trash_token();
+    let zip_path = parent.join(format!(".shadowpainel-import-{token}.zip"));
+    let staging = parent.join(format!(".shadowpainel-import-{token}"));
+    let result: Result<(ServerExportManifest, u64), ApiErr> = async {
+        let uploaded = save_upload(body, &zip_path, MAX_SERVER_EXPORT_BYTES).await?;
+        if uploaded < 22 {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "O ZIP enviado está vazio ou é inválido.",
+            ));
+        }
+        let manifest_path = zip_path.clone();
+        let manifest = tokio::task::spawn_blocking(move || {
+            read_server_export_manifest_blocking(manifest_path)
+        })
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao ler o ZIP: {e}"),
+            )
+        })?
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+        validate_server_export_manifest(&manifest)?;
+
+        let zip_copy = zip_path.clone();
+        let staging_copy = staging.clone();
+        tokio::task::spawn_blocking(move || extract_server_export_blocking(zip_copy, staging_copy))
+            .await
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Falha ao extrair o ZIP: {e}"),
+                )
+            })?
+            .map_err(|e| {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    format!("Falha ao extrair o ZIP: {e}"),
+                )
+            })?;
+
+        if detect_launch(&staging).is_none() {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "O ZIP não contém um servidor válido.",
+            ));
+        }
+        if existed {
+            tokio::fs::remove_dir(&dir).await.map_err(|e| {
+                err(
+                    StatusCode::CONFLICT,
+                    format!("A pasta de destino mudou durante a importação: {e}"),
+                )
+            })?;
+        }
+        tokio::fs::rename(&staging, &dir).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao concluir a importação: {e}"),
+            )
+        })?;
+        Ok((manifest, uploaded))
+    }
+    .await;
+
+    let _ = tokio::fs::remove_file(&zip_path).await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+    }
+
+    let (manifest, uploaded) = match result {
+        Ok(value) => value,
+        Err(e) => {
+            let mut i = app.0.lock().await;
+            i.installing = false;
+            i.transferring = false;
+            i.push("Falha ao importar o servidor. Veja o aviso.", "error");
+            return Err(e);
+        }
+    };
+
+    let mut i = app.0.lock().await;
+    i.installing = false;
+    i.transferring = false;
+    i.cfg.server_name = manifest.server_name;
+    i.cfg.version = manifest.version;
+    i.cfg.loader = manifest.loader;
+    i.cfg.server_dir = req.server_dir.trim().into();
+    i.cfg.memory_limit_gb = manifest.memory_limit_gb;
+    i.persist().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Servidor importado, mas falhou ao gravar a configuração: {e}"),
+        )
+    })?;
+    let imported_name = i.cfg.server_name.clone();
+    i.push(
+        format!(
+            "Servidor importado ({imported_name} de ZIP, {} MB).",
+            uploaded / (1024 * 1024)
+        ),
+        "success",
+    );
+    Ok(Json(view(&mut i)))
+}
+
+fn open_folder_in_file_manager(dir: &Path) -> std::io::Result<()> {
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("explorer");
+        command.arg(dir);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(dir);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(dir);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+async fn open_export_folder() -> Result<Json<Value>, ApiErr> {
+    let dir = downloads_dir();
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar a pasta Downloads: {e}"),
+        )
+    })?;
+    open_folder_in_file_manager(&dir).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Não foi possível abrir a pasta: {e}"),
+        )
+    })?;
+    Ok(Json(
+        json!({ "ok": true, "path": dir.display().to_string() }),
+    ))
 }
 
 async fn accept_eula(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
@@ -7374,6 +7977,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/server/icon", post(save_server_icon))
         .route("/api/server/open-folder", post(open_server_folder))
+        .route("/api/server/export", post(export_server))
+        .route("/api/server/open-export-folder", post(open_export_folder))
+        .route("/api/server/import-export", post(import_server_export))
         .route("/api/server/next-port", post(next_port))
         .route("/api/java/ensure", post(java_ensure))
         .route("/api/network/diagnose", get(network_diagnose))
@@ -7437,9 +8043,13 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use super::{
-        extract_e4all_link, java_major_for_version, looks_like_jar, offline_uuid, parse_java_major,
-        qr_svg, update_checksum_from_sums, version_parts,
+        create_server_export_blocking, extract_e4all_link, extract_server_export_blocking,
+        java_major_for_version, looks_like_jar, new_trash_token, offline_uuid, parse_java_major,
+        qr_svg, read_server_export_manifest_blocking, update_checksum_from_sums, version_parts,
+        ServerExportManifest,
     };
 
     #[test]
@@ -7511,7 +8121,74 @@ mod tests {
     fn compares_update_versions() {
         assert!(version_parts("0.10.0") > version_parts("0.9.9"));
         assert!(version_parts("v1.0.0") > version_parts("0.99.99"));
-        assert_eq!(version_parts("0.8.4"), (0, 8, 4));
+        assert_eq!(version_parts("0.8.5"), (0, 8, 5));
+    }
+
+    #[test]
+    fn exports_and_extracts_server_package() {
+        let root =
+            std::env::temp_dir().join(format!("shadowpainel-export-test-{}", new_trash_token()));
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("world")).unwrap();
+        std::fs::create_dir_all(source.join("mods")).unwrap();
+        std::fs::create_dir_all(source.join("backups")).unwrap();
+        std::fs::create_dir_all(source.join("logs")).unwrap();
+        std::fs::write(source.join("server.jar"), b"jar").unwrap();
+        std::fs::write(source.join("world/level.dat"), b"level").unwrap();
+        std::fs::write(source.join("mods/example.jar"), b"mod").unwrap();
+        std::fs::write(source.join(".shadowpainel-content.json"), b"{}").unwrap();
+        std::fs::write(source.join("backups/antigo.zip"), b"backup").unwrap();
+        std::fs::write(source.join("logs/latest.log"), b"log").unwrap();
+        std::fs::write(source.join(".shadowpainel-packantigo.tmp"), b"temp").unwrap();
+
+        let zip_path = root.join("export.zip");
+        let manifest = ServerExportManifest {
+            format: 1,
+            app_version: "0.8.5".into(),
+            exported_at: "2026-11-07 12:00:00".into(),
+            server_name: "Teste".into(),
+            version: "1.21.1".into(),
+            loader: "fabric".into(),
+            memory_limit_gb: 4,
+        };
+        let size = create_server_export_blocking(&source, &zip_path, &manifest).unwrap();
+        assert!(size > 0);
+        let loaded = read_server_export_manifest_blocking(zip_path.clone()).unwrap();
+        assert_eq!(loaded.server_name, "Teste");
+        assert_eq!(loaded.loader, "fabric");
+
+        let destination = root.join("imported");
+        let count = extract_server_export_blocking(zip_path, destination.clone()).unwrap();
+        assert!(count >= 4);
+        assert!(destination.join("server.jar").is_file());
+        assert!(destination.join("world/level.dat").is_file());
+        assert!(destination.join("mods/example.jar").is_file());
+        assert!(destination.join(".shadowpainel-content.json").is_file());
+        assert!(!destination.join("backups").exists());
+        assert!(!destination.join("logs").exists());
+        assert!(!destination.join(".shadowpainel-packantigo.tmp").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extraction_ignores_zip_slip_paths() {
+        let root =
+            std::env::temp_dir().join(format!("shadowpainel-zip-slip-test-{}", new_trash_token()));
+        std::fs::create_dir_all(&root).unwrap();
+        let zip_path = root.join("malicioso.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("../escape.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"escape").unwrap();
+        zip.finish().unwrap();
+
+        let destination = root.join("destino");
+        let count = extract_server_export_blocking(zip_path, destination.clone()).unwrap();
+        assert_eq!(count, 0);
+        assert!(!root.join("escape.txt").exists());
+        assert!(!destination.join("escape.txt").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

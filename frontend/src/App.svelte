@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.8.4';
+  const APP_VERSION = '0.8.5';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -79,7 +79,7 @@
     status:string; address:string; players:number; memory_mb:number;
     memory_limit_gb:number; cpu_percent:number; uptime_seconds:number;
     server_name:string; version:string; loader:string; server_dir:string; java_path:string;
-    java_detected:boolean; installed:boolean; eula_accepted:boolean; installing:boolean;
+    java_detected:boolean; installed:boolean; eula_accepted:boolean; installing:boolean; transferring:boolean;
     curseforge_mode:string; curseforge_configured:boolean;
     e4all:E4allConfig; e4all_link:string|null; logs:Log[];
     java_major:number|null; required_java_major:number; java_managed:boolean;
@@ -100,7 +100,7 @@
     memory_limit_gb:4, cpu_percent:0, uptime_seconds:0,
     server_name:'Meu servidor', version:'', loader:'vanilla',
     server_dir:'~/Minecraft/MeuServidor', java_path:'java',
-    java_detected:false, installed:false, eula_accepted:false, installing:false,
+    java_detected:false, installed:false, eula_accepted:false, installing:false, transferring:false,
     curseforge_mode:'proxy', curseforge_configured:false,
     e4all:{ minecraft_dir:'~/.minecraft', ...E4_DEFAULTS }, e4all_link:null,
     java_major:null, required_java_major:21, java_managed:false,
@@ -128,7 +128,7 @@
   let setupVersion = '';
   let setupJavaMajor = 21;
   let setupError = '';
-  let configSection:'server'|'properties'|'e4all'|'integrations'|'backups'|'updates' = 'server';
+  let configSection:'server'|'properties'|'e4all'|'integrations'|'backups'|'transfer'|'updates' = 'server';
 
   let loading = false;
   let notice = '';
@@ -207,6 +207,12 @@
   let backupPendingDelete = '';
   let backupPendingRestore = '';
   let autoBackupSaving = false;
+
+  let exportBusy = false;
+  let exportPath = '';
+  let transferDir = '~/Minecraft/ServidorImportado';
+  let transferImporting = false;
+  let transferInput:HTMLInputElement | undefined;
 
   let helpOpen = false;
   let javaPreparing = false;
@@ -444,6 +450,101 @@
       await api('/server/open-folder', {method:'POST'});
     } catch(e) {
       fail(e, 'Não foi possível abrir a pasta do servidor.');
+    }
+  }
+
+  async function openExportFolder() {
+    try {
+      await api('/server/open-export-folder', {method:'POST'});
+    } catch(e) {
+      fail(e, 'Não foi possível abrir a pasta Downloads.');
+    }
+  }
+
+  async function exportServerPackage() {
+    if (exportBusy) return;
+    exportBusy = true;
+    exportPath = '';
+    try {
+      const data = await api<{path:string;filename:string;size:number}>('/server/export', {method:'POST'});
+      exportPath = data.path;
+      setNotice(`Exportação pronta: ${data.filename} (${formatBytes(data.size)}).`, [
+        { label:'Abrir Downloads', run:openExportFolder },
+      ]);
+    } catch(e) {
+      fail(e, 'Falha ao exportar o servidor.', [
+        { label:'Tentar novamente', run:exportServerPackage },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
+    }
+    exportBusy = false;
+  }
+
+  function chooseServerExportFile() {
+    if (transferImporting) return;
+    transferInput?.click();
+  }
+
+  async function importServerPackage() {
+    if (transferImporting) return;
+    const file = transferInput?.files?.[0];
+    if (!file) {
+      setNotice('Escolha o arquivo ZIP exportado pelo ShadowPainel.');
+      transferInput?.click();
+      return;
+    }
+    if (!transferDir.trim()) {
+      setNotice('Informe uma pasta de destino vazia para o servidor importado.');
+      return;
+    }
+    if (server.status !== 'offline' || server.installing) {
+      setNotice('Pare o servidor e aguarde instalações antes de importar.');
+      return;
+    }
+    if (!file.name.toLowerCase().endsWith('.zip')) {
+      setNotice('O arquivo precisa ser um ZIP exportado pelo ShadowPainel.');
+      return;
+    }
+    if (file.size > 32 * 1024 * 1024 * 1024) {
+      setNotice('O ZIP não pode passar de 32 GB.');
+      return;
+    }
+    transferImporting = true;
+    try {
+      const response = await fetch(`/api/server/import-export?server_dir=${encodeURIComponent(transferDir.trim())}`, {
+        method:'POST',
+        body:file,
+      });
+      const text = await response.text();
+      let data:any = {};
+      if (text) {
+        try { data = JSON.parse(text); }
+        catch { if (response.ok) throw new Error('Resposta inválida do servidor.'); }
+      }
+      if (!response.ok) throw new Error(
+        typeof data.error === 'string' ? data.error : (text || `Erro ${response.status}`)
+      );
+      server = data as Server;
+      exportPath = '';
+      transferDir = '';
+      if (transferInput) transferInput.value = '';
+      backupsLoaded = false;
+      backups = [];
+      contentVersion = server.version || contentVersion;
+      if (server.loader && server.loader !== 'vanilla') contentLoader = server.loader;
+      activeTab = 'overview';
+      await loadServers();
+      await loadContent();
+      await loadE4allLink();
+      setNotice(`Servidor "${server.server_name}" importado e ativado.`);
+    } catch(e) {
+      fail(e, 'Falha ao importar o servidor.', [
+        { label:'Tentar novamente', run:importServerPackage },
+        { label:'Escolher outro ZIP', run:chooseServerExportFile },
+        { label:'Abrir pasta', run:openServerFolder },
+      ]);
+    } finally {
+      transferImporting = false;
     }
   }
 
@@ -685,6 +786,7 @@
     switchingServer = true;
     try {
       server = await api<Server>('/servers/switch', json({server_dir}));
+      exportPath = '';
       contentVersion = server.version || contentVersion;
       if (server.loader && server.loader !== 'vanilla') contentLoader = server.loader;
       activeTab = server.installed ? 'overview' : 'setup';
@@ -1381,6 +1483,7 @@
   }
 
   function formatBytes(n:number) {
+    if (n >= 1024*1024*1024) return `${(n/1024/1024/1024).toFixed(1)} GB`;
     return n < 1024*1024
       ? `${Math.max(1,Math.round(n/1024))} KB`
       : `${(n/1024/1024).toFixed(1)} MB`;
@@ -1530,7 +1633,9 @@
       </div>
     {/if}
     {#if saved}<div class="notice success-notice">Configuração salva.</div>{/if}
-    {#if server.installing}
+    {#if server.transferring}
+      <div class="install-banner"><div class="spinner"></div> Transferência de servidor em andamento.</div>
+    {:else if server.installing}
       <div class="install-banner"><div class="spinner"></div> Instalação em andamento. Acompanhe os detalhes no console.</div>
     {/if}
 
@@ -1563,7 +1668,7 @@
           <div class="hero-bottom">
             <div class="hero-actions">
               <button class="primary" on:click={toggleServer} disabled={loading || server.installing || server.status==='stopping'}>
-                {server.installing ? 'INSTALANDO...' : loading ? 'CARREGANDO...' : server.status==='online' ? 'PARAR SERVIDOR' : server.status==='stopping' ? 'PARANDO...' : 'INICIAR SERVIDOR'} <span>→</span>
+                {server.transferring ? 'TRANSFERINDO...' : server.installing ? 'INSTALANDO...' : loading ? 'CARREGANDO...' : server.status==='online' ? 'PARAR SERVIDOR' : server.status==='stopping' ? 'PARANDO...' : 'INICIAR SERVIDOR'} <span>→</span>
               </button>
               {#if !server.eula_accepted}
                 <button class="secondary" on:click={acceptEula}>ACEITAR EULA</button>
@@ -1675,7 +1780,7 @@
             <button class="quick" on:click={toggleServer} disabled={loading || server.installing || server.status==='stopping'}>
               <span class="q-icon">{server.status==='online'?'■':'▶'}</span>
               <div><b>{server.status==='online'?'Parar':server.status==='stopping'?'Parando':'Iniciar'} servidor</b>
-                <small>{server.installing ? 'Instalação em andamento' : 'Controle seguro do processo Java'}</small></div>
+                <small>{server.transferring ? 'Transferência em andamento' : server.installing ? 'Instalação em andamento' : 'Controle seguro do processo Java'}</small></div>
               <span>›</span>
             </button>
             <button class="quick" on:click={()=>activeTab='content'}>
@@ -1685,7 +1790,7 @@
             </button>
             <button class="quick" on:click={()=>activeTab='config'}>
               <span class="q-icon">⚙</span>
-              <div><b>Configurações avançadas</b><small>Servidor, mundo, e4all e backups</small></div>
+              <div><b>Configurações avançadas</b><small>Servidor, mundo, e4all, backups e transferência</small></div>
               <span>›</span>
             </button>
           </section>
@@ -1972,6 +2077,9 @@
         <button class:active={configSection==='backups'} on:click={()=>configSection='backups'}>
           <b>Backups</b><small>Cópias do servidor</small>
         </button>
+        <button class:active={configSection==='transfer'} on:click={()=>configSection='transfer'}>
+          <b>Transferência</b><small>Exportar e importar ZIP</small>
+        </button>
         <button class:active={configSection==='updates'} on:click={()=>configSection='updates'}>
           <b>Atualizações</b><small>Versão e rollback</small>
         </button>
@@ -2112,6 +2220,70 @@
             {/each}
           </div>
         {/if}
+      </section>
+      {/if}
+
+      {#if configSection==='transfer'}
+      <section class="settings-card">
+        <div class="card-head">
+          <div>
+            <h3>Exportar servidor</h3>
+            <p>Compacta mundo, mods, plugins, configurações e o jar em um ZIP pronto para outro ShadowPainel.</p>
+          </div>
+          <button class="secondary" on:click={openExportFolder}>ABRIR DOWNLOADS</button>
+        </div>
+        <div class="transfer-row">
+          <div>
+            <b>{server.server_name}</b>
+            <small>{server.version || 'sem versão'} · {server.loader} · {server.server_dir}</small>
+          </div>
+          <button class="primary" on:click={exportServerPackage}
+                  disabled={exportBusy || !server.installed || server.installing || server.status !== 'offline'}>
+            {exportBusy ? 'EXPORTANDO...' : 'EXPORTAR .ZIP'}
+          </button>
+        </div>
+        {#if !server.installed}
+          <div class="inline-warning">Instale o servidor antes de exportar.</div>
+        {:else if server.status !== 'offline' || (server.installing && !server.transferring)}
+          <div class="inline-warning">Pare o servidor e aguarde instalações para gerar um ZIP consistente.</div>
+        {:else if server.transferring && !exportBusy}
+          <div class="inline-warning">Aguarde a transferência atual terminar.</div>
+        {/if}
+        {#if exportPath}
+          <div class="transfer-result">
+            <span>ÚLTIMO ZIP EXPORTADO</span>
+            <b>{exportPath}</b>
+            <small>Copie o arquivo para o outro computador e importe-o abaixo.</small>
+          </div>
+        {/if}
+        <p class="field-hint">O ZIP é salvo em Downloads. Pastas de backups, logs, cache e arquivos temporários ficam de fora.</p>
+      </section>
+
+      <section class="settings-card">
+        <div class="card-head">
+          <div>
+            <h3>Importar servidor</h3>
+            <p>Selecione um ZIP exportado por outro ShadowPainel. A pasta de destino precisa estar vazia.</p>
+          </div>
+          <span class="mod-badge">ZIP</span>
+        </div>
+        <div class="transfer-import">
+          <label>Pasta de destino<input bind:value={transferDir} placeholder="~/Minecraft/ServidorImportado"/></label>
+          <button class="primary" on:click={chooseServerExportFile}
+                  disabled={transferImporting || server.installing || server.status !== 'offline'}>
+            {transferImporting ? 'IMPORTANDO...' : 'ESCOLHER ZIP E IMPORTAR'}
+          </button>
+          <input bind:this={transferInput} type="file" accept=".zip,application/zip" hidden on:change={importServerPackage} />
+        </div>
+        {#if transferImporting}
+          <div class="catalog-loading"><div class="spinner"></div> Enviando e extraindo o servidor…</div>
+        {/if}
+        {#if server.status !== 'offline' || (server.installing && !server.transferring)}
+          <div class="inline-warning">Pare o servidor e aguarde instalações antes de importar.</div>
+        {:else if server.transferring && !transferImporting}
+          <div class="inline-warning">Aguarde a transferência atual terminar.</div>
+        {/if}
+        <p class="field-hint">O servidor importado vira o servidor ativo. O servidor atual continua salvo na lista e pode ser reaberto depois.</p>
       </section>
       {/if}
 

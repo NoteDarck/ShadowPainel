@@ -1358,12 +1358,13 @@ dependencies = [
 
 [[package]]
 name = "shadowpainel"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "futures-util",
  "md5",
  "qrcodegen",
  "reqwest",
