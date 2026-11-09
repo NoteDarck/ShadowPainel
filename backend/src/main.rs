@@ -4781,7 +4781,7 @@ async fn create_world(
             output.push(format!("{key}={value}"));
         }
     }
-    tokio::fs::write(props, format!("{}\\n", output.join("\\n")))
+    tokio::fs::write(props, format!("{}\n", output.join("\n")))
         .await
         .map_err(|e| {
             err(
