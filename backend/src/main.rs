@@ -2705,6 +2705,15 @@ async fn import_server_export(
     Ok(Json(view(&mut i)))
 }
 
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x08000000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
+
 fn open_folder_in_file_manager(dir: &Path) -> std::io::Result<()> {
     let mut command = if cfg!(windows) {
         let mut command = Command::new("explorer");
@@ -2719,6 +2728,7 @@ fn open_folder_in_file_manager(dir: &Path) -> std::io::Result<()> {
         command.arg(dir);
         command
     };
+    hide_console_window(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2873,6 +2883,7 @@ async fn start(State(app): State<AppState>) -> ApiResult {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    hide_console_window(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| {
         err(
@@ -3414,6 +3425,54 @@ async fn network_diagnose(State(app): State<AppState>) -> Json<NetworkDiagnostic
         summary,
         recommendation: recommendation.into(),
     })
+}
+
+#[derive(Deserialize)]
+struct ContentFolderRequest {
+    kind: String,
+}
+
+async fn open_content_folder(
+    State(app): State<AppState>,
+    Json(req): Json<ContentFolderRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let dir = {
+        let i = app.0.lock().await;
+        let base = expand(&i.cfg.server_dir);
+        match req.kind.as_str() {
+            "mods" | "plugins" => base.join(&req.kind),
+            "datapacks" => {
+                let level = tokio::fs::read_to_string(base.join("server.properties"))
+                    .await
+                    .ok()
+                    .and_then(|text| {
+                        text.lines()
+                            .find_map(|line| line.strip_prefix("level-name=").map(str::to_owned))
+                    })
+                    .unwrap_or_else(|| "world".into());
+                let world = base.join(level).join("datapacks");
+                if world.exists() {
+                    world
+                } else {
+                    base.join("datapacks")
+                }
+            }
+            _ => return Err(err(StatusCode::BAD_REQUEST, "Pasta de conteúdo inválida.")),
+        }
+    };
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao criar a pasta: {e}"),
+        )
+    })?;
+    open_folder_in_file_manager(&dir).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Não foi possível abrir a pasta: {e}"),
+        )
+    })?;
+    Ok(Json(json!({"ok": true, "path": dir.display().to_string()})))
 }
 
 async fn open_server_folder(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
@@ -8399,6 +8458,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/worlds/delete", post(delete_world))
         .route("/api/server/icon", post(save_server_icon))
         .route("/api/server/open-folder", post(open_server_folder))
+        .route("/api/server/open-content-folder", post(open_content_folder))
         .route("/api/server/export", post(export_server))
         .route("/api/server/open-export-folder", post(open_export_folder))
         .route("/api/server/import-export", post(import_server_export))

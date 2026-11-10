@@ -87,6 +87,7 @@
   };
   type ServerSummary = { server_name:string; version:string; server_dir:string; installed:boolean; active:boolean; status:string };
   type WorldSummary = { name:string; path:string; active:boolean; size_bytes:number; has_level_dat:boolean; universe_configured:boolean };
+  type MetricPoint = { time:string; cpu:number; memory:number; players:number };
 
   const E4_DEFAULTS: Omit<E4allConfig, 'minecraft_dir'> = {
     use_broker:true, broker_url:'https://broker.e4mc.link/getBestRelay', relay_host:'test.e4mc.link', relay_port:25575,
@@ -122,6 +123,9 @@
   let worldTarget = '';
   let selectedWorld = '';
   let worldAction:'create'|'duplicate'|'rename'|'' = '';
+  let metricHistory:MetricPoint[] = [];
+  let networkResult:NetworkDiagnostic|null = null;
+  let networkChecking = false;
 
   let contentKind = 'mods';
   let contentLoader = 'fabric';
@@ -138,7 +142,7 @@
   let setupVersion = '';
   let setupJavaMajor = 21;
   let setupError = '';
-  let configSection:'server'|'properties'|'e4all'|'integrations'|'backups'|'transfer'|'updates' = 'server';
+  let configSection:'server'|'properties'|'e4all'|'integrations'|'backups'|'transfer'|'monitoring'|'updates' = 'server';
 
   let loading = false;
   let notice = '';
@@ -226,8 +230,6 @@
 
   let helpOpen = false;
   let javaPreparing = false;
-  let networkResult:NetworkDiagnostic|null = null;
-  let networkChecking = false;
   let whitelist:WhitelistView = { entries:[], enabled:false, online_mode:true };
   let whitelistLoaded = false;
   let whitelistLoading = false;
@@ -460,6 +462,14 @@
       await api('/server/open-folder', {method:'POST'});
     } catch(e) {
       fail(e, 'Não foi possível abrir a pasta do servidor.');
+    }
+  }
+
+  async function openContentFolder(kind:string) {
+    try {
+      await api('/server/open-content-folder', json({kind}));
+    } catch(e) {
+      fail(e, 'Não foi possível abrir a pasta de conteúdo.');
     }
   }
 
@@ -767,6 +777,7 @@
     try {
       const fresh = await api<Server>('/state');
       server = fresh;
+      metricHistory = [...metricHistory, { time:new Date().toLocaleTimeString('pt-BR'), cpu:fresh.cpu_percent, memory:fresh.memory_mb, players:fresh.players }].slice(-60);
       if (booted === false) {
         booted = true;
         if (!fresh.installed) openSetup(false);
@@ -1877,6 +1888,7 @@
             <button class="secondary" on:click={selectAll}>
               {selectedItems.size === content.length ? 'Desmarcar Todos' : 'Selecionar Todos'}
             </button>
+            <button class="secondary" on:click={()=>openContentFolder(contentKind)}>ABRIR PASTA</button>
             <button class="primary" on:click={openCatalog}>
               ＋ Adicionar {contentKind === 'mods' ? 'mods' : contentKind === 'plugins' ? 'plugins' : 'datapacks'}
             </button>
@@ -2196,6 +2208,9 @@
         <button class:active={configSection==='transfer'} on:click={()=>configSection='transfer'}>
           <b>Transferência</b><small>Exportar e importar ZIP</small>
         </button>
+        <button class:active={configSection==='monitoring'} on:click={()=>configSection='monitoring'}>
+          <b>Monitoramento</b><small>Histórico de CPU e jogadores</small>
+        </button>
         <button class:active={configSection==='updates'} on:click={()=>configSection='updates'}>
           <b>Atualizações</b><small>Versão e rollback</small>
         </button>
@@ -2243,6 +2258,18 @@
           <button class="primary" on:click={saveConfig}>SALVAR CONFIGURAÇÃO <span>→</span></button>
           <button class="secondary" on:click={openServerFolder}>ABRIR PASTA DO SERVIDOR</button>
         </div>
+      </section>
+      {/if}
+
+      {#if configSection==='monitoring'}
+      <section class="settings-card">
+        <div class="card-head"><div><h3>Monitoramento</h3><p>Histórico da sessão atual. A coleta funciona enquanto o painel está aberto.</p></div><button class="secondary" on:click={()=>metricHistory=[]}>LIMPAR HISTÓRICO</button></div>
+        <div class="health-grid">
+          <div class="health-item level-ok"><span class="health-dot level-ok"></span><div><b>CPU atual</b><small>{server.cpu_percent.toFixed(1)}%</small></div></div>
+          <div class="health-item level-ok"><span class="health-dot level-ok"></span><div><b>RAM do servidor</b><small>{formatBytes(server.memory_mb*1024*1024)}</small></div></div>
+          <div class="health-item level-ok"><span class="health-dot level-ok"></span><div><b>Jogadores</b><small>{server.players} online</small></div></div>
+        </div>
+        <div style="overflow:auto;margin-top:16px"><table class="data-table"><thead><tr><th>Hora</th><th>CPU</th><th>RAM</th><th>Jogadores</th></tr></thead><tbody>{#each [...metricHistory].reverse() as point}<tr><td>{point.time}</td><td>{point.cpu.toFixed(1)}%</td><td>{formatBytes(point.memory*1024*1024)}</td><td>{point.players}</td></tr>{:else}<tr><td colspan="4">Aguardando dados do servidor...</td></tr>{/each}</tbody></table></div>
       </section>
       {/if}
 
