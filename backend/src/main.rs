@@ -1336,6 +1336,105 @@ impl Inner {
 #[derive(Clone)]
 struct AppState(Arc<Mutex<Inner>>);
 
+#[derive(Deserialize)]
+struct ShadowTunnelRequest {
+    #[serde(flatten)]
+    payload: Value,
+}
+
+async fn shadowtunnel_proxy(
+    method: reqwest::Method,
+    path: &str,
+    payload: Option<ShadowTunnelRequest>,
+) -> Response {
+    let base = std::env::var("SHADOW_TUNNEL_API_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:9100".into())
+        .trim_end_matches('/')
+        .to_owned();
+    let url = format!("{base}{path}");
+    let client = reqwest::Client::new();
+    let mut request = client.request(method, url);
+    if let Ok(token) = std::env::var("SHADOW_TUNNEL_API_TOKEN") {
+        if !token.trim().is_empty() {
+            request = request.bearer_auth(token);
+        }
+    }
+    if let Some(body) = payload {
+        request = request.json(&body.payload);
+    }
+    match request.send().await {
+        Ok(response) => {
+            let status =
+                StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+            match response.bytes().await {
+                Ok(body) => {
+                    let mut output = Response::new(Body::from(body));
+                    *output.status_mut() = status;
+                    if let Some(value) = content_type {
+                        output.headers_mut().insert(header::CONTENT_TYPE, value);
+                    }
+                    output
+                }
+                Err(error) => err(StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
+            }
+        }
+        Err(error) => err(StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
+    }
+}
+
+async fn shadowtunnel_status(Json(payload): Json<ShadowTunnelRequest>) -> Response {
+    let tunnel = payload
+        .payload
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    shadowtunnel_proxy(
+        reqwest::Method::GET,
+        &format!("/api/tunnels/{tunnel}/status"),
+        None,
+    )
+    .await
+}
+
+async fn shadowtunnel_create(Json(payload): Json<ShadowTunnelRequest>) -> Response {
+    shadowtunnel_proxy(reqwest::Method::POST, "/api/tunnels", Some(payload)).await
+}
+
+async fn shadowtunnel_connect(payload: Option<Json<ShadowTunnelRequest>>) -> Response {
+    let payload = payload
+        .map(|Json(value)| value)
+        .unwrap_or(ShadowTunnelRequest { payload: json!({}) });
+    let tunnel = payload
+        .payload
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    shadowtunnel_proxy(
+        reqwest::Method::POST,
+        &format!("/api/tunnels/{tunnel}/connect"),
+        None,
+    )
+    .await
+}
+
+async fn shadowtunnel_disconnect(payload: Option<Json<ShadowTunnelRequest>>) -> Response {
+    let payload = payload
+        .map(|Json(value)| value)
+        .unwrap_or(ShadowTunnelRequest { payload: json!({}) });
+    let tunnel = payload
+        .payload
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    shadowtunnel_proxy(
+        reqwest::Method::POST,
+        &format!("/api/tunnels/{tunnel}/disconnect"),
+        None,
+    )
+    .await
+}
+
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 enum HealthLevel {
@@ -8476,6 +8575,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/content/search", post(search_content))
         .route("/api/content/versions", get(get_content_versions))
         .route("/api/content/install", post(install_content))
+        .route("/api/shadowtunnel/status", get(shadowtunnel_status))
+        .route("/api/shadowtunnel/create", post(shadowtunnel_create))
+        .route("/api/shadowtunnel/connect", post(shadowtunnel_connect))
+        .route(
+            "/api/shadowtunnel/disconnect",
+            post(shadowtunnel_disconnect),
+        )
         .route("/api/curseforge/status", get(curseforge_status))
         .route("/api/curseforge/config", post(save_curseforge_config))
         .route("/api/modpacks/search", post(search_modpacks))

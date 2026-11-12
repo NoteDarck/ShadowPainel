@@ -42,6 +42,7 @@
     notes:string; published_at:string; asset_name:string|null; asset_size:number; can_rollback:boolean;
   };
   type CurseForgeStatus = { mode:string; configured:boolean; ok:boolean; message:string };
+  type ShadowTunnel = { name:string; status:string; public_tcp_address:string; public_udp_address:string; local_destination:string; local_type:string };
   type E4allConfig = {
     minecraft_dir:string;
     use_broker:boolean; broker_url:string; relay_host:string; relay_port:number;
@@ -78,14 +79,15 @@
   type Server = {
     status:string; address:string; players:number; memory_mb:number;
     memory_limit_gb:number; cpu_percent:number; uptime_seconds:number;
-    server_name:string; version:string; loader:string; server_dir:string; java_path:string;
+    server_name:string; version:string; loader:string; kind:string; server_dir:string; java_path:string;
     java_detected:boolean; installed:boolean; eula_accepted:boolean; installing:boolean; transferring:boolean;
     curseforge_mode:string; curseforge_configured:boolean;
     e4all:E4allConfig; e4all_link:string|null; logs:Log[];
     java_major:number|null; required_java_major:number; java_managed:boolean;
     auto_backup:boolean; health:HealthView;
   };
-  type ServerSummary = { server_name:string; version:string; server_dir:string; installed:boolean; active:boolean; status:string };
+  type ServerSummary = { server_name:string; version:string; kind:string; server_dir:string; installed:boolean; active:boolean; status:string };
+  type SetupConfig = { server_name:string; server_dir:string; memory_limit_gb:number; loader:string; kind:string };
   type WorldSummary = { name:string; path:string; active:boolean; size_bytes:number; has_level_dat:boolean; universe_configured:boolean };
   type MetricPoint = { time:string; cpu:number; memory:number; players:number };
 
@@ -100,7 +102,8 @@
   let server:Server = {
     status:'offline', address:'localhost:25565', players:0, memory_mb:0,
     memory_limit_gb:4, cpu_percent:0, uptime_seconds:0,
-    server_name:'Meu servidor', version:'', loader:'vanilla',
+     server_name:'Meu servidor', version:'', loader:'vanilla', kind:'manual',
+
     server_dir:'~/Minecraft/MeuServidor', java_path:'java',
     java_detected:false, installed:false, eula_accepted:false, installing:false, transferring:false,
     curseforge_mode:'proxy', curseforge_configured:false,
@@ -113,6 +116,7 @@
   let versions:Version[] = [];
   let serverProfiles:ServerSummary[] = [];
   let switchingServer = false;
+  let serverPickerOpen = false;
   let activeTab:'overview'|'content'|'worlds'|'config'|'setup' = 'overview';
   let worlds:WorldSummary[] = [];
   let worldsLoading = false;
@@ -133,12 +137,15 @@
   let content:ContentItem[] = [];
   let results:ContentResult[] = [];
 
-  let setup = {
+  let setup: SetupConfig = {
     server_name:'Meu Servidor Minecraft',
     server_dir:'~/Minecraft/Servidor',
     memory_limit_gb:4,
     loader:'vanilla',
+    kind:'manual',
   };
+
+
   let setupVersion = '';
   let setupJavaMajor = 21;
   let setupError = '';
@@ -212,6 +219,9 @@
   let cfKey = '';
   let cfSaving = false;
   let cfChecking = false;
+  let shadowTunnel:ShadowTunnel = { name:'', status:'', public_tcp_address:'', public_udp_address:'', local_destination:'127.0.0.1:25565', local_type:'tcp' };
+  let shadowTunnelLoading = false;
+  let shadowTunnelError = '';
 
   let backups:BackupItem[] = [];
   let backupsLoaded = false;
@@ -245,7 +255,7 @@
   let contentDeleteOpen = false;
   let deletingContent = false;
 
-  let setupMode:'manual'|'modpack' = 'manual';
+  let setupMode:string = 'manual';
   let modpackSource:'modrinth'|'curseforge' = 'modrinth';
   let modpackQuery = '';
   let modpackVersionFilter = '';
@@ -947,6 +957,23 @@
     }
   }
 
+  async function loadShadowTunnel() {
+    try {
+      shadowTunnel = { ...shadowTunnel, ...(await api<Partial<ShadowTunnel>>('/shadowtunnel/status')) };
+      shadowTunnelError = '';
+    } catch(e) { shadowTunnelError = e instanceof Error ? e.message : 'Falha ao consultar o Shadow Tunnel.'; }
+  }
+
+  async function shadowTunnelAction(action:'create'|'connect'|'disconnect') {
+    shadowTunnelLoading = true;
+    shadowTunnelError = '';
+    try {
+      const path = `/shadowtunnel/${action}`;
+      shadowTunnel = { ...shadowTunnel, ...(await api<Partial<ShadowTunnel>>(path, json(shadowTunnel))) };
+    } catch(e) { shadowTunnelError = e instanceof Error ? e.message : 'Falha na operação Shadow Tunnel.'; }
+    finally { shadowTunnelLoading = false; }
+  }
+
   async function saveConfig() {
     try {
       server = await api<Server>('/config', json({
@@ -1549,8 +1576,9 @@
     modpackInstalling = false;
   }
 
-  function setSetupMode(mode:'manual'|'modpack') {
+  function setSetupMode(mode:'manual'|'modpack'|'bedrock') {
     setupMode = mode;
+    setup.kind = mode === 'bedrock' ? 'bedrock' : 'java';
     if (mode === 'modpack' && modpackResults.length === 0 && !modpackLoading) {
       searchModpacks();
     }
@@ -1577,6 +1605,7 @@
   }
   $: if (activeTab === 'config' && configSection === 'e4all' && !e4status && server.e4all.use_e4all) checkE4all();
   $: if (activeTab === 'config' && configSection === 'integrations' && !cfStatus && !cfChecking) checkCurseForge();
+  $: if (activeTab === 'config' && configSection === 'integrations' && !shadowTunnel.status) loadShadowTunnel();
   $: if (activeTab === 'config' && configSection === 'backups' && !backupsLoaded && !backupsLoading) loadBackups();
   $: if (activeTab === 'config' && configSection === 'properties') loadWhitelist();
   $: if (activeTab === 'config' && configSection === 'updates' && !updateInfo && !updateChecking) checkUpdates();
@@ -1622,13 +1651,23 @@
       <div class="server-avatar">☾</div>
       <div class="workspace-picker">
         <small class="workspace-caption">SERVIDOR ATIVO</small>
-        <select aria-label="Selecionar servidor" value={server.server_dir} disabled={switchingServer || server.status !== 'offline'} on:change={(e)=>switchServer((e.currentTarget as HTMLSelectElement).value)}>
-          {#if serverProfiles.length === 0}<option value={server.server_dir}>{server.server_name}</option>{/if}
-          {#each serverProfiles as profile}
-            <option value={profile.server_dir}>{profile.server_name} · {profile.version || 'sem versão'}{profile.status === 'online' ? ' · online' : ''}</option>
-          {/each}
-        </select>
-        <small>{serverProfiles.length} servidor(es) cadastrado(s)</small>
+        <button class="active-server-button" on:click={()=>serverPickerOpen=!serverPickerOpen} disabled={switchingServer}>
+          <span class="server-cover">{server.kind === 'bedrock' ? '◆' : '◇'}</span>
+          <span><b>{server.server_name}</b><small>{server.kind === 'bedrock' ? 'Bedrock' : 'Java'} · {server.version || 'sem versão'}</small></span>
+          <span>⌃</span>
+        </button>
+        <small>{serverProfiles.length} servidor(es))</small>
+        {#if serverPickerOpen}
+          <div class="server-picker-menu">
+            {#each serverProfiles as profile}
+              <button class="server-picker-item" class:active={profile.active} on:click={()=>{serverPickerOpen=false;switchServer(profile.server_dir);}} disabled={switchingServer || profile.status==='online'}>
+                <span class="server-cover">{profile.kind === 'bedrock' ? '◆' : '◇'}</span>
+                <span><b>{profile.server_name}</b><small>{profile.kind === 'bedrock' ? 'Bedrock' : 'Java'} · {profile.version || 'sem versão'}</small></span>
+                <em>{profile.status === 'online' ? 'ONLINE' : profile.active ? 'ATIVO' : 'OFFLINE'}</em>
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
       <button class="dots" title="Atualizar lista" on:click={loadServers}>↻</button>
     </div>
@@ -2200,7 +2239,8 @@
           <b>e4all</b><small>Link e compartilhamento</small>
         </button>
         <button class:active={configSection==='integrations'} on:click={()=>configSection='integrations'}>
-          <b>Integrações</b><small>CurseForge</small>
+           <b>Integrações</b><small>CurseForge e Shadow Tunnel</small>
+
         </button>
         <button class:active={configSection==='backups'} on:click={()=>configSection='backups'}>
           <b>Backups</b><small>Cópias do servidor</small>
@@ -2303,9 +2343,28 @@
             <button class="secondary" on:click={()=>saveCurseForgeKey(true)} disabled={cfSaving}>REMOVER CHAVE</button>
           {/if}
         </div>
-        <p class="field-hint">Sem chave, o painel usa api.curse.tools. A chave oficial evita limites do proxy e é armazenada apenas no config local.</p>
-      </section>
-      {/if}
+         <p class="field-hint">Sem chave, o painel usa api.curse.tools. A chave oficial evita limites do proxy e é armazenada apenas no config local.</p>
+       </section>
+       <section class="settings-card">
+         <div class="card-head"><div><h3>SHADOW TUNNEL</h3><p>Configure e controle o túnel pelo Gateway API.</p></div><span class="mod-badge">GATEWAY</span></div>
+         <div class="form-grid">
+           <label>Nome do túnel<input bind:value={shadowTunnel.name} placeholder="meu-tunel" /></label>
+           <label>Destino local<input bind:value={shadowTunnel.local_destination} placeholder="127.0.0.1:25565" /></label>
+           <label>Tipo<select bind:value={shadowTunnel.local_type}><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
+           <label>Status<input value={shadowTunnel.status || 'desconhecido'} readonly /></label>
+           <label>Endereço público TCP<input value={shadowTunnel.public_tcp_address} readonly /></label>
+           <label>Endereço público UDP<input value={shadowTunnel.public_udp_address} readonly /></label>
+         </div>
+         {#if shadowTunnelError}<div class="inline-warning">{shadowTunnelError}</div>{/if}
+         <div class="button-row">
+           <button class="primary" on:click={()=>shadowTunnelAction('create')} disabled={shadowTunnelLoading || !shadowTunnel.name.trim()}>CRIAR TÚNEL</button>
+           <button class="secondary" on:click={()=>shadowTunnelAction('connect')} disabled={shadowTunnelLoading}>INICIAR CONEXÃO</button>
+           <button class="secondary danger-outline" on:click={()=>shadowTunnelAction('disconnect')} disabled={shadowTunnelLoading}>DESCONECTAR</button>
+           <button class="secondary" on:click={loadShadowTunnel} disabled={shadowTunnelLoading}>ATUALIZAR</button>
+         </div>
+       </section>
+       {/if}
+
 
       {#if configSection==='backups'}
       <section class="settings-card">
