@@ -2354,10 +2354,14 @@
            <label>Status<input value={shadowTunnel.status || 'desconhecido'} readonly /></label>
            <label>Endereço público TCP<input value={shadowTunnel.public_tcp_address} readonly /></label>
            <label>Endereço público UDP<input value={shadowTunnel.public_udp_address} readonly /></label>
-         </div>
-         {#if shadowTunnelError}<div class="inline-warning">{shadowTunnelError}</div>{/if}
-         <div class="button-row">
-           <button class="primary" on:click={()=>shadowTunnelAction('create')} disabled={shadowTunnelLoading || !shadowTunnel.name.trim()}>CRIAR TÚNEL</button>
+          </div>
+          <div class="setup-note">
+            <b>Configuração do plugin</b>
+            <span>Instale o ShadowTunnel no servidor Paper e configure o Gateway API em <code>plugins/ShadowTunnel/config.yml</code>. O painel usa <code>SHADOW_TUNNEL_API_URL</code> (padrão <code>http://127.0.0.1:9100</code>) e, opcionalmente, <code>SHADOW_TUNNEL_API_TOKEN</code>. Reinicie o plugin após alterar a configuração.</span>
+          </div>
+          {#if shadowTunnelError}<div class="inline-warning">{shadowTunnelError}</div>{/if}
+          <div class="button-row">
+            <button class="primary" on:click={()=>shadowTunnelAction('create')} disabled={shadowTunnelLoading || !shadowTunnel.name.trim()}>CRIAR TÚNEL</button>
            <button class="secondary" on:click={()=>shadowTunnelAction('connect')} disabled={shadowTunnelLoading}>INICIAR CONEXÃO</button>
            <button class="secondary danger-outline" on:click={()=>shadowTunnelAction('disconnect')} disabled={shadowTunnelLoading}>DESCONECTAR</button>
            <button class="secondary" on:click={loadShadowTunnel} disabled={shadowTunnelLoading}>ATUALIZAR</button>

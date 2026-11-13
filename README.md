@@ -43,6 +43,31 @@ aplicativo**, sem navegador externo.
 | 🎛️ | **Gerenciar o servidor** | Iniciar, parar, reiniciar, enviar comandos e acompanhar logs resumidos em linguagem humana, além de CPU, memória e jogadores. |
 | 🖥️ | **Abrir em tela cheia** | A janela já abre maximizada, como um software dedicado. |
 | 🔒 | **Execução local** | Tudo roda na sua máquina — seus dados não saem do PC. |
+| 🌐 | **ShadowTunnel** | Controle túneis TCP/UDP do plugin Paper, com status, endereços públicos e conexão pelo Gateway API. |
+
+---
+
+## ShadowTunnel
+
+A integração controla o plugin ShadowTunnel para Paper através do Gateway API local. O servidor Minecraft continua executando localmente; apenas o tráfego configurado pelo túnel é encaminhado.
+
+### Instalação do plugin
+
+1. Baixe o JAR compatível com a versão do Paper na página de releases do ShadowTunnel.
+2. Copie o JAR para `plugins/` do servidor Paper.
+3. Inicie o servidor uma vez, confirme que o plugin carregou e pare o servidor.
+4. Edite `plugins/ShadowTunnel/config.yml`, habilite o Gateway API e defina a porta (padrão `9100`).
+5. Reinicie o servidor. O painel deve alcançar `http://127.0.0.1:9100`.
+
+### Configuração
+
+Na seção **Configurações avançadas → Integrações → Shadow Tunnel**, informe o nome do túnel, destino local (`127.0.0.1:25565`) e tipo (`TCP` ou `UDP`). Para outro endereço do Gateway, defina `SHADOW_TUNNEL_API_URL`; para autenticação, defina `SHADOW_TUNNEL_API_TOKEN`. Não exponha a porta do Gateway publicamente.
+
+### Uso e diagnóstico
+
+Use **Criar túnel**, **Conectar**, **Desconectar** e **Atualizar**. Compartilhe somente o endereço TCP/UDP exibido como online. Status `requested` indica solicitação pendente; confirme o console do plugin, a porta do Gateway, o token e as regras do firewall. Teste o Gateway com `curl http://127.0.0.1:9100/api/tunnels/<nome>/status`.
+
+A API local do painel encaminha `GET /api/shadowtunnel/status`, `POST /api/shadowtunnel/create`, `POST /api/shadowtunnel/connect` e `POST /api/shadowtunnel/disconnect` para o Gateway. Para desenvolvimento, execute `cargo fmt --all`, `cargo test` e `cargo clippy --all-targets --all-features -- -D warnings` em `backend/`; execute `npm run check` e `npm run build` em `frontend/`.
 
 ---
 

@@ -1383,12 +1383,17 @@ async fn shadowtunnel_proxy(
     }
 }
 
-async fn shadowtunnel_status(Json(payload): Json<ShadowTunnelRequest>) -> Response {
+async fn shadowtunnel_status(payload: Option<Json<ShadowTunnelRequest>>) -> Response {
     let tunnel = payload
-        .payload
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("default");
+        .map(|Json(value)| value)
+        .and_then(|value| {
+            value
+                .payload
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "default".into());
     shadowtunnel_proxy(
         reqwest::Method::GET,
         &format!("/api/tunnels/{tunnel}/status"),
