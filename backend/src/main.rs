@@ -36,7 +36,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.9.2";
+const APP_VERSION: &str = "0.9.3";
 
 const MAX_LOGS: usize = 500;
 const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;

@@ -116,7 +116,6 @@
   let versions:Version[] = [];
   let serverProfiles:ServerSummary[] = [];
   let switchingServer = false;
-  let serverPickerOpen = false;
   let activeTab:'overview'|'servers'|'content'|'worlds'|'config'|'setup' = 'overview';
   let worlds:WorldSummary[] = [];
   let worldsLoading = false;
@@ -1671,23 +1670,12 @@
       <div class="server-avatar">☾</div>
       <div class="workspace-picker">
         <small class="workspace-caption">SERVIDOR ATIVO</small>
-        <button class="active-server-button" on:click={()=>serverPickerOpen=!serverPickerOpen} disabled={switchingServer}>
+        <button class="active-server-display" on:click={()=>activeTab='servers'}>
           <span class="server-cover">{server.kind === 'bedrock' ? '◆' : '◇'}</span>
           <span><b>{server.server_name}</b><small>{server.kind === 'bedrock' ? 'Bedrock' : 'Java'} · {server.version || 'sem versão'}</small></span>
-          <span>⌃</span>
+          <span>›</span>
         </button>
-        <small>{serverProfiles.length} servidor(es))</small>
-        {#if serverPickerOpen}
-          <div class="server-picker-menu">
-            {#each serverProfiles as profile}
-              <button class="server-picker-item" class:active={profile.active} on:click={()=>{serverPickerOpen=false;switchServer(profile.server_dir);}} disabled={switchingServer || profile.status==='online'}>
-                <span class="server-cover">{profile.kind === 'bedrock' ? '◆' : '◇'}</span>
-                <span><b>{profile.server_name}</b><small>{profile.kind === 'bedrock' ? 'Bedrock' : 'Java'} · {profile.version || 'sem versão'}</small></span>
-                <em>{profile.status === 'online' ? 'ONLINE' : profile.active ? 'ATIVO' : 'OFFLINE'}</em>
-              </button>
-            {/each}
-          </div>
-        {/if}
+        <small>{serverProfiles.length} servidor(es) · clique para trocar</small>
       </div>
       <button class="dots" title="Atualizar lista" on:click={loadServers}>↻</button>
     </div>
