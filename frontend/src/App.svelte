@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.9.2';
+  const APP_VERSION = '0.9.5';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -1664,12 +1664,12 @@
   <aside class="sidebar">
     <div class="brand">
       <div class="mark"><img src="/shadowpainel.png" alt="" /></div>
-      <div><strong>Shadow<span>Painel</span></strong><small>SERVER CONTROL</small></div>
+      <div><strong>Shadow<span>Painel</span></strong><small>SEU SERVIDOR MINECRAFT</small></div>
     </div>
     <div class="workspace">
       <div class="server-avatar">☾</div>
       <div class="workspace-picker">
-        <small class="workspace-caption">SERVIDOR ATIVO</small>
+        <small class="workspace-caption">SERVIDOR SELECIONADO</small>
         <button class="active-server-display" on:click={()=>activeTab='servers'}>
           <span class="server-cover">{server.kind === 'bedrock' ? '◆' : '◇'}</span>
           <span><b>{server.server_name}</b><small>{server.kind === 'bedrock' ? 'Bedrock' : 'Java'} · {server.version || 'sem versão'}</small></span>
@@ -1680,16 +1680,16 @@
       <button class="dots" title="Atualizar lista" on:click={loadServers}>↻</button>
     </div>
     <nav>
-      <div class="nav-label settings-label">SERVIDORES</div>
+      <div class="nav-label settings-label">MEUS SERVIDORES</div>
       <button class:active={activeTab==='servers'} on:click={()=>{activeTab='servers';loadServers();}}>
-        <span class="nav-icon">▣</span>Escolher servidor
+        <span class="nav-icon">▣</span>Meus servidores
       </button>
-      <div class="nav-label settings-label">SERVIDOR</div>
+      <div class="nav-label settings-label">GERENCIAR</div>
       <button class:active={activeTab==='overview'} on:click={()=>activeTab='overview'}>
         <span class="nav-icon">◈</span>Visão geral
       </button>
       <button class:active={activeTab==='content'} on:click={()=>activeTab='content'}>
-        <span class="nav-icon">▦</span>Mods, plugins e datapacks
+        <span class="nav-icon">▦</span>Mods e complementos
       </button>
       <button class:active={activeTab==='worlds'} on:click={()=>{activeTab='worlds';loadWorlds();}}>
         <span class="nav-icon">◇</span>Mundos
@@ -1697,9 +1697,9 @@
       <button class:active={activeTab==='setup'} on:click={()=>openSetup(true)}>
         <span class="nav-icon">＋</span>Criar servidor
       </button>
-      <div class="nav-label settings-label">SISTEMA</div>
+      <div class="nav-label settings-label">OUTRAS OPÇÕES</div>
       <button class:active={activeTab==='config'} on:click={()=>activeTab='config'}>
-        <span class="nav-icon">⚙</span>Configurações avançadas
+        <span class="nav-icon">⚙</span>Configurações
       </button>
     </nav>
     <div class="sidebar-footer">
@@ -1717,27 +1717,27 @@
   <main class="main">
     <header>
       <div>
-        <div class="breadcrumb">SERVIDORES <span>/</span> {server.server_name}</div>
+        <div class="breadcrumb">MEUS SERVIDORES <span>/</span> {server.server_name}</div>
         <h1>
-          {activeTab==='servers' ? 'Escolher servidor'
-           : activeTab==='content' ? 'Conteúdo do servidor'
-           : activeTab==='worlds' ? 'Mundos do servidor'
-           : activeTab==='config' ? 'Configurações avançadas'
+          {activeTab==='servers' ? 'Meus servidores'
+           : activeTab==='content' ? 'Mods e complementos'
+           : activeTab==='worlds' ? 'Mundos'
+           : activeTab==='config' ? 'Configurações'
            : activeTab==='setup' ? 'Criar servidor'
-           : 'Olá, administrador'} <span class="wave">✦</span>
+           : 'Olá!'} <span class="wave">✦</span>
         </h1>
         <p>
           {activeTab==='servers'
-            ? 'Escolha um servidor para abrir, administrar ou iniciar.'
+            ? 'Escolha um servidor para jogar, administrar ou iniciar.'
             : activeTab==='content'
-              ? 'Gerencie seus arquivos como no Prism Launcher.'
-            : activeTab==='worlds'
-              ? 'Troque e organize seus mundos sem abrir o terminal.'
-            : activeTab==='config'
-              ? 'A instalação inicial fica separada das preferências do servidor.'
+              ? 'Instale mods, plugins e datapacks sem abrir pastas complicadas.'
+              : activeTab==='worlds'
+              ? 'Crie, organize e faça backup dos seus mundos.'
+              : activeTab==='config'
+              ? 'Ajuste o servidor com explicações simples em cada opção.'
               : activeTab==='setup'
-                ? 'Escolha versão, modloader e pasta para começar.'
-                : 'Gerencie seu mundo sem abrir o terminal.'}
+                ? 'Vamos configurar seu servidor passo a passo.'
+                : 'Tudo o que você precisa para jogar com seus amigos.'}
         </p>
       </div>
       <div class="header-actions">
@@ -1814,7 +1814,7 @@
           <div class="hero-copy">
             <div class="eyebrow">
               <span class:online={server.status==='online'} class:stopping={server.status==='stopping'} class="status-dot"></span>
-              {server.status==='online'?'SERVIDOR ONLINE':server.status==='stopping'?'SERVIDOR PARANDO':'SERVIDOR OFFLINE'}
+              {server.status==='online'?'PRONTO PARA JOGAR':server.status==='stopping'?'ENCERRANDO…':'SERVIDOR PARADO'}
             </div>
             <h2>{server.server_name}</h2>
             <p>Minecraft Java Edition · {server.version || 'sem versão instalada'} · {server.loader}</p>
@@ -1824,15 +1824,15 @@
           <div class="hero-bottom">
             <div class="hero-actions">
               <button class="primary" on:click={toggleServer} disabled={loading || server.installing || server.status==='stopping'}>
-                {server.transferring ? 'TRANSFERINDO...' : server.installing ? 'INSTALANDO...' : loading ? 'CARREGANDO...' : server.status==='online' ? 'PARAR SERVIDOR' : server.status==='stopping' ? 'PARANDO...' : 'INICIAR SERVIDOR'} <span>→</span>
+                {server.transferring ? 'TRANSFERINDO…' : server.installing ? 'CONFIGURANDO…' : loading ? 'AGUARDE…' : server.status==='online' ? 'PARAR SERVIDOR' : server.status==='stopping' ? 'ENCERRANDO…' : 'INICIAR SERVIDOR'} <span>→</span>
               </button>
               {#if !server.eula_accepted}
-                <button class="secondary" on:click={acceptEula}>ACEITAR EULA</button>
+                <button class="secondary" on:click={acceptEula}>ACEITAR TERMOS</button>
               {:else}
                 <span class="eula-ok">✓ EULA aceita</span>
               {/if}
-              <button class="secondary" on:click={()=>openSetup(true)}>＋ Nova instalação</button>
-              <button class="secondary danger-outline" on:click={openDelete}>EXCLUIR SERVIDOR</button>
+              <button class="secondary" on:click={()=>openSetup(true)}>＋ NOVO SERVIDOR</button>
+              <button class="secondary danger-outline" on:click={openDelete}>REMOVER SERVIDOR</button>
             </div>
             <div class="hero-meta">
               <div><span>ENDEREÇO</span><b>{server.address}</b></div>
@@ -1931,7 +1931,7 @@
           </section>
           <section class="quick-card">
             <div class="card-head">
-              <div><h3>Ações rápidas</h3><p>Atalhos de administração</p></div>
+            <div><h3>O que você quer fazer?</h3><p>Atalhos para as tarefas mais comuns</p></div>
             </div>
             <button class="quick" on:click={toggleServer} disabled={loading || server.installing || server.status==='stopping'}>
               <span class="q-icon">{server.status==='online'?'■':'▶'}</span>
@@ -1941,12 +1941,12 @@
             </button>
             <button class="quick" on:click={()=>activeTab='content'}>
               <span class="q-icon">▦</span>
-              <div><b>Gerenciar conteúdo</b><small>Mods, plugins e datapacks</small></div>
+              <div><b>Adicionar mods e complementos</b><small>Mods, plugins e datapacks</small></div>
               <span>›</span>
             </button>
             <button class="quick" on:click={()=>activeTab='config'}>
               <span class="q-icon">⚙</span>
-              <div><b>Configurações avançadas</b><small>Servidor, mundo, e4all, backups e transferência</small></div>
+              <div><b>Ajustar configurações</b><small>Servidor, mundo, backups e conexões</small></div>
               <span>›</span>
             </button>
           </section>
