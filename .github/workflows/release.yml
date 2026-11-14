@@ -302,7 +302,7 @@ jobs:
                             Vital="no"
                             PerMachine="no"
                             InstallCommand="/silent /install"
-                            DetectCondition="WV2Installed"
+                            DetectCondition="WV2MachineInstalled OR WV2UserInstalled"
                             Permanent="no" />
                 <MsiPackage Id="ShadowPainelMsi"
                             SourceFile="ShadowPainel.msi"
