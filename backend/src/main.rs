@@ -36,7 +36,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.9.1";
+const APP_VERSION: &str = "0.9.2";
 
 const MAX_LOGS: usize = 500;
 const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;
@@ -4749,6 +4749,200 @@ struct WorldCreateRequest {
     level_type: String,
 }
 
+#[derive(Deserialize)]
+struct WorldBackupRequest {
+    name: String,
+}
+
+fn trash_world_dir(base: &Path) -> PathBuf {
+    base.join(".shadowpainel-trash").join("worlds")
+}
+
+fn trash_world_path(base: &Path, name: &str) -> PathBuf {
+    trash_world_dir(base).join(name)
+}
+
+async fn open_world_folder(
+    State(app): State<AppState>,
+    Json(req): Json<WorldRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let i = app.0.lock().await;
+    let base = expand(&i.cfg.server_dir);
+    let path = world_path(&base, &req.name)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de mundo inválido."))?;
+    if !path.is_dir() {
+        return Err(err(StatusCode::NOT_FOUND, "Mundo não encontrado."));
+    }
+    tokio::fs::create_dir_all(&path).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar pasta: {e}"),
+        )
+    })?;
+    open_folder_in_file_manager(&path).map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Não foi possível abrir a pasta: {e}"),
+        )
+    })?;
+    Ok(Json(
+        json!({"ok": true, "path": path.display().to_string()}),
+    ))
+}
+
+async fn restore_world(
+    State(app): State<AppState>,
+    Json(req): Json<WorldRequest>,
+) -> Result<Json<Vec<WorldSummary>>, ApiErr> {
+    let i = app.0.lock().await;
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de restaurar um mundo.",
+        ));
+    }
+    let base = expand(&i.cfg.server_dir);
+    let trash_path = trash_world_path(&base, &req.name);
+    if !trash_path.is_dir() {
+        return Err(err(StatusCode::NOT_FOUND, "Mundo não está na lixeira."));
+    }
+    let target = world_path(&base, &req.name)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de mundo inválido."))?;
+    if target.exists() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Já existe um mundo com esse nome.",
+        ));
+    }
+    tokio::fs::rename(&trash_path, &target).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao restaurar mundo: {e}"),
+        )
+    })?;
+    drop(i);
+    list_worlds(State(app)).await
+}
+
+async fn clean_world_trash(State(app): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    let i = app.0.lock().await;
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de esvaziar a lixeira.",
+        ));
+    }
+    let base = expand(&i.cfg.server_dir);
+    let trash_dir = trash_world_dir(&base);
+    if trash_dir.is_dir() {
+        tokio::fs::remove_dir_all(&trash_dir).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao esvaziar lixeira: {e}"),
+            )
+        })?;
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn backup_world(
+    State(app): State<AppState>,
+    Json(req): Json<WorldBackupRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let i = app.0.lock().await;
+    if i.status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de fazer backup.",
+        ));
+    }
+    let base = expand(&i.cfg.server_dir);
+    let source = world_path(&base, &req.name)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Nome de mundo inválido."))?;
+    if !source.is_dir() {
+        return Err(err(StatusCode::NOT_FOUND, "Mundo não encontrado."));
+    }
+    let backups_dir = base.join("backups");
+    tokio::fs::create_dir_all(&backups_dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao preparar pasta de backups: {e}"),
+        )
+    })?;
+    let stamp = Local::now().format("%Y%m%d-%H%M%S");
+    let zip_path = backups_dir.join(format!(
+        "world-backup-{}-{}.zip",
+        sanitize_export_name(&req.name),
+        stamp
+    ));
+    let source_copy = source.clone();
+    let zip_copy = zip_path.clone();
+    let size =
+        tokio::task::spawn_blocking(move || create_world_backup_blocking(&source_copy, &zip_copy))
+            .await
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Falha ao criar backup: {e}"),
+                )
+            })?
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Falha ao copiar backup: {e}"),
+                )
+            })?;
+    Ok(Json(
+        json!({"ok": true, "path": zip_path.display().to_string(), "size": size}),
+    ))
+}
+
+fn create_world_backup_blocking(source: &Path, destination: &Path) -> Result<u64, String> {
+    let file = fs::File::create(destination).map_err(|e| e.to_string())?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    fn add(
+        zip: &mut ZipWriter<fs::File>,
+        path: &Path,
+        rel: &Path,
+        options: &SimpleFileOptions,
+    ) -> Result<(), String> {
+        let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if meta.file_type().is_symlink() {
+            return Ok(());
+        }
+        if meta.is_dir() {
+            for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                add(zip, &entry.path(), &rel.join(entry.file_name()), options)?;
+            }
+            return Ok(());
+        }
+        if !meta.is_file() {
+            return Ok(());
+        }
+        let name = rel.to_string_lossy().replace('\\', "/");
+        zip.start_file(name, *options).map_err(|e| e.to_string())?;
+        let mut src = fs::File::open(path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut src, zip).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    add(
+        &mut zip,
+        source,
+        Path::new(source.file_name().unwrap_or(std::ffi::OsStr::new(""))),
+        &options,
+    )?;
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(fs::metadata(destination).map_err(|e| e.to_string())?.len())
+}
+
+async fn list_worlds_from_trash(
+    State(app): State<AppState>,
+) -> Result<Json<Vec<WorldSummary>>, ApiErr> {
+    list_worlds(State(app)).await
+}
+
 fn valid_world_name(name: &str) -> bool {
     let name = name.trim();
     !name.is_empty()
@@ -4826,7 +5020,8 @@ async fn list_worlds(State(app): State<AppState>) -> Result<Json<Vec<WorldSummar
             continue;
         }
         let has_level_dat = path.join("level.dat").is_file();
-        if !has_level_dat && !path.join("region").is_dir() && name != active_name {
+        let has_region = path.join("region").is_dir();
+        if !has_level_dat && !has_region && name != active_name {
             continue;
         }
         worlds.push(WorldSummary {
@@ -8560,6 +8755,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/worlds/duplicate", post(duplicate_world))
         .route("/api/worlds/rename", post(rename_world))
         .route("/api/worlds/delete", post(delete_world))
+        .route("/api/worlds/open-folder", post(open_world_folder))
+        .route("/api/worlds/restore", post(restore_world))
+        .route("/api/worlds/clean-trash", post(clean_world_trash))
+        .route("/api/worlds/backup", post(backup_world))
+        .route("/api/worlds/scan", get(list_worlds_from_trash))
         .route("/api/server/icon", post(save_server_icon))
         .route("/api/server/open-folder", post(open_server_folder))
         .route("/api/server/open-content-folder", post(open_content_folder))
@@ -8714,7 +8914,7 @@ mod tests {
     fn compares_update_versions() {
         assert!(version_parts("0.10.0") > version_parts("0.9.9"));
         assert!(version_parts("v1.0.0") > version_parts("0.99.99"));
-        assert_eq!(version_parts("0.9.1"), (0, 9, 1));
+        assert_eq!(version_parts("0.9.2"), (0, 9, 2));
     }
 
     #[test]
@@ -8737,7 +8937,7 @@ mod tests {
         let zip_path = root.join("export.zip");
         let manifest = ServerExportManifest {
             format: 1,
-            app_version: "0.9.1".into(),
+            app_version: "0.9.2".into(),
             exported_at: "2026-11-07 12:00:00".into(),
             server_name: "Teste".into(),
             version: "1.21.1".into(),

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.9.1';
+  const APP_VERSION = '0.9.2';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -117,7 +117,7 @@
   let serverProfiles:ServerSummary[] = [];
   let switchingServer = false;
   let serverPickerOpen = false;
-  let activeTab:'overview'|'content'|'worlds'|'config'|'setup' = 'overview';
+  let activeTab:'overview'|'servers'|'content'|'worlds'|'config'|'setup' = 'overview';
   let worlds:WorldSummary[] = [];
   let worldsLoading = false;
   let worldBusy = false;
@@ -126,6 +126,7 @@
   let worldType = 'minecraft:normal';
   let worldTarget = '';
   let selectedWorld = '';
+  let worldSearch = '';
   let worldAction:'create'|'duplicate'|'rename'|'' = '';
   let metricHistory:MetricPoint[] = [];
   let networkResult:NetworkDiagnostic|null = null;
@@ -909,6 +910,7 @@
   async function submitWorldAction() {
     const name = worldName.trim();
     const target = worldTarget.trim();
+    if (!name || (worldAction !== 'create' && !target)) return;
     if (worldAction === 'create') {
       await worldRequest('/worlds/create', { name, seed:worldSeed, level_type:worldType }, `Mundo "${name}" criado e selecionado.`);
     } else if (worldAction === 'duplicate') {
@@ -916,6 +918,24 @@
     } else if (worldAction === 'rename') {
       await worldRequest('/worlds/rename', { source:selectedWorld, target }, `Mundo renomeado para "${target}".`);
     }
+  }
+
+  async function openWorldFolder(name:string) {
+    try { await api('/worlds/open-folder', json({name})); setNotice(`Pasta do mundo "${name}" aberta.`); } catch(e) { fail(e, 'Não foi possível abrir a pasta do mundo.'); }
+  }
+
+  async function backupWorld(name:string) {
+    if (!window.confirm(`Criar backup ZIP do mundo "${name}"?`)) return;
+    try {
+      const data = await api<{path:string; size:number}>('/worlds/backup', json({name}));
+      setNotice(`Backup criado: ${data.path} (${formatBytes(data.size)}).`);
+    } catch(e) { fail(e, 'Não foi possível criar o backup do mundo.'); }
+  }
+
+  async function cleanWorldTrash() {
+    if (server.status !== 'offline') { setNotice('Pare o servidor antes de esvaziar a lixeira.'); return; }
+    if (!window.confirm('Esvaziar a lixeira de mundos? Essa ação não pode ser desfeita.')) return;
+    try { await api('/worlds/clean-trash', json({})); setNotice('Lixeira de mundos esvaziada.'); await loadWorlds(); } catch(e) { fail(e, 'Não foi possível esvaziar a lixeira.'); }
   }
 
   async function createServer() {
@@ -1672,7 +1692,11 @@
       <button class="dots" title="Atualizar lista" on:click={loadServers}>↻</button>
     </div>
     <nav>
-      <div class="nav-label">SERVIDOR</div>
+      <div class="nav-label settings-label">SERVIDORES</div>
+      <button class:active={activeTab==='servers'} on:click={()=>{activeTab='servers';loadServers();}}>
+        <span class="nav-icon">▣</span>Escolher servidor
+      </button>
+      <div class="nav-label settings-label">SERVIDOR</div>
       <button class:active={activeTab==='overview'} on:click={()=>activeTab='overview'}>
         <span class="nav-icon">◈</span>Visão geral
       </button>
@@ -1707,15 +1731,18 @@
       <div>
         <div class="breadcrumb">SERVIDORES <span>/</span> {server.server_name}</div>
         <h1>
-          {activeTab==='content' ? 'Conteúdo do servidor'
+          {activeTab==='servers' ? 'Escolher servidor'
+           : activeTab==='content' ? 'Conteúdo do servidor'
            : activeTab==='worlds' ? 'Mundos do servidor'
            : activeTab==='config' ? 'Configurações avançadas'
            : activeTab==='setup' ? 'Criar servidor'
            : 'Olá, administrador'} <span class="wave">✦</span>
         </h1>
         <p>
-          {activeTab==='content'
-            ? 'Gerencie seus arquivos como no Prism Launcher.'
+          {activeTab==='servers'
+            ? 'Escolha um servidor para abrir, administrar ou iniciar.'
+            : activeTab==='content'
+              ? 'Gerencie seus arquivos como no Prism Launcher.'
             : activeTab==='worlds'
               ? 'Troque e organize seus mundos sem abrir o terminal.'
             : activeTab==='config'
@@ -1758,7 +1785,29 @@
       <div class="install-banner"><div class="spinner"></div> Instalação em andamento. Acompanhe os detalhes no console.</div>
     {/if}
 
-    {#if activeTab==='overview'}
+    {#if activeTab==='servers'}
+      <section class="server-browser settings-card">
+        <div class="card-head">
+          <div><h3>Seus servidores</h3><p>Escolha uma instalação como no menu multiplayer do Minecraft.</p></div>
+          <button class="primary" on:click={()=>openSetup(true)}>＋ Novo servidor</button>
+        </div>
+        {#if serverProfiles.length === 0}
+          <div class="empty">Nenhum servidor cadastrado. Crie sua primeira instalação para começar.</div>
+        {:else}
+          <div class="server-browser-list">
+            {#each serverProfiles as profile}
+              <button class="server-browser-card" class:active={profile.active} on:click={()=>{if (profile.status !== 'online') { switchServer(profile.server_dir); activeTab='overview'; }}} disabled={switchingServer || profile.status==='online'}>
+                <span class="server-browser-icon">{profile.kind === 'bedrock' ? '◆' : '◇'}</span>
+                <span class="server-browser-copy"><b>{profile.server_name}</b><small>{profile.kind === 'bedrock' ? 'Minecraft Bedrock' : 'Minecraft Java'} · {profile.version || 'versão não definida'}</small><small class="server-path">{profile.server_dir}</small></span>
+                <span class="server-browser-status"><em class:online={profile.status==='online'}>{profile.status==='online' ? 'ONLINE' : profile.active ? 'SELECIONADO' : 'OFFLINE'}</em>{#if profile.active}<small>Servidor atual</small>{/if}</span>
+                <span class="server-browser-arrow">›</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </section>
+
+    {:else if activeTab==='overview'}
       {#if !server.installed}
         <section class="settings-card setup-card">
           <div class="card-head">
@@ -2183,12 +2232,13 @@
     {:else if activeTab==='worlds'}
       <section class="settings-card">
         <div class="card-head">
-          <div><h3>Mundos do servidor</h3><p>Troque, crie e organize mundos. Plugins como Universe continuam controlando suas conexões entre mundos.</p></div>
-          <button class="primary" on:click={()=>{worldAction='create';worldName='';}} disabled={worldBusy}>＋ Criar mundo</button>
+          <div><h3>Mundos do servidor</h3><p>Troque, crie e organize mundos com segurança. O servidor precisa estar desligado para alterar arquivos.</p></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;"><button class="secondary" on:click={cleanWorldTrash} disabled={worldBusy || server.status !== 'offline'}>ESVAZIAR LIXEIRA</button><button class="primary" on:click={()=>{worldAction='create';worldName='';}} disabled={worldBusy}>＋ Criar mundo</button></div>
         </div>
         {#if worlds.some(world => world.universe_configured)}
-          <div class="inline-warning">Universe detectado. Renomear ou excluir mundos pode exigir ajustes na configuração do plugin.</div>
+          <div class="inline-warning">Universe detectado. Para trocar, renomear ou excluir mundos, confira antes os nomes configurados no plugin.</div>
         {/if}
+        <div style="display:flex;gap:10px;margin:16px 0;align-items:center;flex-wrap:wrap;"><input bind:value={worldSearch} placeholder="Buscar mundo..." style="flex:1;min-width:220px"/><span class="field-hint">{worlds.filter(world => !worldSearch.trim() || world.name.toLowerCase().includes(worldSearch.trim().toLowerCase())).length} encontrado(s)</span></div>
         {#if worldAction}
           <div class="settings-card" style="margin:16px 0;padding:16px;">
             <div class="card-head"><div><h4>{worldAction==='create'?'Criar mundo':worldAction==='duplicate'?'Duplicar mundo':'Renomear mundo'}</h4><p>O servidor precisa estar desligado.</p></div></div>
@@ -2211,14 +2261,16 @@
           <div class="empty">Nenhum mundo detectado. Crie um mundo ou inicie o servidor para o Minecraft gerar o mundo padrão.</div>
         {:else}
           <div class="installed-grid">
-            {#each worlds as world}
+            {#each worlds.filter(world => !worldSearch.trim() || world.name.toLowerCase().includes(worldSearch.trim().toLowerCase())) as world}
               <div class="installed-card" class:selected={world.active}>
                 <div class="catalog-icon" style="width:36px;height:36px;font-size:14px;">◇</div>
-                <div class="installed-meta"><b>{world.name}{#if world.active}<span class="source-badge">ATIVO</span>{/if}</b><small>{formatBytes(world.size_bytes)} · {world.has_level_dat ? 'level.dat encontrado' : 'sem level.dat'}</small></div>
+                <div class="installed-meta"><b>{world.name}{#if world.active}<span class="source-badge">ATIVO</span>{/if}</b><small>{formatBytes(world.size_bytes)} · {world.has_level_dat ? 'level.dat encontrado' : 'pasta encontrada'}</small></div>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
                   {#if !world.active}<button class="secondary" on:click={()=>activateWorld(world.name)} disabled={worldBusy}>ATIVAR</button>{/if}
                   <button class="secondary" on:click={()=>{selectedWorld=world.name;worldTarget='';worldAction='duplicate';}} disabled={worldBusy}>DUPLICAR</button>
                   <button class="secondary" on:click={()=>{selectedWorld=world.name;worldTarget='';worldAction='rename';}} disabled={worldBusy}>RENOMEAR</button>
+                  <button class="secondary" on:click={()=>backupWorld(world.name)} disabled={worldBusy}>BACKUP</button>
+                  <button class="secondary" on:click={()=>openWorldFolder(world.name)} disabled={worldBusy}>ABRIR PASTA</button>
                   {#if !world.active}<button class="danger-outline" on:click={()=>deleteWorld(world.name)} disabled={worldBusy}>EXCLUIR</button>{/if}
                 </div>
               </div>
