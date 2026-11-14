@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.9.5';
+  const APP_VERSION = '0.9.6';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };

@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::{
     env,
     error::Error,
@@ -67,6 +69,15 @@ fn webview_data_dir() -> io::Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x08000000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
+
 fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
     let suffix = if cfg!(windows) { ".exe" } else { "" };
     let core = find_file(candidates(
@@ -92,15 +103,17 @@ fn start_core(exe_dir: &Path) -> Result<(Child, String), Box<dyn Error>> {
         .parent()
         .ok_or_else(|| io::Error::other("pasta do frontend inválida"))?;
 
-    let mut child = Command::new(&core)
+    let mut command = Command::new(&core);
+    command
         .env("SHADOWPAINEL_FRONTEND_DIR", frontend_dir)
         .env(
             "SHADOWPAINEL_ADDR",
             env::var("SHADOWPAINEL_ADDR").unwrap_or_else(|_| "127.0.0.1:0".into()),
         )
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stderr(Stdio::null());
+    hide_console_window(&mut command);
+    let mut child = command.spawn()?;
 
     let stdout = child
         .stdout

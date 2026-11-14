@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Request, State},
@@ -36,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.9.4";
+const APP_VERSION: &str = "0.9.6";
 
 const MAX_LOGS: usize = 500;
 const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;
@@ -3242,13 +3244,13 @@ struct NetworkDiagnostic {
 }
 
 async fn command_text(program: &str, args: &[&str]) -> Option<String> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(4),
-        Command::new(program).args(args).output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let mut command = Command::new(program);
+    command.args(args);
+    hide_console_window(&mut command);
+    let output = tokio::time::timeout(Duration::from_secs(4), command.output())
+        .await
+        .ok()?
+        .ok()?;
     let mut text = String::from_utf8_lossy(&output.stdout).to_lowercase();
     text.push_str(&String::from_utf8_lossy(&output.stderr).to_lowercase());
     Some(text)
@@ -4126,7 +4128,7 @@ async fn install_update(State(app): State<AppState>) -> Result<Json<Value>, ApiE
             "Você já está usando a versão mais recente.",
         ));
     }
-    let (asset_name, asset_url, _size, digest) = release_asset(&release).ok_or_else(|| {
+    let (asset_name, asset_url, size, digest) = release_asset(&release).ok_or_else(|| {
         err(
             StatusCode::NOT_FOUND,
             "Esta versão não tem instalador para o seu sistema.",
@@ -4143,7 +4145,13 @@ async fn install_update(State(app): State<AppState>) -> Result<Json<Value>, ApiE
         safe_filename(&asset_name)
             .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Nome de instalador inválido."))?,
     );
-    if !destination.is_file() {
+    let cached_size_matches = size == 0
+        || tokio::fs::metadata(&destination)
+            .await
+            .map(|metadata| metadata.len() == size)
+            .unwrap_or(false);
+    if !destination.is_file() || !cached_size_matches {
+        let _ = tokio::fs::remove_file(&destination).await;
         save_download(&client, &asset_url, &destination).await?;
     }
     let expected = if let Some(digest) = digest {
@@ -4211,8 +4219,8 @@ async fn install_update(State(app): State<AppState>) -> Result<Json<Value>, ApiE
     )
     .await;
     let mut command = if cfg!(windows) {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", ""]).arg(&destination);
+        let mut command = Command::new("explorer.exe");
+        command.arg(&destination);
         command
     } else if cfg!(target_os = "macos") {
         let mut command = Command::new("open");
@@ -4311,8 +4319,8 @@ async fn rollback_update(State(app): State<AppState>) -> Result<Json<Value>, Api
     make_executable(&destination).await;
     let _ = state;
     let mut command = if cfg!(windows) {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", ""]).arg(&destination);
+        let mut command = Command::new("explorer.exe");
+        command.arg(&destination);
         command
     } else if cfg!(target_os = "macos") {
         let mut command = Command::new("open");
@@ -5453,10 +5461,16 @@ async fn save_download(client: &reqwest::Client, url: &str, path: &Path) -> Resu
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Falha no download: {e}")))?
         .error_for_status()
         .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Download rejeitado: {e}")))?;
-    let mut file = tokio::fs::File::create(path).await.map_err(|e| {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let temporary = path.with_file_name(format!(".{filename}.part"));
+    let _ = tokio::fs::remove_file(&temporary).await;
+    let mut file = tokio::fs::File::create(&temporary).await.map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Falha ao criar {}: {e}", path.display()),
+            format!("Falha ao criar {}: {e}", temporary.display()),
         )
     })?;
     while let Some(chunk) = response.chunk().await.map_err(|e| {
@@ -5468,14 +5482,24 @@ async fn save_download(client: &reqwest::Client, url: &str, path: &Path) -> Resu
         file.write_all(&chunk).await.map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Falha ao salvar {}: {e}", path.display()),
+                format!("Falha ao salvar {}: {e}", temporary.display()),
             )
         })?;
     }
     file.flush().await.map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Falha ao finalizar {}: {e}", path.display()),
+            format!("Falha ao finalizar {}: {e}", temporary.display()),
+        )
+    })?;
+    drop(file);
+    #[cfg(windows)]
+    let _ = tokio::fs::remove_file(path).await;
+    tokio::fs::rename(&temporary, path).await.map_err(|e| {
+        let _ = std::fs::remove_file(&temporary);
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao concluir o download {}: {e}", path.display()),
         )
     })
 }
