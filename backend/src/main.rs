@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.9.7";
+const APP_VERSION: &str = "0.9.8";
 
 const MAX_LOGS: usize = 500;
 const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;
@@ -1074,6 +1074,54 @@ fn infer_loader(dir: &Path) -> String {
     "vanilla".into()
 }
 
+fn infer_minecraft_version(dir: &Path) -> Option<String> {
+    let mut candidates = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(rest) = name
+                .strip_prefix("forge-")
+                .or_else(|| name.strip_prefix("neoforge-"))
+            {
+                if let Some(version) = rest.strip_suffix(".jar").and_then(|v| v.split('-').next()) {
+                    candidates.push(version.to_owned());
+                }
+            }
+        }
+    }
+    for root in [
+        dir.join("libraries/net/minecraftforge/forge"),
+        dir.join("libraries/net/neoforged/neoforge"),
+        dir.join("libraries/net/neoforged/forge"),
+    ] {
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(version) = name.split('-').next().filter(|v| v.contains('.')) {
+                    candidates.push(version.to_owned());
+                }
+            }
+        }
+    }
+    if let Ok(log) = fs::read_to_string(dir.join("logs/latest.log")) {
+        for marker in ["Starting minecraft server version ", "Minecraft version "] {
+            if let Some(version) = log
+                .lines()
+                .rev()
+                .find_map(|line| line.split_once(marker).map(|(_, rest)| rest))
+                .and_then(|rest| rest.split_whitespace().next())
+                .map(|version| version.trim_matches(|c: char| !c.is_ascii_digit() && c != '.'))
+                .filter(|version| !version.is_empty())
+            {
+                candidates.push(version.to_owned());
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|version| version.chars().next().is_some_and(|c| c.is_ascii_digit()))
+}
+
 fn safe_pack_path(base: &Path, relative: &str) -> Option<PathBuf> {
     let rel = Path::new(relative);
     if rel.is_absolute() {
@@ -1127,6 +1175,21 @@ fn content_loader(kind: &str, loader: &str) -> String {
         },
         "datapacks" => "datapack".into(),
         _ => loader.into(),
+    }
+}
+
+fn validate_content_target(kind: &str, loader: &str) -> Result<(), ApiErr> {
+    match kind {
+        "mods" if matches!(loader, "vanilla" | "paper" | "purpur") => Err(err(
+            StatusCode::BAD_REQUEST,
+            "Mods precisam de Fabric, Quilt, Forge ou NeoForge no servidor.",
+        )),
+        "plugins" if !matches!(loader, "paper" | "purpur") => Err(err(
+            StatusCode::BAD_REQUEST,
+            "Plugins precisam de um servidor Paper ou Purpur.",
+        )),
+        "mods" | "plugins" | "datapacks" => Ok(()),
+        _ => Err(err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido.")),
     }
 }
 
@@ -1949,6 +2012,14 @@ async fn switch_server(
             .cloned()
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "Servidor não encontrado."))?
     };
+    let mut selected = selected;
+    let selected_dir = expand(&selected.server_dir);
+    if detect_launch(&selected_dir).is_some() {
+        selected.loader = infer_loader(&selected_dir);
+        if let Some(version) = infer_minecraft_version(&selected_dir) {
+            selected.version = version;
+        }
+    }
     let java_major = detect_java_major(&selected.java_path).await;
     let java_detected = java_major.is_some();
     let mut i = app.0.lock().await;
@@ -6041,6 +6112,31 @@ async fn read_installed_content(base: &std::path::Path) -> Vec<InstalledContent>
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
+
+async fn synchronized_installed_content(base: &Path) -> Vec<InstalledContent> {
+    let items = read_installed_content(base).await;
+    let mut valid = Vec::with_capacity(items.len());
+    let mut changed = false;
+    for item in &items {
+        let exists = if let Some(dir) = content_dir(base, &item.kind) {
+            tokio::fs::metadata(dir.join(&item.filename))
+                .await
+                .map(|meta| meta.is_file())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if exists {
+            valid.push(item.clone());
+        } else {
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = write_installed_content(base, &valid).await;
+    }
+    valid
+}
 async fn enrich_installed_content(
     client: &reqwest::Client,
     items: &mut [InstalledContent],
@@ -6186,7 +6282,7 @@ async fn list_content(
             format!("Falha ao listar conteúdo: {e}"),
         )
     })?;
-    let mut installed = read_installed_content(&base).await;
+    let mut installed = synchronized_installed_content(&base).await;
     let client = reqwest::Client::new();
     if enrich_installed_content(&client, &mut installed).await {
         let _ = write_installed_content(&base, &installed).await;
@@ -6514,7 +6610,7 @@ async fn search_curseforge_content(
     }
 
     let data = cf.get("/mods/search", &query).await?;
-    let installed: std::collections::HashSet<String> = read_installed_content(&base)
+    let installed: std::collections::HashSet<String> = synchronized_installed_content(&base)
         .await
         .into_iter()
         .filter(|item| item.kind == req.kind && item.source == "curseforge")
@@ -6610,7 +6706,7 @@ async fn search_content(
         let i = app.0.lock().await;
         expand(&i.cfg.server_dir)
     };
-    let installed: std::collections::HashSet<String> = read_installed_content(&base)
+    let installed: std::collections::HashSet<String> = synchronized_installed_content(&base)
         .await
         .into_iter()
         .filter(|x| x.kind == req.kind && x.source == "modrinth")
@@ -6945,7 +7041,7 @@ async fn install_content(
     if !valid_project_id(&req.project_id) {
         return Err(err(StatusCode::BAD_REQUEST, "Projeto inválido."));
     }
-    let (base, key) = {
+    let (base, key, server_loader) = {
         let i = app.0.lock().await;
         if i.installing {
             return Err(err(
@@ -6960,8 +7056,11 @@ async fn install_content(
             ));
         }
         let base = expand(&i.cfg.server_dir);
-        (base, i.cfg.curseforge_api_key.clone())
+        (base, i.cfg.curseforge_api_key.clone(), i.cfg.loader.clone())
     };
+    let mut req = req;
+    req.loader = server_loader;
+    validate_content_target(&req.kind, &req.loader)?;
     let dir = content_dir(&base, &req.kind)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
     tokio::fs::create_dir_all(&dir).await.map_err(|e| {
@@ -8743,8 +8842,12 @@ async fn main() -> anyhow::Result<()> {
     let loaded = load_e4all(&cfg.e4all.minecraft_dir);
     cfg.e4all = loaded;
 
-    if detect_launch(&expand(&cfg.server_dir)).is_some() {
-        cfg.loader = infer_loader(&expand(&cfg.server_dir));
+    let current_dir = expand(&cfg.server_dir);
+    if detect_launch(&current_dir).is_some() {
+        cfg.loader = infer_loader(&current_dir);
+        if let Some(version) = infer_minecraft_version(&current_dir) {
+            cfg.version = version;
+        }
     }
 
     let profiles = load_profiles(&cfg_path, &cfg).await;

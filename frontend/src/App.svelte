@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.9.7';
+  const APP_VERSION = '0.9.8';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -135,6 +135,8 @@
   let contentLoader = 'fabric';
   let contentVersion = '';
   let content:ContentItem[] = [];
+  let contentFilter = '';
+  let visibleContent:ContentItem[] = [];
   let results:ContentResult[] = [];
 
   let setup: SetupConfig = {
@@ -210,6 +212,9 @@
   $: resolvedE4allSource = server.e4all_link ? 'console do servidor' : e4allLinkSource;
   $: setupPathConflict = server.installed && sameDir(setup.server_dir, server.server_dir);
   $: setupJavaMajor = javaMajorForVersion(setupVersion);
+  $: visibleContent = contentFilter.trim()
+    ? content.filter(item => `${item.title || ''} ${item.filename}`.toLowerCase().includes(contentFilter.trim().toLowerCase()))
+    : content;
 
   let launcherCandidates: LauncherCandidate[] = [];
   let scanningLaunchers = false;
@@ -561,7 +566,7 @@
       backupsLoaded = false;
       backups = [];
       contentVersion = server.version || contentVersion;
-      if (server.loader && server.loader !== 'vanilla') contentLoader = server.loader;
+      if (server.loader) contentLoader = server.loader;
       activeTab = 'overview';
       await loadServers();
       await loadContent();
@@ -786,12 +791,24 @@
   async function refresh() {
     try {
       const fresh = await api<Server>('/state');
-      server = fresh;
+      const editingServerConfig = activeTab === 'config' && configSection === 'server';
+      server = editingServerConfig
+        ? {
+            ...fresh,
+            server_name: server.server_name,
+            version: server.version,
+            loader: server.loader,
+            server_dir: server.server_dir,
+            memory_limit_gb: server.memory_limit_gb,
+            java_path: server.java_path,
+            auto_backup: server.auto_backup,
+          }
+        : fresh;
       metricHistory = [...metricHistory, { time:new Date().toLocaleTimeString('pt-BR'), cpu:fresh.cpu_percent, memory:fresh.memory_mb, players:fresh.players }].slice(-60);
       if (booted === false) {
         booted = true;
         if (!fresh.installed) openSetup(false);
-        if (fresh.loader && fresh.loader !== 'vanilla') contentLoader = fresh.loader;
+        if (fresh.loader) contentLoader = fresh.loader;
       }
       if (!contentVersion && fresh.version) contentVersion = fresh.version;
     } catch {
@@ -819,7 +836,7 @@
       server = await api<Server>('/servers/switch', json({server_dir}));
       exportPath = '';
       contentVersion = server.version || contentVersion;
-      if (server.loader && server.loader !== 'vanilla') contentLoader = server.loader;
+      if (server.loader) contentLoader = server.loader;
       activeTab = server.installed ? 'overview' : 'setup';
       notice = `Servidor ativo: ${server.server_name}.`;
       await loadServers();
@@ -1233,6 +1250,7 @@
   }
   function pickCategory(kind:'mods'|'plugins'|'datapacks') {
     contentKind = kind;
+    contentFilter = '';
     loadContent();
     if (catalogOpen) runCatalogSearch();
   }
@@ -1581,7 +1599,7 @@
         accept_eula: modpackAcceptEula,
       }));
       contentVersion = server.version || contentVersion;
-      contentLoader = server.loader !== 'vanilla' ? server.loader : contentLoader;
+      contentLoader = server.loader || contentLoader;
       activeTab = 'overview';
       notice = modpackAcceptEula
         ? 'Modpack instalado e EULA aceita. Você já pode iniciar o servidor.'
@@ -2027,7 +2045,8 @@
         </div>
 
         <div class="content-section-head">
-          <h4>Instalados <span>{content.length}</span></h4>
+          <h4>Instalados <span>{visibleContent.length}{contentFilter.trim() ? ` de ${content.length}` : ''}</span></h4>
+          <input class="content-local-search" bind:value={contentFilter} placeholder="Pesquisar nos instalados..." aria-label="Pesquisar conteúdo instalado" />
         </div>
 
         {#if content.length===0}
@@ -2035,9 +2054,11 @@
             Nenhum arquivo em <b>{contentKind}/</b> ainda.
             <br/>Clique em <b>Adicionar {contentKind}</b> para explorar o catálogo.
           </div>
+        {:else if visibleContent.length===0}
+          <div class="empty">Nenhum arquivo instalado corresponde a <b>{contentFilter}</b>.</div>
         {:else}
           <div class="installed-grid">
-            {#each content as file}
+            {#each visibleContent as file}
               <div class="installed-card"
                    class:selected={selectedItems.has(file.filename)}
                    role="button" tabindex="0"
