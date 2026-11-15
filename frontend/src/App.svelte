@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.9.6';
+  const APP_VERSION = '0.9.7';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -3025,7 +3025,7 @@
 
           <div class="setup-note">
             <b>Depois da instalação</b>
-            <span>Você poderá administrar mods, plugins e datapacks na área de conteúdo, escolhendo entre Modrinth e CurseForge.</span>
+            <span>{setup.loader === 'forge' ? 'Para o Forge, o painel escolhe automaticamente a versão recomendada para o Minecraft selecionado. ' : ''}Você poderá administrar mods, plugins e datapacks na área de conteúdo, escolhendo entre Modrinth e CurseForge.</span>
           </div>
 
           <div class="setup-import">

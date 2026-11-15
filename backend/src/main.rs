@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.9.6";
+const APP_VERSION: &str = "0.9.7";
 
 const MAX_LOGS: usize = 500;
 const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;
@@ -5622,13 +5622,42 @@ async fn run_installer(
     ))
 }
 
+async fn forge_promotion_version(client: &reqwest::Client, mc: &str) -> Result<String, ApiErr> {
+    let promotions: Value = client
+        .get("https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json")
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Forge: {e}")))?
+        .error_for_status()
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Forge retornou erro: {e}")))?
+        .json()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Forge JSON: {e}")))?;
+    let promos = &promotions["promos"];
+    promos[&format!("{mc}-recommended")]
+        .as_str()
+        .or_else(|| promos[&format!("{mc}-latest")].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("O Forge não possui uma versão compatível com Minecraft {mc}."),
+            )
+        })
+}
+
 async fn install_forge(
     client: &reqwest::Client,
     java: &str,
     dir: &Path,
     mc: &str,
-    loader: &str,
+    loader: Option<&str>,
 ) -> Result<(), ApiErr> {
+    let loader = match loader.filter(|value| !value.trim().is_empty()) {
+        Some(value) => value.trim().to_owned(),
+        None => forge_promotion_version(client, mc).await?,
+    };
     let url = format!(
         "https://maven.minecraftforge.net/net/minecraftforge/forge/{mc}-{loader}/forge-{mc}-{loader}-installer.jar"
     );
@@ -5816,16 +5845,7 @@ async fn install_loader(
     match loader {
         "fabric" => install_fabric(client, dir, mc, loader_version).await,
         "quilt" => install_quilt(client, java, dir, mc, loader_version).await,
-        "forge" => {
-            let version = loader_version.unwrap_or_default().trim();
-            if version.is_empty() {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    "A versão do Forge não foi informada.",
-                ));
-            }
-            install_forge(client, java, dir, mc, version).await
-        }
+        "forge" => install_forge(client, java, dir, mc, loader_version).await,
         "neoforge" => {
             let version = loader_version.unwrap_or_default().trim();
             if version.is_empty() {
