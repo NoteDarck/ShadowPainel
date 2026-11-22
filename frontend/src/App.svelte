@@ -80,7 +80,7 @@
   type Server = {
     status:string; address:string; players:number; memory_mb:number;
     memory_limit_gb:number; cpu_percent:number; uptime_seconds:number;
-    server_name:string; version:string; loader:string; kind:string; server_dir:string; java_path:string;
+    server_name:string; version:string; loader:string; base_loader:string; kind:string; server_dir:string; java_path:string;
     java_detected:boolean; installed:boolean; eula_accepted:boolean; installing:boolean; transferring:boolean;
     curseforge_mode:string; curseforge_configured:boolean;
     e4all:E4allConfig; e4all_link:string|null; logs:Log[];
@@ -88,7 +88,7 @@
     auto_backup:boolean; health:HealthView;
   };
   type ServerSummary = { server_name:string; version:string; kind:string; server_dir:string; installed:boolean; active:boolean; status:string };
-  type SetupConfig = { server_name:string; server_dir:string; memory_limit_gb:number; loader:string; kind:string };
+  type SetupConfig = { server_name:string; server_dir:string; memory_limit_gb:number; loader:string; base_loader:string; kind:string };
   type WorldSummary = { name:string; path:string; active:boolean; size_bytes:number; has_level_dat:boolean; universe_configured:boolean };
   type MetricPoint = { time:string; cpu:number; memory:number; players:number };
 
@@ -103,7 +103,7 @@
   let server:Server = {
     status:'offline', address:'localhost:25565', players:0, memory_mb:0,
     memory_limit_gb:4, cpu_percent:0, uptime_seconds:0,
-     server_name:'Meu servidor', version:'', loader:'vanilla', kind:'manual',
+     server_name:'Meu servidor', version:'', loader:'vanilla', base_loader:'', kind:'manual',
 
     server_dir:'~/Minecraft/MeuServidor', java_path:'java',
     java_detected:false, installed:false, eula_accepted:false, installing:false, transferring:false,
@@ -161,6 +161,7 @@
     server_dir:'~/Minecraft/Servidor',
     memory_limit_gb:4,
     loader:'vanilla',
+    base_loader:'',
     kind:'manual',
   };
 
@@ -370,6 +371,7 @@
         server_name: setup.server_name.trim(),
         version: setupVersion,
         loader: setup.loader,
+        base_loader: setup.base_loader,
         server_dir: setup.server_dir.trim(),
         memory_limit_gb: String(setup.memory_limit_gb),
         filename: file.name,
@@ -583,7 +585,7 @@
       backupsLoaded = false;
       backups = [];
       contentVersion = server.version || contentVersion;
-      if (server.loader) contentLoader = server.loader;
+      if (server.base_loader || server.loader) contentLoader = server.base_loader || server.loader;
       activeTab = 'overview';
       await loadServers();
       await loadContent();
@@ -815,6 +817,7 @@
             server_name: server.server_name,
             version: server.version,
             loader: server.loader,
+            base_loader: server.base_loader,
             server_dir: server.server_dir,
             memory_limit_gb: server.memory_limit_gb,
             java_path: server.java_path,
@@ -853,7 +856,7 @@
       server = await api<Server>('/servers/switch', json({server_dir}));
       exportPath = '';
       contentVersion = server.version || contentVersion;
-      if (server.loader) contentLoader = server.loader;
+      if (server.base_loader || server.loader) contentLoader = server.base_loader || server.loader;
       activeTab = server.installed ? 'overview' : 'setup';
       notice = `Servidor ativo: ${server.server_name}.`;
       await loadServers();
@@ -989,6 +992,7 @@
         server_name: setup.server_name,
         version: setupVersion,
         loader: setup.loader,
+        base_loader: setup.base_loader,
         server_dir: setup.server_dir,
         memory_limit_gb: setup.memory_limit_gb,
       }));
@@ -1042,6 +1046,7 @@
         server_name: server.server_name,
         version: server.version,
         loader: server.loader,
+        base_loader: server.base_loader,
         server_dir: server.server_dir,
         memory_limit_gb: server.memory_limit_gb,
         java_path: server.java_path,
@@ -2357,7 +2362,7 @@
           <label>Versão atual<input bind:value={server.version}/></label>
           <label>
             Tipo / modloader
-            <select bind:value={server.loader}>
+            <select bind:value={server.loader} on:change={() => { if (server.loader === 'magma') server.base_loader = 'neoforge'; else if (['arclight','mohist'].includes(server.loader)) server.base_loader = 'forge'; }}>
               {#each serverTypes as type}<option value={type.id}>{type.name}</option>{/each}
             </select>
           </label>
@@ -3053,7 +3058,7 @@
             </label>
             <label>
               Tipo / modloader
-              <select bind:value={setup.loader}>
+              <select bind:value={setup.loader} on:change={() => { if (setup.loader === 'magma') setup.base_loader = 'neoforge'; else if (['arclight','mohist'].includes(setup.loader)) setup.base_loader = 'forge'; }}>
                 {#each serverTypes as type}
                   <option value={type.id}>{type.name} — {type.description}</option>
                 {/each}

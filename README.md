@@ -80,6 +80,14 @@ JARs importados também são inspecionados como arquivos ZIP. O painel reconhece
 
 As atualizações do ShadowPainel validam o pacote por SHA-256 antes de instalar. No Linux, o instalador `.deb` pode solicitar elevação via `pkexec`, enquanto AppImage e instaladores de outras plataformas são abertos pelo mecanismo nativo do sistema. O rollback continua disponível pela própria tela de atualização.
 
+### Servidores híbridos e configurações recomendadas
+
+Para Arclight, Magma e Mohist, o painel agora permite escolher o **loader-base** usado pelo servidor: Forge, NeoForge ou Fabric. Essa escolha é salva na configuração do servidor e é usada para filtrar mods no Modrinth/CurseForge; plugins são consultados como Paper e instalados em `plugins/`, porque os híbridos expõem compatibilidade Bukkit/Spigot/Paper. Em um servidor Magma, use NeoForge como padrão; confirme o loader do JAR antes de instalar mods.
+
+O painel também aceita plugins para híbridos compatíveis e não libera plugins em servidores Forge, NeoForge ou Fabric puros. Isso evita o erro “Plugins precisam de um servidor Paper ou Purpur” sem prometer compatibilidade que o loader não oferece. O servidor deve estar parado antes de instalar ou atualizar conteúdo; faça backup e confira dependências como Vault, ProtocolLib ou PlaceholderAPI quando o plugin exigir.
+
+Na aba **Configurações → Mundo e rede**, use `view-distance` entre 6 e 10 e `simulation-distance` entre 4 e 8 como ponto de partida para servidores híbridos, ajustando conforme CPU, memória e número de jogadores. Para Magma, a documentação recomenda Java 21+, `-Xms` igual a `-Xmx`, além de revisar `spigot.yml` e `bukkit.yml`; o painel já expõe as opções principais de `server.properties`. Em Paper/Purpur, configurações avançadas ficam nos arquivos YAML próprios do software e não devem ser copiadas para Forge/Fabric. Consulte as referências oficiais: [Magma — plugins](https://magmafoundation.org/docs/guides/adding-plugins), [Magma — otimização](https://magmafoundation.org/docs/guides/optimization), [Paper](https://papermc.io/software/paper), [Purpur](https://purpurmc.org/) e [Fabric — servidor](https://fabricmc.net/use/server/).
+
 ---
 
 ## 🏗️ Arquitetura

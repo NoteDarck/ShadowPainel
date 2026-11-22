@@ -139,6 +139,8 @@ struct Config {
     server_name: String,
     version: String,
     loader: String,
+    #[serde(default)]
+    base_loader: String,
     server_dir: String,
     memory_limit_gb: u64,
     java_path: String,
@@ -161,6 +163,7 @@ impl Default for Config {
             server_name: "Sobrevivência principal".into(),
             version: "1.21.1".into(),
             loader: "vanilla".into(),
+            base_loader: String::new(),
             server_dir: "~/Minecraft/MeuServidor".into(),
             memory_limit_gb: 4,
             java_path,
@@ -1304,6 +1307,33 @@ fn mcjars_type(loader: &str) -> Option<&'static str> {
     }
 }
 
+fn is_hybrid_loader(loader: &str) -> bool {
+    matches!(loader, "mohist" | "arclight" | "magma")
+}
+
+fn effective_base_loader(server_loader: &str, configured: &str) -> String {
+    if !is_hybrid_loader(server_loader) {
+        return server_loader.to_string();
+    }
+    if matches!(configured, "fabric" | "forge" | "neoforge") {
+        return configured.to_string();
+    }
+    if server_loader == "magma" {
+        return "neoforge".into();
+    }
+    "forge".into()
+}
+
+fn supports_content(kind: &str, server_loader: &str, base_loader: &str) -> bool {
+    let loader = effective_base_loader(server_loader, base_loader);
+    match kind {
+        "mods" => matches!(loader.as_str(), "fabric" | "quilt" | "forge" | "neoforge"),
+        "plugins" => matches!(server_loader, "paper" | "purpur" | "pufferfish" | "spigot" | "folia" | "leaves" | "aspaper" | "leaf" | "mohist" | "arclight" | "magma"),
+        "datapacks" => true,
+        _ => false,
+    }
+}
+
 fn content_loader(kind: &str, loader: &str) -> String {
     match kind {
         "plugins" => match loader {
@@ -1315,18 +1345,15 @@ fn content_loader(kind: &str, loader: &str) -> String {
     }
 }
 
-fn validate_content_target(kind: &str, loader: &str) -> Result<(), ApiErr> {
-    match kind {
-        "mods" if matches!(loader, "vanilla" | "paper" | "purpur") => Err(err(
-            StatusCode::BAD_REQUEST,
-            "Mods precisam de Fabric, Quilt, Forge ou NeoForge no servidor.",
-        )),
-        "plugins" if !matches!(loader, "paper" | "purpur") => Err(err(
-            StatusCode::BAD_REQUEST,
-            "Plugins precisam de um servidor Paper ou Purpur.",
-        )),
-        "mods" | "plugins" | "datapacks" => Ok(()),
-        _ => Err(err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido.")),
+fn validate_content_target(kind: &str, server_loader: &str, base_loader: &str) -> Result<(), ApiErr> {
+    if supports_content(kind, server_loader, base_loader) {
+        Ok(())
+    } else if kind == "mods" {
+        Err(err(StatusCode::BAD_REQUEST, "Mods precisam de Fabric, Quilt, Forge ou NeoForge no servidor."))
+    } else if kind == "plugins" {
+        Err(err(StatusCode::BAD_REQUEST, "Plugins precisam de Paper/Purpur ou de um servidor híbrido compatível (Arclight, Magma ou Mohist)."))
+    } else {
+        Err(err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))
     }
 }
 
@@ -1718,6 +1745,7 @@ struct View {
     server_name: String,
     version: String,
     loader: String,
+    base_loader: String,
     server_dir: String,
     java_path: String,
     java_detected: bool,
@@ -1957,6 +1985,7 @@ fn view(i: &mut Inner) -> View {
         server_name: i.cfg.server_name.clone(),
         version: i.cfg.version.clone(),
         loader: i.cfg.loader.clone(),
+        base_loader: effective_base_loader(&i.cfg.loader, &i.cfg.base_loader),
         server_dir: i.cfg.server_dir.clone(),
         java_path: i.cfg.java_path.clone(),
         java_detected: i.java_detected,
@@ -2353,6 +2382,8 @@ struct ImportJarQuery {
     server_name: String,
     version: String,
     loader: String,
+    #[serde(default)]
+    base_loader: Option<String>,
     server_dir: String,
     memory_limit_gb: u64,
     filename: Option<String>,
@@ -2377,6 +2408,11 @@ async fn import_server_jar(
             StatusCode::BAD_REQUEST,
             "Tipo de servidor não suportado.",
         ));
+    }
+    if let Some(base_loader) = req.base_loader.as_deref() {
+        if !matches!(base_loader, "" | "fabric" | "forge" | "neoforge") {
+            return Err(err(StatusCode::BAD_REQUEST, "Loader-base inválido. Use Fabric, Forge ou NeoForge."));
+        }
     }
     if !(1..=64).contains(&req.memory_limit_gb) {
         return Err(err(
@@ -2458,6 +2494,7 @@ async fn import_server_jar(
     } else {
         detected_loader
     };
+    i.cfg.base_loader = effective_base_loader(&i.cfg.loader, req.base_loader.as_deref().unwrap_or(""));
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
     i.persist().await.map_err(|e| {
@@ -3264,6 +3301,7 @@ struct ConfigRequest {
     server_name: String,
     version: String,
     loader: Option<String>,
+    base_loader: Option<String>,
     server_dir: String,
     memory_limit_gb: u64,
     java_path: Option<String>,
@@ -3280,6 +3318,11 @@ fn validate_config(req: &ConfigRequest) -> Result<(), String> {
     if let Some(loader) = req.loader.as_deref() {
         if !valid_loader(loader) {
             return Err("Tipo de servidor inválido.".into());
+        }
+    }
+    if let Some(base_loader) = req.base_loader.as_deref() {
+        if !matches!(base_loader, "" | "fabric" | "forge" | "neoforge") {
+            return Err("Loader-base inválido. Use Fabric, Forge ou NeoForge.".into());
         }
     }
     if let Some(java_path) = req.java_path.as_deref() {
@@ -3312,6 +3355,9 @@ async fn save_config(State(app): State<AppState>, Json(req): Json<ConfigRequest>
     i.cfg.version = req.version.trim().into();
     if let Some(loader) = req.loader.as_deref() {
         i.cfg.loader = loader.trim().into();
+    }
+    if let Some(base_loader) = req.base_loader.as_deref() {
+        i.cfg.base_loader = base_loader.trim().into();
     }
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
@@ -5658,6 +5704,8 @@ struct CreateServerRequest {
     server_name: String,
     version: String,
     loader: String,
+    #[serde(default)]
+    base_loader: String,
     server_dir: String,
     memory_limit_gb: u64,
 }
@@ -6254,6 +6302,9 @@ async fn create_server(
             "Tipo de servidor não suportado.",
         ));
     }
+    if !matches!(req.base_loader.trim(), "" | "fabric" | "forge" | "neoforge") {
+        return Err(err(StatusCode::BAD_REQUEST, "Loader-base inválido. Use Fabric, Forge ou NeoForge."));
+    }
     if !(1..=64).contains(&req.memory_limit_gb) {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -6317,6 +6368,7 @@ async fn create_server(
     i.cfg.server_name = req.server_name.trim().into();
     i.cfg.version = req.version.trim().into();
     i.cfg.loader = req.loader.trim().into();
+    i.cfg.base_loader = req.base_loader.trim().to_string();
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
     i.persist().await.map_err(|e| {
@@ -7344,7 +7396,7 @@ async fn install_content(
     if !valid_project_id(&req.project_id) {
         return Err(err(StatusCode::BAD_REQUEST, "Projeto inválido."));
     }
-    let (base, key, server_loader) = {
+    let (base, key, server_loader, base_loader) = {
         let i = app.0.lock().await;
         if i.installing {
             return Err(err(
@@ -7359,11 +7411,11 @@ async fn install_content(
             ));
         }
         let base = expand(&i.cfg.server_dir);
-        (base, i.cfg.curseforge_api_key.clone(), i.cfg.loader.clone())
+        (base, i.cfg.curseforge_api_key.clone(), i.cfg.loader.clone(), i.cfg.base_loader.clone())
     };
     let mut req = req;
-    req.loader = server_loader;
-    validate_content_target(&req.kind, &req.loader)?;
+    validate_content_target(&req.kind, &server_loader, &base_loader)?;
+    req.loader = content_loader(&req.kind, &effective_base_loader(&server_loader, &base_loader));
     let dir = content_dir(&base, &req.kind)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
     tokio::fs::create_dir_all(&dir).await.map_err(|e| {
