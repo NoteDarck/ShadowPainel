@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.9.9';
+  const APP_VERSION = '0.10.0';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -79,7 +79,7 @@
   };
   type Server = {
     status:string; address:string; players:number; memory_mb:number;
-    memory_limit_gb:number; cpu_percent:number; uptime_seconds:number;
+    memory_limit_gb:number; cpu_percent:number; uptime_seconds:number; server_size_bytes:number;
     server_name:string; version:string; loader:string; base_loader:string; kind:string; server_dir:string; java_path:string;
     java_detected:boolean; installed:boolean; eula_accepted:boolean; installing:boolean; transferring:boolean;
     curseforge_mode:string; curseforge_configured:boolean;
@@ -87,9 +87,9 @@
     java_major:number|null; required_java_major:number; java_managed:boolean;
     auto_backup:boolean; health:HealthView;
   };
-  type ServerSummary = { server_name:string; version:string; kind:string; server_dir:string; installed:boolean; active:boolean; status:string };
+  type ServerSummary = { server_name:string; version:string; kind:string; server_dir:string; installed:boolean; active:boolean; status:string; server_size_bytes:number };
   type SetupConfig = { server_name:string; server_dir:string; memory_limit_gb:number; loader:string; base_loader:string; kind:string };
-  type WorldSummary = { name:string; path:string; active:boolean; size_bytes:number; has_level_dat:boolean; universe_configured:boolean };
+  type WorldSummary = { name:string; path:string; active:boolean; size_bytes:number; has_level_dat:boolean; universe_configured:boolean; dimensions:string[] };
   type MetricPoint = { time:string; cpu:number; memory:number; players:number };
 
   const E4_DEFAULTS: Omit<E4allConfig, 'minecraft_dir'> = {
@@ -112,6 +112,7 @@
     java_major:null, required_java_major:21, java_managed:false,
     auto_backup:true,
     health:{ level:'ok', items:[], advice:[] },
+    server_size_bytes:0,
     logs:[]
   };
   let versions:Version[] = [];
@@ -177,7 +178,16 @@
   let noticeActions:{ label:string; run:()=>void|Promise<void> }[] = [];
   let saved = false;
   let command = '';
+  let commandHistory:string[] = [];
+  let commandHistoryIndex = -1;
+  let logFilter:'all'|'player'|'warning'|'error' = 'all';
+  const commandSuggestions = ['list','stop','save-all','whitelist list','time set day','weather clear','seed','tps'];
   let booted = false;
+
+  $: filteredLogs = server.logs.filter(log => logFilter === 'all'
+    || (logFilter === 'warning' && log.kind === 'warning')
+    || (logFilter === 'error' && log.kind === 'error')
+    || (logFilter === 'player' && /joined the game|left the game|<[^>]+>/.test(log.text)));
 
   let selectedItems: Set<string> = new Set();
 
@@ -233,6 +243,10 @@
   $: visibleContent = contentFilter.trim()
     ? content.filter(item => `${item.title || ''} ${item.filename}`.toLowerCase().includes(contentFilter.trim().toLowerCase()))
     : content;
+  $: duplicateContent = content.filter((item, index, all) => {
+    const key = item.project_id || (item.title || '').trim().toLowerCase();
+    return Boolean(key) && all.findIndex(candidate => (candidate.project_id || (candidate.title || '').trim().toLowerCase()) === key) !== index;
+  });
 
   let launcherCandidates: LauncherCandidate[] = [];
   let scanningLaunchers = false;
@@ -854,6 +868,7 @@
     switchingServer = true;
     try {
       server = await api<Server>('/servers/switch', json({server_dir}));
+      loadCommandHistory();
       exportPath = '';
       contentVersion = server.version || contentVersion;
       if (server.base_loader || server.loader) contentLoader = server.base_loader || server.loader;
@@ -1081,15 +1096,43 @@
   }
 
   async function sendCommand() {
-    if(!command.trim()) return;
+    const trimmed = command.trim();
+    if(!trimmed) return;
     try {
-      await api('/command', json({command}));
+      await api('/command', json({command:trimmed}));
+      commandHistory = [trimmed, ...commandHistory.filter(item => item !== trimmed)].slice(0, 100);
+      localStorage.setItem(`shadowpainel-commands:${server.server_dir}`, JSON.stringify(commandHistory));
+      commandHistoryIndex = -1;
       command='';
       await refresh();
     } catch(e) {
       fail(e, 'Console indisponível.', [
         { label:'Tentar novamente', run:sendCommand },
       ]);
+    }
+  }
+
+  function loadCommandHistory() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(`shadowpainel-commands:${server.server_dir}`) || '[]');
+      commandHistory = Array.isArray(stored) ? stored.filter((item): item is string => typeof item === 'string') : [];
+    } catch { commandHistory = []; }
+    commandHistoryIndex = -1;
+  }
+
+  function handleCommandKey(event:KeyboardEvent) {
+    if (event.key === 'Enter') { event.preventDefault(); sendCommand(); return; }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      commandHistoryIndex = Math.min(commandHistoryIndex + 1, commandHistory.length - 1);
+      command = commandHistory[commandHistoryIndex] || command;
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      commandHistoryIndex = Math.max(commandHistoryIndex - 1, -1);
+      command = commandHistoryIndex < 0 ? '' : commandHistory[commandHistoryIndex];
+    } else if (event.key === 'Tab') {
+      const match = commandSuggestions.find(item => item.startsWith(command.trim().toLowerCase()));
+      if (match) { event.preventDefault(); command = match; }
     }
   }
 
@@ -1689,6 +1732,7 @@
 
   onMount(() => {
     refresh();
+    loadCommandHistory();
     loadServers();
     loadVersions();
     loadServerTypes();
@@ -1922,7 +1966,26 @@
             <div class="metric-icon green">◔</div>
             <div><span>USO DE CPU</span><strong>{server.cpu_percent.toFixed(1)}<em>%</em></strong></div>
           </div>
+          <div class="metric">
+            <div class="metric-icon orange">▤</div>
+            <div><span>ESPAÇO DO SERVIDOR</span><strong>{formatBytes(server.server_size_bytes)}</strong></div>
+          </div>
         </section>
+
+        {#if metricHistory.length > 1}
+          <section class="monitor-history settings-card">
+            <div class="card-head"><div><h3>Histórico desta sessão</h3><p>RAM, CPU e jogadores coletados a cada atualização.</p></div><span class="mod-badge">{metricHistory.length} pontos</span></div>
+            <div class="history-bars" aria-label="Histórico de uso">
+              {#each metricHistory.slice(-30) as point}
+                <div class="history-point" title={`${point.time} · RAM ${point.memory} MB · CPU ${point.cpu.toFixed(1)}% · ${point.players} jogador(es)`}>
+                  <i style={`height:${Math.min(100, Math.max(4, point.cpu))}%`}></i>
+                  <b style={`height:${Math.min(100, Math.max(4, point.memory / Math.max(1, server.memory_limit_gb * 1024) * 100))}%`}></b>
+                </div>
+              {/each}
+            </div>
+            <small class="history-legend"><span class="cpu-key"></span> CPU <span class="ram-key"></span> RAM · atualização automática</small>
+          </section>
+        {/if}
 
         {#if server.health?.items?.length}
           <section class="health-card level-{server.health.level}">
@@ -1960,13 +2023,21 @@
           <section class="console-card">
             <div class="card-head">
               <div><h3>Console do servidor</h3><p>Logs em tempo real</p></div>
-              <div class="live"><span></span> AO VIVO</div>
+              <div class="console-tools">
+                <select bind:value={logFilter} aria-label="Filtrar logs">
+                  <option value="all">Todos</option>
+                  <option value="player">Jogadores</option>
+                  <option value="warning">Avisos</option>
+                  <option value="error">Erros</option>
+                </select>
+                <div class="live"><span></span> AO VIVO</div>
+              </div>
             </div>
             {#if lastFriendlyLog}
               <div class="friendly-log"><span>✦</span><b>{lastFriendlyLog}</b></div>
             {/if}
             <div class="console" bind:this={consoleEl} on:scroll={handleConsoleScroll}>
-              {#each server.logs as log}
+              {#each filteredLogs as log}
                 <div class="log">
                   <span class="time">{log.time}</span>
                   <span class={log.kind}>{log.text}</span>
@@ -1975,7 +2046,10 @@
             </div>
             <div class="command-line">
               <span>›</span>
-              <input bind:value={command} on:keydown={(e)=>e.key==='Enter'&&sendCommand()} placeholder="Digite um comando..."/>
+              <input bind:value={command} on:keydown={handleCommandKey} list="command-suggestions" placeholder="Digite um comando..."/>
+              <datalist id="command-suggestions">
+                {#each commandSuggestions as suggestion}<option value={suggestion}></option>{/each}
+              </datalist>
               <button on:click={sendCommand}>Enviar ↗</button>
             </div>
           </section>
@@ -2080,6 +2154,9 @@
           <h4>Instalados <span>{visibleContent.length}{contentFilter.trim() ? ` de ${content.length}` : ''}</span></h4>
           <input class="content-local-search" bind:value={contentFilter} placeholder="Pesquisar nos instalados..." aria-label="Pesquisar conteúdo instalado" />
         </div>
+        {#if duplicateContent.length > 0}
+          <div class="inline-warning">Possíveis duplicados detectados: {duplicateContent.map(item => item.title || item.filename).join(', ')}. Remova versões repetidas antes de atualizar.</div>
+        {/if}
 
         {#if content.length===0}
           <div class="empty">
@@ -2305,7 +2382,7 @@
             {#each worlds.filter(world => !worldSearch.trim() || world.name.toLowerCase().includes(worldSearch.trim().toLowerCase())) as world}
               <div class="installed-card" class:selected={world.active}>
                 <div class="catalog-icon" style="width:36px;height:36px;font-size:14px;">◇</div>
-                <div class="installed-meta"><b>{world.name}{#if world.active}<span class="source-badge">ATIVO</span>{/if}</b><small>{formatBytes(world.size_bytes)} · {world.has_level_dat ? 'level.dat encontrado' : 'pasta encontrada'}</small></div>
+                <div class="installed-meta"><b>{world.name}{#if world.active}<span class="source-badge">ATIVO</span>{/if}</b><small>{formatBytes(world.size_bytes)} · {world.has_level_dat ? 'level.dat encontrado' : 'pasta encontrada'} · Dimensões: {world.dimensions?.length ? world.dimensions.join(', ') : 'nenhuma detectada'}</small></div>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
                   {#if !world.active}<button class="secondary" on:click={()=>activateWorld(world.name)} disabled={worldBusy}>ATIVAR</button>{/if}
                   <button class="secondary" on:click={()=>{selectedWorld=world.name;worldTarget='';worldAction='duplicate';}} disabled={worldBusy}>DUPLICAR</button>

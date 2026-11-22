@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.9.9";
+const APP_VERSION: &str = "0.10.0";
 const MCJARS_API: &str = "https://mcjars.app/api/v2/builds";
 
 const MAX_LOGS: usize = 500;
@@ -1482,6 +1482,7 @@ struct Inner {
     java_major: Option<u32>,
     status: Status,
     logs: VecDeque<LogLine>,
+    logs_by_server: HashMap<String, VecDeque<LogLine>>,
     players: u32,
     started: Option<DateTime<Utc>>,
     pid: Option<u32>,
@@ -1509,6 +1510,7 @@ impl Inner {
             java_major,
             status: Status::Offline,
             logs: VecDeque::new(),
+            logs_by_server: HashMap::new(),
             players: 0,
             started: None,
             pid: None,
@@ -1532,6 +1534,22 @@ impl Inner {
             text: text.into(),
             kind: kind.into(),
         });
+    }
+
+    fn save_active_console(&mut self) {
+        self.logs_by_server
+            .insert(self.cfg.server_dir.clone(), self.logs.clone());
+    }
+
+    fn restore_console(&mut self, server_dir: &str) {
+        self.logs = self
+            .logs_by_server
+            .get(server_dir)
+            .cloned()
+            .unwrap_or_default();
+        if self.logs.is_empty() {
+            self.push("Console pronto. Aguardando inicialização.", "muted");
+        }
     }
 
     async fn persist(&mut self) -> std::io::Result<()> {
@@ -1763,6 +1781,7 @@ struct View {
     e4all_link: Option<String>,
     health: HealthView,
     logs: Vec<LogLine>,
+    server_size_bytes: u64,
 }
 
 fn view(i: &mut Inner) -> View {
@@ -1779,6 +1798,7 @@ fn view(i: &mut Inner) -> View {
         }
     }
     let dir = expand(&i.cfg.server_dir);
+    let server_size_bytes = directory_size(&dir);
     let installed = detect_launch(&dir).is_some();
     let eula = eula_accepted(&dir);
     let uptime_seconds = i
@@ -2011,6 +2031,7 @@ fn view(i: &mut Inner) -> View {
             advice,
         },
         logs: i.logs.iter().cloned().collect(),
+        server_size_bytes,
     }
 }
 
@@ -2125,6 +2146,7 @@ struct ServerSummary {
     installed: bool,
     active: bool,
     status: Status,
+    server_size_bytes: u64,
 }
 
 fn summary(profile: &Config, active_dir: &str, active_status: Status) -> ServerSummary {
@@ -2140,6 +2162,7 @@ fn summary(profile: &Config, active_dir: &str, active_status: Status) -> ServerS
         } else {
             Status::Offline
         },
+        server_size_bytes: directory_size(&dir),
     }
 }
 
@@ -2195,10 +2218,12 @@ async fn switch_server(
             "Pare o servidor atual e aguarde instalações antes de trocar de servidor.",
         ));
     }
+    i.save_active_console();
     i.cfg = selected;
     i.java_detected = java_detected;
     i.java_major = java_major;
-    i.logs.clear();
+    let selected_dir = i.cfg.server_dir.clone();
+    i.restore_console(&selected_dir);
     i.players = 0;
     i.started = None;
     i.pid = None;
@@ -5001,6 +5026,7 @@ struct WorldSummary {
     size_bytes: u64,
     has_level_dat: bool,
     universe_configured: bool,
+    dimensions: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -5250,6 +5276,20 @@ fn directory_size(path: &Path) -> u64 {
         .sum()
 }
 
+fn world_dimensions(path: &Path) -> Vec<String> {
+    let mut dimensions = Vec::new();
+    for (label, relative) in [
+        ("Nether", Path::new("DIM-1")),
+        ("End", Path::new("DIM1")),
+        ("Dimensões", Path::new("dimensions")),
+    ] {
+        if path.join(relative).is_dir() {
+            dimensions.push(label.to_string());
+        }
+    }
+    dimensions
+}
+
 async fn list_worlds(State(app): State<AppState>) -> Result<Json<Vec<WorldSummary>>, ApiErr> {
     let i = app.0.lock().await;
     let base = expand(&i.cfg.server_dir);
@@ -5303,6 +5343,7 @@ async fn list_worlds(State(app): State<AppState>) -> Result<Json<Vec<WorldSummar
             size_bytes: directory_size(&path),
             has_level_dat,
             universe_configured,
+            dimensions: world_dimensions(&path),
         });
     }
     worlds.sort_by_key(|world| (!world.active, world.name.to_lowercase()));

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-0.9.9-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/version-0.10.0-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
 <img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
 <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
 <img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
@@ -41,6 +41,10 @@ aplicativo**, sem navegador externo.
 | 🔄 | **Atualizações com rollback** | Verifica automaticamente, baixa e valida o instalador oficial por SHA-256; se precisar, baixa de novo a versão anterior. |
 | 🧭 | **Erros acionáveis** | Mensagens explicam o problema e oferecem ações como tentar novamente, baixar Java, abrir a pasta ou trocar a porta. |
 | 🎛️ | **Gerenciar o servidor** | Iniciar, parar, reiniciar, enviar comandos e acompanhar logs resumidos em linguagem humana, além de CPU, memória e jogadores. |
+| 🧠 | **Console inteligente** | Histórico de comandos separado por servidor, setas para navegar, sugestões com Tab e filtros para jogadores, avisos e erros. |
+| 📈 | **Monitoramento avançado** | Histórico visual da sessão para CPU, RAM e jogadores, uptime e espaço ocupado pelo servidor. |
+| 🧪 | **Diagnóstico de conteúdo** | Sinaliza arquivos que parecem duplicar o mesmo projeto instalado e mantém a compatibilidade filtrada pelo loader escolhido. |
+| 🌍 | **Mundos e dimensões** | Crie, duplique, renomeie, ative, faça backup e veja dimensões Nether/End ou customizadas detectadas em cada mundo. |
 | 🖥️ | **Abrir em tela cheia** | A janela já abre maximizada, como um software dedicado. |
 | 🔒 | **Execução local** | Tudo roda na sua máquina — seus dados não saem do PC. |
 | 🌐 | **ShadowTunnel** | Controle túneis TCP/UDP do plugin Paper, com status, endereços públicos e conexão pelo Gateway API. |
@@ -99,6 +103,8 @@ Na aba **Configurações → Mundo e rede**, use `view-distance` entre 6 e 10 e 
 - `packaging/` — integração AUR, desktop entry, ícone e receitas de distribuição.
 
 As configurações são gravadas localmente em `~/.shadowpainel/config.json` por substituição atômica. Isso evita deixar um JSON parcialmente escrito após queda de energia ou encerramento inesperado.
+
+Na versão `0.10.0`, a troca entre perfis preserva o console de cada servidor durante a sessão, mas o núcleo ainda executa um processo Java por vez. Assim, servidores não selecionados aparecem offline até que o usuário os inicie quando estiverem ativos; a execução simultânea de vários processos continua sendo uma evolução separada do gerenciador de processos.
 
 ## 🚀 Rodar para testar
 

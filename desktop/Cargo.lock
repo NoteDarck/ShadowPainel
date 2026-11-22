@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "shadowpainel-desktop"
-version = "0.9.9"
+version = "0.10.0"
 dependencies = [
  "gtk",
  "tao",
