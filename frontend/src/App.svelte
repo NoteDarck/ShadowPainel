@@ -1,11 +1,12 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.9.8';
+  const APP_VERSION = '0.9.9';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
   type Version = { id:string; kind:string; release_time:string };
+  type ServerTypeOption = { id:string; name:string; description:string; icon_url:string };
   type ContentItem = {
     filename:string; size:number; kind:string; title?:string;
     project_id?:string; version_number?:string; icon_url?:string;
@@ -114,6 +115,22 @@
     logs:[]
   };
   let versions:Version[] = [];
+  let serverTypes:ServerTypeOption[] = [
+    ['vanilla','Vanilla','Servidor oficial do Minecraft'], ['paper','Paper','Plugins e alto desempenho'],
+    ['pufferfish','Pufferfish','Paper otimizado para desempenho'], ['spigot','Spigot','Servidor Bukkit/Spigot'],
+    ['folia','Folia','Paper para regiões independentes'], ['purpur','Purpur','Paper com configurações avançadas'],
+    ['waterfall','Waterfall','Proxy compatível com BungeeCord'], ['velocity','Velocity','Proxy moderno para redes'],
+    ['fabric','Fabric','Loader leve para mods'], ['bungeecord','BungeeCord','Proxy clássico para redes'],
+    ['quilt','Quilt','Loader compatível com mods Fabric'], ['forge','Forge','Loader tradicional para mods'],
+    ['neoforge','NeoForge','Loader moderno para mods'], ['mohist','Mohist','Forge com suporte a plugins'],
+    ['arclight','Arclight','Forge/Fabric com suporte a plugins'], ['sponge','Sponge','API para mods e plugins'],
+    ['leaves','Leaves','Fork de Paper focado em desempenho'], ['canvas','Canvas','Servidor experimental'],
+    ['aspaper','ASPaper','Fork compatível com Paper'], ['legacy_fabric','Legacy Fabric','Fabric para versões antigas'],
+    ['loohp_limbo','LooHP Limbo','Servidor limbo'], ['nanolimbo','NanoLimbo','Servidor limbo leve'],
+    ['divinemc','DivineMC','Fork otimizado de Minecraft'], ['magma','Magma','Forge com suporte a plugins'],
+    ['leaf','Leaf','Fork de Paper'], ['velocity_ctd','Velocity CTD','Build alternativa do Velocity'],
+    ['youer','Youer','Servidor compatível com múltiplas APIs'], ['pluto','Pluto','Servidor experimental'],
+  ].map(([id,name,description]) => ({id,name,description,icon_url:`https://s3.mcjars.app/icons/${id}.png`}));
   let serverProfiles:ServerSummary[] = [];
   let switchingServer = false;
   let activeTab:'overview'|'servers'|'content'|'worlds'|'config'|'setup' = 'overview';
@@ -866,6 +883,15 @@
       fail(e, 'Não foi possível ler versões. Verifique a internet.', [
         { label:'Tentar novamente', run:loadVersions },
       ]);
+    }
+  }
+
+  async function loadServerTypes() {
+    try {
+      const data = await api<{types:ServerTypeOption[]}>('/server/types');
+      if (data.types?.length) serverTypes = data.types;
+    } catch {
+      // A lista local permite abrir o assistente mesmo sem rede.
     }
   }
 
@@ -1660,6 +1686,7 @@
     refresh();
     loadServers();
     loadVersions();
+    loadServerTypes();
     const timer = setInterval(() => { refresh(); loadServers(); }, 3000);
     const e4Timer = setInterval(() => { if (server.e4all.use_e4all && (activeTab === 'overview' || (activeTab === 'config' && configSection === 'e4all'))) loadE4allLink(); }, 10000);
     const updateTimer = setTimeout(async () => {
@@ -2331,13 +2358,7 @@
           <label>
             Tipo / modloader
             <select bind:value={server.loader}>
-              <option value="vanilla">Vanilla</option>
-              <option value="paper">Paper</option>
-              <option value="purpur">Purpur</option>
-              <option value="fabric">Fabric</option>
-              <option value="forge">Forge</option>
-              <option value="neoforge">NeoForge</option>
-              <option value="quilt">Quilt</option>
+              {#each serverTypes as type}<option value={type.id}>{type.name}</option>{/each}
             </select>
           </label>
           <label>Pasta do servidor<input bind:value={server.server_dir}/></label>
@@ -3033,13 +3054,9 @@
             <label>
               Tipo / modloader
               <select bind:value={setup.loader}>
-                <option value="vanilla">Vanilla — servidor oficial (recomendado para iniciantes)</option>
-                <option value="fabric">Fabric — para usar mods</option>
-                <option value="forge">Forge — mods clássicos</option>
-                <option value="neoforge">NeoForge — mods modernos</option>
-                <option value="quilt">Quilt — variante do Fabric</option>
-                <option value="paper">Paper — para usar plugins (melhor desempenho)</option>
-                <option value="purpur">Purpur — plugins + customizações</option>
+                {#each serverTypes as type}
+                  <option value={type.id}>{type.name} — {type.description}</option>
+                {/each}
               </select>
             </label>
           </div>

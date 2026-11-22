@@ -38,7 +38,8 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.9.8";
+const APP_VERSION: &str = "0.9.9";
+const MCJARS_API: &str = "https://mcjars.app/api/v2/builds";
 
 const MAX_LOGS: usize = 500;
 const MAX_SERVER_JAR_BYTES: usize = 256 * 1024 * 1024;
@@ -998,10 +999,40 @@ fn detect_launch(dir: &Path) -> Option<Launch> {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if entry.path().is_file()
-                && name.starts_with("forge-")
                 && name.ends_with(".jar")
                 && !name.contains("installer")
                 && !name.contains("sources")
+                && [
+                    "forge-",
+                    "neoforge-",
+                    "arclight",
+                    "mohist",
+                    "magma",
+                    "paper-",
+                    "purpur-",
+                    "spigot-",
+                    "folia-",
+                    "pufferfish-",
+                    "leaves-",
+                    "leaf-",
+                    "velocity-",
+                    "waterfall-",
+                    "bungeecord-",
+                    "sponge",
+                    "canvas",
+                    "aspaper",
+                    "legacy-fabric",
+                    "legacy_fabric",
+                    "loohp",
+                    "nanolimbo",
+                    "divinemc",
+                    "youer",
+                    "pluto",
+                ]
+                .iter()
+                .any(|marker| {
+                    name.to_lowercase().starts_with(marker) || name.to_lowercase().contains(marker)
+                })
             {
                 return Some(Launch::Jar(name));
             }
@@ -1057,6 +1088,9 @@ fn infer_loader(dir: &Path) -> String {
             return "forge".into();
         }
     }
+    if let Some(loader) = detect_jar_loader(&dir.join("server.jar")) {
+        return loader;
+    }
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
@@ -1072,6 +1106,48 @@ fn infer_loader(dir: &Path) -> String {
         }
     }
     "vanilla".into()
+}
+
+fn detect_jar_loader(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut archive = ZipArchive::new(file).ok()?;
+    let mut markers = Vec::new();
+    for index in 0..archive.len().min(600) {
+        let entry = archive.by_index(index).ok()?;
+        let name = entry.name().to_ascii_lowercase();
+        markers.push(name);
+    }
+    let joined = markers.join("\n");
+    [
+        ("arclight", "arclight"),
+        ("mohist", "mohist"),
+        ("magma", "magma"),
+        ("neoforge", "neoforge"),
+        ("minecraftforge", "forge"),
+        ("pufferfish", "pufferfish"),
+        ("purpur", "purpur"),
+        ("folia", "folia"),
+        ("leaves", "leaves"),
+        ("spigot", "spigot"),
+        ("paper", "paper"),
+        ("velocity", "velocity"),
+        ("waterfall", "waterfall"),
+        ("bungeecord", "bungeecord"),
+        ("fabric", "fabric"),
+        ("quilt", "quilt"),
+        ("sponge", "sponge"),
+        ("canvas", "canvas"),
+        ("aspaper", "aspaper"),
+        ("legacy_fabric", "legacy_fabric"),
+        ("legacy-fabric", "legacy_fabric"),
+        ("loohp", "loohp_limbo"),
+        ("nanolimbo", "nanolimbo"),
+        ("divinemc", "divinemc"),
+        ("youer", "youer"),
+        ("pluto", "pluto"),
+    ]
+    .iter()
+    .find_map(|(marker, loader)| joined.contains(marker).then_some((*loader).into()))
 }
 
 fn infer_minecraft_version(dir: &Path) -> Option<String> {
@@ -1163,8 +1239,69 @@ fn valid_trash_token(token: &str) -> bool {
 fn valid_loader(loader: &str) -> bool {
     matches!(
         loader,
-        "vanilla" | "fabric" | "quilt" | "forge" | "neoforge" | "paper" | "purpur"
+        "vanilla"
+            | "fabric"
+            | "quilt"
+            | "forge"
+            | "neoforge"
+            | "paper"
+            | "purpur"
+            | "pufferfish"
+            | "spigot"
+            | "folia"
+            | "waterfall"
+            | "velocity"
+            | "bungeecord"
+            | "mohist"
+            | "arclight"
+            | "sponge"
+            | "leaves"
+            | "canvas"
+            | "aspaper"
+            | "legacy_fabric"
+            | "loohp_limbo"
+            | "nanolimbo"
+            | "divinemc"
+            | "magma"
+            | "leaf"
+            | "velocity_ctd"
+            | "youer"
+            | "pluto"
     )
+}
+
+fn mcjars_type(loader: &str) -> Option<&'static str> {
+    match loader {
+        "vanilla" => Some("VANILLA"),
+        "paper" => Some("PAPER"),
+        "pufferfish" => Some("PUFFERFISH"),
+        "spigot" => Some("SPIGOT"),
+        "folia" => Some("FOLIA"),
+        "purpur" => Some("PURPUR"),
+        "waterfall" => Some("WATERFALL"),
+        "velocity" => Some("VELOCITY"),
+        "fabric" => Some("FABRIC"),
+        "bungeecord" => Some("BUNGEECORD"),
+        "quilt" => Some("QUILT"),
+        "forge" => Some("FORGE"),
+        "neoforge" => Some("NEOFORGE"),
+        "mohist" => Some("MOHIST"),
+        "arclight" => Some("ARCLIGHT"),
+        "sponge" => Some("SPONGE"),
+        "leaves" => Some("LEAVES"),
+        "canvas" => Some("CANVAS"),
+        "aspaper" => Some("ASPAPER"),
+        "legacy_fabric" => Some("LEGACY_FABRIC"),
+        "loohp_limbo" => Some("LOOHP_LIMBO"),
+        "nanolimbo" => Some("NANOLIMBO"),
+        "divinemc" => Some("DIVINEMC"),
+        "magma" => Some("MAGMA"),
+        "leaf" => Some("LEAF"),
+        "velocity_ctd" => Some("VELOCITY_CTD"),
+        "youer" => Some("YOUER"),
+        "pluto" => Some("PLUTO"),
+        _ => None,
+    }
 }
 
 fn content_loader(kind: &str, loader: &str) -> String {
@@ -2315,7 +2452,12 @@ async fn import_server_jar(
     i.installing = false;
     i.cfg.server_name = req.server_name.trim().into();
     i.cfg.version = req.version.trim().into();
-    i.cfg.loader = req.loader.trim().into();
+    let detected_loader = infer_loader(&dir);
+    i.cfg.loader = if detected_loader == "vanilla" {
+        req.loader.trim().into()
+    } else {
+        detected_loader
+    };
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
     i.persist().await.map_err(|e| {
@@ -2324,7 +2466,14 @@ async fn import_server_jar(
             format!("server.jar salvo, mas falhou ao gravar a configuração: {e}"),
         )
     })?;
-    i.push(format!("server.jar importado de {filename}."), "success");
+    let detected_loader = i.cfg.loader.clone();
+    i.push(
+        format!(
+            "server.jar importado de {filename}; tipo detectado: {}.",
+            detected_loader
+        ),
+        "success",
+    );
     Ok(Json(view(&mut i)))
 }
 
@@ -4030,6 +4179,50 @@ async fn make_executable(path: &Path) {
 #[cfg(not(unix))]
 async fn make_executable(_path: &Path) {}
 
+async fn launch_update_installer(path: &Path) -> Result<(), ApiErr> {
+    let mut command = if cfg!(windows) {
+        Command::new(path)
+    } else if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    } else if path.extension().and_then(|value| value.to_str()) == Some("deb")
+        && Command::new("sh")
+            .args(["-c", "command -v pkexec >/dev/null 2>&1"])
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+    {
+        let mut command = Command::new("pkexec");
+        command.args(["dpkg", "--install"]).arg(path);
+        command
+    } else if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("appimage"))
+    {
+        let mut command = Command::new(path);
+        command.current_dir(path.parent().unwrap_or_else(|| Path::new(".")));
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Falha ao iniciar o instalador: {e}"),
+            )
+        })
+}
+
 fn version_parts(version: &str) -> (u64, u64, u64) {
     let mut parts = version.trim_start_matches('v').split('.').map(|part| {
         part.chars()
@@ -4065,9 +4258,9 @@ fn update_asset_rank(name: &str) -> Option<u8> {
         }
         return None;
     }
-    if lower.ends_with(".appimage") {
+    if lower.ends_with(".deb") {
         Some(0)
-    } else if lower.ends_with(".deb") {
+    } else if lower.ends_with(".appimage") {
         Some(1)
     } else if lower.ends_with(".tar.gz") {
         Some(2)
@@ -4289,30 +4482,7 @@ async fn install_update(State(app): State<AppState>) -> Result<Json<Value>, ApiE
         serde_json::to_vec_pretty(&state).unwrap_or_default(),
     )
     .await;
-    let mut command = if cfg!(windows) {
-        let mut command = Command::new("explorer.exe");
-        command.arg(&destination);
-        command
-    } else if cfg!(target_os = "macos") {
-        let mut command = Command::new("open");
-        command.arg(&destination);
-        command
-    } else {
-        let mut command = Command::new("xdg-open");
-        command.arg(&destination);
-        command
-    };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Falha ao abrir o instalador: {e}"),
-            )
-        })?;
+    launch_update_installer(&destination).await?;
     app.0.lock().await.push(
         format!(
             "Atualização {} baixada. Feche o ShadowPainel e conclua no instalador.",
@@ -4389,30 +4559,7 @@ async fn rollback_update(State(app): State<AppState>) -> Result<Json<Value>, Api
     }
     make_executable(&destination).await;
     let _ = state;
-    let mut command = if cfg!(windows) {
-        let mut command = Command::new("explorer.exe");
-        command.arg(&destination);
-        command
-    } else if cfg!(target_os = "macos") {
-        let mut command = Command::new("open");
-        command.arg(&destination);
-        command
-    } else {
-        let mut command = Command::new("xdg-open");
-        command.arg(&destination);
-        command
-    };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Falha ao abrir o instalador anterior: {e}"),
-            )
-        })?;
+    launch_update_installer(&destination).await?;
     app.0.lock().await.push(
         format!("Instalador da versão {previous} aberto para reversão."),
         "info",
@@ -5905,6 +6052,159 @@ async fn install_paper(
     save_download(client, &url, &dir.join("server.jar")).await
 }
 
+#[derive(Serialize)]
+struct ServerTypeOption {
+    id: String,
+    name: String,
+    description: String,
+    icon_url: String,
+}
+
+fn mcjars_server_types() -> Vec<ServerTypeOption> {
+    [
+        ("vanilla", "Vanilla", "Servidor oficial do Minecraft"),
+        ("paper", "Paper", "Plugins e alto desempenho"),
+        (
+            "pufferfish",
+            "Pufferfish",
+            "Paper otimizado para desempenho",
+        ),
+        ("spigot", "Spigot", "Servidor Bukkit/Spigot"),
+        ("folia", "Folia", "Paper para regiões independentes"),
+        ("purpur", "Purpur", "Paper com configurações avançadas"),
+        ("waterfall", "Waterfall", "Proxy compatível com BungeeCord"),
+        ("velocity", "Velocity", "Proxy moderno para redes"),
+        ("fabric", "Fabric", "Loader leve para mods"),
+        ("bungeecord", "BungeeCord", "Proxy clássico para redes"),
+        ("quilt", "Quilt", "Loader compatível com mods Fabric"),
+        ("forge", "Forge", "Loader tradicional para mods"),
+        ("neoforge", "NeoForge", "Loader moderno para mods"),
+        ("mohist", "Mohist", "Forge com suporte a plugins"),
+        ("arclight", "Arclight", "Forge/Fabric com suporte a plugins"),
+        ("sponge", "Sponge", "API para mods e plugins"),
+        ("leaves", "Leaves", "Fork de Paper focado em desempenho"),
+        ("canvas", "Canvas", "Servidor experimental"),
+        ("aspaper", "ASPaper", "Fork compatível com Paper"),
+        (
+            "legacy_fabric",
+            "Legacy Fabric",
+            "Fabric para versões antigas",
+        ),
+        ("loohp_limbo", "LooHP Limbo", "Servidor limbo"),
+        ("nanolimbo", "NanoLimbo", "Servidor limbo leve"),
+        ("divinemc", "DivineMC", "Fork otimizado de Minecraft"),
+        ("magma", "Magma", "Forge com suporte a plugins"),
+        ("leaf", "Leaf", "Fork de Paper"),
+        (
+            "velocity_ctd",
+            "Velocity CTD",
+            "Build alternativa do Velocity",
+        ),
+        ("youer", "Youer", "Servidor compatível com múltiplas APIs"),
+        ("pluto", "Pluto", "Servidor experimental"),
+    ]
+    .into_iter()
+    .map(|(id, name, description)| ServerTypeOption {
+        id: id.into(),
+        name: name.into(),
+        description: description.into(),
+        icon_url: format!("https://s3.mcjars.app/icons/{id}.png"),
+    })
+    .collect()
+}
+
+async fn server_types() -> Json<Value> {
+    Json(json!({"types": mcjars_server_types()}))
+}
+
+async fn install_mcjars(
+    client: &reqwest::Client,
+    dir: &Path,
+    mc: &str,
+    loader: &str,
+) -> Result<(), ApiErr> {
+    let kind = mcjars_type(loader)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de servidor MCJars inválido."))?;
+    let data: Value = client
+        .get(format!("{MCJARS_API}/{kind}"))
+        .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+        .send()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("MCJars: {e}")))?
+        .error_for_status()
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("MCJars retornou erro: {e}"),
+            )
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("MCJars JSON inválido: {e}"),
+            )
+        })?;
+    let actions = data["builds"][mc]["latest"]["installation"]
+        .as_array()
+        .and_then(|groups| groups.first())
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("MCJars não possui uma build {kind} para Minecraft {mc}."),
+            )
+        })?;
+    for action in actions {
+        match action["type"].as_str().unwrap_or_default() {
+            "download" => {
+                let url = action["url"].as_str().ok_or_else(|| {
+                    err(StatusCode::BAD_GATEWAY, "Ação de download MCJars sem URL.")
+                })?;
+                let file = action["file"].as_str().unwrap_or("server.jar");
+                let target = safe_pack_path(dir, file).ok_or_else(|| {
+                    err(StatusCode::BAD_GATEWAY, "Nome de arquivo MCJars inválido.")
+                })?;
+                save_download(client, url, &target).await?;
+            }
+            "unzip" => {
+                let file = action["file"].as_str().unwrap_or("mcvapi.server.jar.zip");
+                let archive = safe_pack_path(dir, file)
+                    .ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Arquivo ZIP MCJars inválido."))?;
+                let location = action["location"].as_str().unwrap_or(".");
+                let destination = if location == "." {
+                    dir.to_path_buf()
+                } else {
+                    safe_pack_path(dir, location).ok_or_else(|| {
+                        err(StatusCode::BAD_GATEWAY, "Destino ZIP MCJars inválido.")
+                    })?
+                };
+                extract_zip(&archive, &destination, Vec::new()).await?;
+            }
+            "remove" => {
+                if let Some(location) = action["location"].as_str() {
+                    if let Some(path) = safe_pack_path(dir, location) {
+                        if path.is_dir() {
+                            let _ = tokio::fs::remove_dir_all(path).await;
+                        } else {
+                            let _ = tokio::fs::remove_file(path).await;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if detect_launch(dir).is_none() {
+        return Err(err(
+            StatusCode::BAD_GATEWAY,
+            format!("A instalação MCJars {kind} terminou sem gerar um servidor inicializável."),
+        ));
+    }
+    Ok(())
+}
+
 async fn install_loader(
     client: &reqwest::Client,
     java: &str,
@@ -5913,6 +6213,9 @@ async fn install_loader(
     loader: &str,
     loader_version: Option<&str>,
 ) -> Result<(), ApiErr> {
+    if mcjars_type(loader).is_some() {
+        return install_mcjars(client, dir, mc, loader).await;
+    }
     match loader {
         "fabric" => install_fabric(client, dir, mc, loader_version).await,
         "quilt" => install_quilt(client, java, dir, mc, loader_version).await,
@@ -8917,6 +9220,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/java/ensure", post(java_ensure))
         .route("/api/network/diagnose", get(network_diagnose))
         .route("/api/minecraft/versions", get(minecraft_versions))
+        .route("/api/server/types", get(server_types))
         .route("/api/server/create", post(create_server))
         .route(
             "/api/server/import-jar",
@@ -8987,9 +9291,9 @@ mod tests {
 
     use super::{
         create_server_export_blocking, extract_e4all_link, extract_server_export_blocking,
-        java_major_for_version, looks_like_jar, new_trash_token, offline_uuid, parse_java_major,
-        qr_svg, read_server_export_manifest_blocking, update_checksum_from_sums, version_parts,
-        ServerExportManifest,
+        infer_loader, java_major_for_version, looks_like_jar, new_trash_token, offline_uuid,
+        parse_java_major, qr_svg, read_server_export_manifest_blocking, update_checksum_from_sums,
+        version_parts, ServerExportManifest,
     };
 
     #[test]
@@ -9047,6 +9351,26 @@ mod tests {
         assert!(looks_like_jar(b"PK\x03\x04resto"));
         assert!(!looks_like_jar(b"#!/bin/sh\necho nao"));
         assert!(!looks_like_jar(b""));
+    }
+
+    #[test]
+    fn detects_arclight_server_jar_instead_of_vanilla() {
+        let root =
+            std::env::temp_dir().join(format!("shadowpainel-arclight-test-{}", new_trash_token()));
+        std::fs::create_dir_all(&root).unwrap();
+        let jar_path = root.join("server.jar");
+        let file = std::fs::File::create(&jar_path).unwrap();
+        let mut jar = zip::ZipWriter::new(file);
+        jar.start_file(
+            "io/izzel/arclight/server/ArclightMain.class",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        jar.write_all(b"arclight").unwrap();
+        jar.finish().unwrap();
+
+        assert_eq!(infer_loader(&root), "arclight");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

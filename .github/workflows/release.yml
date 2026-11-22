@@ -219,14 +219,14 @@ jobs:
               </Directory>
               <DirectoryRef Id="ApplicationProgramsFolder">
                 <Component Id="StartMenuShortcut" Guid="*">
-                  <Shortcut Id="ShadowPainelShortcut" Name="ShadowPainel" Description="Painel local para servidores Minecraft" Target="[INSTALLFOLDER]shadowpainel-desktop.exe" WorkingDirectory="INSTALLFOLDER" Icon="ShadowPainelIcon" Advertise="no" />
+                  <Shortcut Id="ShadowPainelShortcut" Name="ShadowPainel" Description="Painel local para servidores Minecraft" Target="[INSTALLFOLDER]shadowpainel-desktop.exe" WorkingDirectory="INSTALLFOLDER" Icon="ShadowPainelIcon" IconIndex="0" Advertise="no" />
                   <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
                   <RegistryValue Root="HKCU" Key="Software\NoteDarck\ShadowPainel" Name="installed" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
               </DirectoryRef>
               <DirectoryRef Id="DesktopFolder">
                 <Component Id="DesktopShortcut" Guid="*">
-                  <Shortcut Id="ShadowPainelDesktopShortcut" Name="ShadowPainel" Description="Abrir o ShadowPainel" Target="[INSTALLFOLDER]shadowpainel-desktop.exe" WorkingDirectory="INSTALLFOLDER" Icon="ShadowPainelIcon" Advertise="no" />
+                  <Shortcut Id="ShadowPainelDesktopShortcut" Name="ShadowPainel" Description="Abrir o ShadowPainel" Target="[INSTALLFOLDER]shadowpainel-desktop.exe" WorkingDirectory="INSTALLFOLDER" Icon="ShadowPainelIcon" IconIndex="0" Advertise="no" />
                   <RegistryValue Root="HKCU" Key="Software\NoteDarck\ShadowPainel" Name="desktopShortcut" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
               </DirectoryRef>

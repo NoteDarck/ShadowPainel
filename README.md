@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-0.9.4-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/version-0.9.9-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
 <img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
 <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
 <img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
@@ -44,6 +44,9 @@ aplicativo**, sem navegador externo.
 | 🖥️ | **Abrir em tela cheia** | A janela já abre maximizada, como um software dedicado. |
 | 🔒 | **Execução local** | Tudo roda na sua máquina — seus dados não saem do PC. |
 | 🌐 | **ShadowTunnel** | Controle túneis TCP/UDP do plugin Paper, com status, endereços públicos e conexão pelo Gateway API. |
+| 🧱 | **Catálogo MCJars completo** | Crie servidores usando as opções disponíveis no MCJars, incluindo Vanilla, Paper, Arclight, Forge, NeoForge, Fabric, proxies e variantes compatíveis. |
+| 🔍 | **Detecção automática de JAR** | Ao importar um `server.jar` externo, identifica o loader pelo conteúdo do arquivo — inclusive Arclight — em vez de assumir Vanilla ou Paper. |
+| 🪟 | **Instalação Windows aprimorada** | O executável nativo recebe o ícone do ShadowPainel e o instalador cria atalhos funcionais no Menu Iniciar e na Área de Trabalho. |
 
 ---
 
@@ -68,6 +71,14 @@ Na seção **Configurações avançadas → Integrações → Shadow Tunnel**, i
 Use **Criar túnel**, **Conectar**, **Desconectar** e **Atualizar**. Compartilhe somente o endereço TCP/UDP exibido como online. Status `requested` indica solicitação pendente; confirme o console do plugin, a porta do Gateway, o token e as regras do firewall. Teste o Gateway com `curl http://127.0.0.1:9100/api/tunnels/<nome>/status`.
 
 A API local do painel encaminha `GET /api/shadowtunnel/status`, `POST /api/shadowtunnel/create`, `POST /api/shadowtunnel/connect` e `POST /api/shadowtunnel/disconnect` para o Gateway. Para desenvolvimento, execute `cargo fmt --all`, `cargo test` e `cargo clippy --all-targets --all-features -- -D warnings` em `backend/`; execute `npm run check` e `npm run build` em `frontend/`.
+
+## MCJars e atualizações
+
+Na criação ou configuração de um servidor, o painel consulta o catálogo público do [MCJars](https://mcjars.app/) e exibe os tipos de servidor disponíveis. A instalação segue as ações publicadas pela API do catálogo, incluindo downloads diretos e pacotes que precisam ser extraídos. Se a consulta estiver indisponível, a interface mantém uma lista local dos tipos conhecidos.
+
+JARs importados também são inspecionados como arquivos ZIP. O painel reconhece marcadores de loaders como Arclight, Mohist, Forge, NeoForge, Paper, Purpur, Fabric e Quilt e salva o tipo identificado no servidor.
+
+As atualizações do ShadowPainel validam o pacote por SHA-256 antes de instalar. No Linux, o instalador `.deb` pode solicitar elevação via `pkexec`, enquanto AppImage e instaladores de outras plataformas são abertos pelo mecanismo nativo do sistema. O rollback continua disponível pela própria tela de atualização.
 
 ---
 
