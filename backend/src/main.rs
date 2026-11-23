@@ -1745,14 +1745,15 @@ async fn playit_status(State(app): State<AppState>) -> Json<PlayitStatus> {
         false
     };
     let executable = resolve_playit_executable(configured_path.as_deref()).await;
+    let installed = executable.is_some();
     Json(PlayitStatus {
-        installed: executable.is_some(),
+        installed,
         running,
         executable,
         pid: if running { pid } else { None },
         message: if running {
             "Agente Playit em execução. O endereço público é gerenciado no painel do Playit.".into()
-        } else if executable.is_some() {
+        } else if installed {
             "Agente encontrado. Inicie-o para manter o túnel online.".into()
         } else {
             "Agente Playit não encontrado. Baixe-o no site oficial.".into()
