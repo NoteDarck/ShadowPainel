@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-0.10.3-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/version-0.10.4-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
 <img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
 <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
 <img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
@@ -105,6 +105,12 @@ Para Arclight, Magma e Mohist, o painel agora permite escolher o **loader-base**
 O painel também aceita plugins para híbridos compatíveis e não libera plugins em servidores Forge, NeoForge ou Fabric puros. Isso evita o erro “Plugins precisam de um servidor Paper ou Purpur” sem prometer compatibilidade que o loader não oferece. O servidor deve estar parado antes de instalar ou atualizar conteúdo; faça backup e confira dependências como Vault, ProtocolLib ou PlaceholderAPI quando o plugin exigir.
 
 Na aba **Configurações → Mundo e rede**, use `view-distance` entre 6 e 10 e `simulation-distance` entre 4 e 8 como ponto de partida para servidores híbridos, ajustando conforme CPU, memória e número de jogadores. Para Magma, a documentação recomenda Java 21+, `-Xms` igual a `-Xmx`, além de revisar `spigot.yml` e `bukkit.yml`; o painel já expõe as opções principais de `server.properties`. Em Paper/Purpur, configurações avançadas ficam nos arquivos YAML próprios do software e não devem ser copiadas para Forge/Fabric. Consulte as referências oficiais: [Magma — plugins](https://magmafoundation.org/docs/guides/adding-plugins), [Magma — otimização](https://magmafoundation.org/docs/guides/optimization), [Paper](https://papermc.io/software/paper), [Purpur](https://purpurmc.org/) e [Fabric — servidor](https://fabricmc.net/use/server/).
+
+### APK Android
+
+O workflow de release gera um APK instalável do cliente Expo em `mobile/`. Essa primeira versão é um companion: conecta-se ao ShadowPainel desktop pela rede local, mostra status, métricas e console, permite trocar o servidor ativo e iniciar ou parar a instância.
+
+A execução local de servidores Minecraft no Android, usando PRoot ou outro runtime rootless, permanece como uma etapa separada. PRoot não é Docker real e não fornece isolamento por namespaces, cgroups ou seccomp; além disso, o Android pode encerrar processos por bateria, CPU ou memória. O APK atual não promete executar o servidor dentro do telefone.
 
 ---
 
