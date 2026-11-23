@@ -23,7 +23,7 @@ use std::{
     io::Read,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
-    process::Stdio,
+    process::{Command as StdCommand, Stdio},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.10.1";
+const APP_VERSION: &str = "0.10.2";
 const MCJARS_API: &str = "https://mcjars.app/api/v2/builds";
 
 const MAX_LOGS: usize = 500;
@@ -4395,6 +4395,10 @@ async fn make_executable(path: &Path) {
 async fn make_executable(_path: &Path) {}
 
 async fn launch_update_installer(path: &Path) -> Result<(), ApiErr> {
+    let is_appimage = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("appimage"));
     let mut command = if cfg!(windows) {
         Command::new(path)
     } else if cfg!(target_os = "macos") {
@@ -4411,13 +4415,12 @@ async fn launch_update_installer(path: &Path) -> Result<(), ApiErr> {
         let mut command = Command::new("pkexec");
         command.args(["dpkg", "--install"]).arg(path);
         command
-    } else if path
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("appimage"))
-    {
+    } else if is_appimage {
         let mut command = Command::new(path);
         command.current_dir(path.parent().unwrap_or_else(|| Path::new(".")));
+        // CachyOS/Arch pode não ter FUSE configurado. O runtime do AppImage
+        // consegue extrair e executar temporariamente sem montar o arquivo.
+        command.env("APPIMAGE_EXTRACT_AND_RUN", "1");
         command
     } else {
         let mut command = Command::new("xdg-open");
@@ -4453,6 +4456,14 @@ fn version_parts(version: &str) -> (u64, u64, u64) {
     )
 }
 
+fn linux_has_dpkg() -> bool {
+    cfg!(target_os = "linux")
+        && StdCommand::new("sh")
+            .args(["-c", "command -v dpkg >/dev/null 2>&1"])
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
 fn update_asset_rank(name: &str) -> Option<u8> {
     let lower = name.to_lowercase();
     if cfg!(windows) {
@@ -4474,9 +4485,9 @@ fn update_asset_rank(name: &str) -> Option<u8> {
         return None;
     }
     if lower.ends_with(".deb") {
-        Some(0)
+        linux_has_dpkg().then_some(0)
     } else if lower.ends_with(".appimage") {
-        Some(1)
+        Some(if linux_has_dpkg() { 1 } else { 0 })
     } else if lower.ends_with(".tar.gz") {
         Some(2)
     } else {

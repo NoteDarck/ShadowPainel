@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-0.10.1-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/version-0.10.2-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
 <img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
 <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
 <img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
@@ -91,7 +91,7 @@ Na criação ou configuração de um servidor, o painel consulta o catálogo pú
 
 JARs importados também são inspecionados como arquivos ZIP. O painel reconhece marcadores de loaders como Arclight, Mohist, Forge, NeoForge, Paper, Purpur, Fabric e Quilt e salva o tipo identificado no servidor.
 
-As atualizações do ShadowPainel validam o pacote por SHA-256 antes de instalar. No Linux, o instalador `.deb` pode solicitar elevação via `pkexec`, enquanto AppImage e instaladores de outras plataformas são abertos pelo mecanismo nativo do sistema. O rollback continua disponível pela própria tela de atualização.
+As atualizações do ShadowPainel validam o pacote por SHA-256 antes de instalar. No Linux, o painel usa o `.deb` somente quando `dpkg` está disponível; em distribuições Arch, como CachyOS, escolhe automaticamente o AppImage e executa com fallback para ambientes sem FUSE. O rollback continua disponível pela própria tela de atualização.
 
 ### Servidores híbridos e configurações recomendadas
 
