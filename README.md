@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-0.10.0-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/version-0.10.1-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
 <img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
 <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
 <img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
@@ -48,6 +48,7 @@ aplicativo**, sem navegador externo.
 | 🖥️ | **Abrir em tela cheia** | A janela já abre maximizada, como um software dedicado. |
 | 🔒 | **Execução local** | Tudo roda na sua máquina — seus dados não saem do PC. |
 | 🌐 | **ShadowTunnel** | Controle túneis TCP/UDP do plugin Paper, com status, endereços públicos e conexão pelo Gateway API. |
+| 🎮 | **Playit.gg** | Detecte, inicie e pare o agente Playit local e configure o túnel Minecraft Java sem abrir portas no roteador. |
 | 🧱 | **Catálogo MCJars completo** | Crie servidores usando as opções disponíveis no MCJars, incluindo Vanilla, Paper, Arclight, Forge, NeoForge, Fabric, proxies e variantes compatíveis. |
 | 🔍 | **Detecção automática de JAR** | Ao importar um `server.jar` externo, identifica o loader pelo conteúdo do arquivo — inclusive Arclight — em vez de assumir Vanilla ou Paper. |
 | 🪟 | **Instalação Windows aprimorada** | O executável nativo recebe o ícone do ShadowPainel e o instalador cria atalhos funcionais no Menu Iniciar e na Área de Trabalho. |
@@ -75,6 +76,14 @@ Na seção **Configurações avançadas → Integrações → Shadow Tunnel**, i
 Use **Criar túnel**, **Conectar**, **Desconectar** e **Atualizar**. Compartilhe somente o endereço TCP/UDP exibido como online. Status `requested` indica solicitação pendente; confirme o console do plugin, a porta do Gateway, o token e as regras do firewall. Teste o Gateway com `curl http://127.0.0.1:9100/api/tunnels/<nome>/status`.
 
 A API local do painel encaminha `GET /api/shadowtunnel/status`, `POST /api/shadowtunnel/create`, `POST /api/shadowtunnel/connect` e `POST /api/shadowtunnel/disconnect` para o Gateway. Para desenvolvimento, execute `cargo fmt --all`, `cargo test` e `cargo clippy --all-targets --all-features -- -D warnings` em `backend/`; execute `npm run check` e `npm run build` em `frontend/`.
+
+## Playit.gg
+
+Na seção **Configurações avançadas → Integrações → Playit.gg**, o ShadowPainel verifica se o comando `playit` está instalado, permite informar um caminho alternativo e pode iniciar ou parar o agente local. O agente deve ser instalado a partir do [download oficial do Playit](https://playit.gg/download); no Linux, a documentação oficial também descreve a instalação por APT e a execução do binário.
+
+Depois de iniciar o agente, conclua a vinculação no navegador do Playit e crie um túnel **Minecraft Java** apontando para `127.0.0.1` e a porta do servidor mostrada pelo painel. O endereço público, a conta, o segredo do agente e a configuração detalhada do túnel permanecem no Playit. O ShadowPainel controla apenas o processo local e não armazena credenciais privadas.
+
+O agente Playit precisa permanecer na mesma máquina do servidor Minecraft. O Playit informa que seus túneis encaminham o tráfego sem exigir redirecionamento de portas no roteador; a disponibilidade depende de o agente estar conectado e do túnel estar ativo no painel do Playit. Consulte também a [documentação oficial do agente](https://github.com/playit-cloud/playit-agent/blob/master/README.md).
 
 ## MCJars e atualizações
 

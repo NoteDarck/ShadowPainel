@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterUpdate, onMount } from 'svelte';
 
-  const APP_VERSION = '0.10.0';
+  const APP_VERSION = '0.10.1';
 
   // ── Tipos ──
   type Log = { time:string; text:string; kind:string };
@@ -44,6 +44,7 @@
   };
   type CurseForgeStatus = { mode:string; configured:boolean; ok:boolean; message:string };
   type ShadowTunnel = { name:string; status:string; public_tcp_address:string; public_udp_address:string; local_destination:string; local_type:string };
+  type PlayitStatus = { installed:boolean; running:boolean; executable?:string; pid?:number|null; message:string; docs_url:string };
   type E4allConfig = {
     minecraft_dir:string;
     use_broker:boolean; broker_url:string; relay_host:string; relay_port:number;
@@ -259,6 +260,10 @@
   let shadowTunnel:ShadowTunnel = { name:'', status:'', public_tcp_address:'', public_udp_address:'', local_destination:'127.0.0.1:25565', local_type:'tcp' };
   let shadowTunnelLoading = false;
   let shadowTunnelError = '';
+  let playit:PlayitStatus = { installed:false, running:false, message:'', docs_url:'https://playit.gg/download' };
+  let playitExecutable = '';
+  let playitLoading = false;
+  let playitError = '';
 
   let backups:BackupItem[] = [];
   let backupsLoaded = false;
@@ -1045,6 +1050,25 @@
     } catch(e) { shadowTunnelError = e instanceof Error ? e.message : 'Falha ao consultar o Shadow Tunnel.'; }
   }
 
+  async function loadPlayit() {
+    try {
+      playit = await api<PlayitStatus>('/playit/status');
+      if (playit.executable) playitExecutable = playit.executable;
+      playitError = '';
+    } catch(e) { playitError = e instanceof Error ? e.message : 'Falha ao consultar o Playit.'; }
+  }
+
+  async function playitAction(action:'start'|'stop') {
+    playitLoading = true;
+    playitError = '';
+    try {
+      playit = await api<PlayitStatus>(`/playit/${action}`, action === 'start'
+        ? json({ executable: playitExecutable.trim() || undefined })
+        : { method:'POST' });
+    } catch(e) { playitError = e instanceof Error ? e.message : 'Falha ao controlar o Playit.'; }
+    finally { playitLoading = false; }
+  }
+
   async function shadowTunnelAction(action:'create'|'connect'|'disconnect') {
     shadowTunnelLoading = true;
     shadowTunnelError = '';
@@ -1717,6 +1741,7 @@
   $: if (activeTab === 'config' && configSection === 'e4all' && !e4status && server.e4all.use_e4all) checkE4all();
   $: if (activeTab === 'config' && configSection === 'integrations' && !cfStatus && !cfChecking) checkCurseForge();
   $: if (activeTab === 'config' && configSection === 'integrations' && !shadowTunnel.status) loadShadowTunnel();
+  $: if (activeTab === 'config' && configSection === 'integrations' && !playit.message && !playitLoading) loadPlayit();
   $: if (activeTab === 'config' && configSection === 'backups' && !backupsLoaded && !backupsLoading) loadBackups();
   $: if (activeTab === 'config' && configSection === 'properties') loadWhitelist();
   $: if (activeTab === 'config' && configSection === 'updates' && !updateInfo && !updateChecking) checkUpdates();
@@ -2507,7 +2532,28 @@
             <button class="secondary" on:click={()=>saveCurseForgeKey(true)} disabled={cfSaving}>REMOVER CHAVE</button>
           {/if}
         </div>
-         <p class="field-hint">Sem chave, o painel usa api.curse.tools. A chave oficial evita limites do proxy e é armazenada apenas no config local.</p>
+       <p class="field-hint">Sem chave, o painel usa api.curse.tools. A chave oficial evita limites do proxy e é armazenada apenas no config local.</p>
+       </section>
+       <section class="settings-card">
+         <div class="card-head"><div><h3>PLAYIT.GG</h3><p>Use o agente oficial para publicar o servidor sem abrir portas no roteador.</p></div><span class="mod-badge">AGENTE LOCAL</span></div>
+         <div class="cf-status-line">
+           <span class="status-dot" class:online={playit.running}></span>
+           <span>{playit.running ? 'Agente Playit em execução' : playit.installed ? 'Agente encontrado, mas parado' : 'Agente não encontrado'}</span>
+           <button class="secondary" on:click={loadPlayit} disabled={playitLoading}>ATUALIZAR</button>
+         </div>
+         <div class="form-grid">
+           <label>Executável (opcional)<input bind:value={playitExecutable} placeholder="playit ou caminho completo" /></label>
+           <label>Status<input value={playit.message || 'não verificado'} readonly /></label>
+         </div>
+         <div class="setup-note">
+           <b>Como usar</b>
+           <span>Instale o agente oficial, inicie-o e conclua a vinculação no navegador. Depois crie no Playit um túnel Minecraft Java apontando para <code>127.0.0.1:{props.server_port || 25565}</code>. O endereço público e as configurações do túnel continuam sendo gerenciados no painel do Playit.</span>
+         </div>
+         {#if playitError}<div class="inline-warning">{playitError}</div>{/if}
+         <div class="button-row">
+           {#if !playit.running}<button class="primary" on:click={()=>playitAction('start')} disabled={playitLoading}>{playitLoading ? 'INICIANDO...' : 'INICIAR PLAYIT'}</button>{:else}<button class="secondary danger-outline" on:click={()=>playitAction('stop')} disabled={playitLoading}>PARAR PLAYIT</button>{/if}
+           <a class="secondary" href={playit.docs_url} target="_blank" rel="noreferrer">BAIXAR AGENTE ↗</a>
+         </div>
        </section>
        <section class="settings-card">
          <div class="card-head"><div><h3>SHADOW TUNNEL</h3><p>Configure e controle o túnel pelo Gateway API.</p></div><span class="mod-badge">GATEWAY</span></div>

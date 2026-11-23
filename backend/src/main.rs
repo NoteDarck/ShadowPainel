@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.10.0";
+const APP_VERSION: &str = "0.10.1";
 const MCJARS_API: &str = "https://mcjars.app/api/v2/builds";
 
 const MAX_LOGS: usize = 500;
@@ -1483,6 +1483,7 @@ struct Inner {
     status: Status,
     logs: VecDeque<LogLine>,
     logs_by_server: HashMap<String, VecDeque<LogLine>>,
+    playit_pid: Option<u32>,
     players: u32,
     started: Option<DateTime<Utc>>,
     pid: Option<u32>,
@@ -1511,6 +1512,7 @@ impl Inner {
             status: Status::Offline,
             logs: VecDeque::new(),
             logs_by_server: HashMap::new(),
+            playit_pid: None,
             players: 0,
             started: None,
             pid: None,
@@ -1685,6 +1687,147 @@ async fn shadowtunnel_disconnect(payload: Option<Json<ShadowTunnelRequest>>) -> 
         None,
     )
     .await
+}
+
+const PLAYIT_DOCS_URL: &str = "https://playit.gg/download";
+
+#[derive(Serialize)]
+struct PlayitStatus {
+    installed: bool,
+    running: bool,
+    executable: Option<String>,
+    pid: Option<u32>,
+    message: String,
+    docs_url: String,
+}
+
+#[derive(Deserialize)]
+struct PlayitStartRequest {
+    executable: Option<String>,
+}
+
+async fn resolve_playit_executable(requested: Option<&str>) -> Option<String> {
+    if let Some(path) = requested.map(str::trim).filter(|path| !path.is_empty()) {
+        let candidate = expand(path);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+        return None;
+    }
+    for command in if cfg!(windows) {
+        vec!["playit.exe", "playit"]
+    } else {
+        vec!["playit"]
+    } {
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            Command::new(command).arg("--version").output(),
+        )
+        .await;
+        if matches!(result, Ok(Ok(output)) if output.status.success()) {
+            return Some(command.to_string());
+        }
+    }
+    None
+}
+
+async fn playit_status(State(app): State<AppState>) -> Json<PlayitStatus> {
+    let (pid, configured_path) = {
+        let i = app.0.lock().await;
+        (i.playit_pid, std::env::var("PLAYIT_PATH").ok())
+    };
+    let running = if let Some(pid) = pid {
+        let mut sys = System::new();
+        let process = Pid::from_u32(pid);
+        sys.refresh_processes(ProcessesToUpdate::Some(&[process]), true);
+        sys.process(process).is_some()
+    } else {
+        false
+    };
+    let executable = resolve_playit_executable(configured_path.as_deref()).await;
+    Json(PlayitStatus {
+        installed: executable.is_some(),
+        running,
+        executable,
+        pid: if running { pid } else { None },
+        message: if running {
+            "Agente Playit em execução. O endereço público é gerenciado no painel do Playit.".into()
+        } else if executable.is_some() {
+            "Agente encontrado. Inicie-o para manter o túnel online.".into()
+        } else {
+            "Agente Playit não encontrado. Baixe-o no site oficial.".into()
+        },
+        docs_url: PLAYIT_DOCS_URL.into(),
+    })
+}
+
+async fn playit_start(
+    State(app): State<AppState>,
+    Json(req): Json<PlayitStartRequest>,
+) -> Result<Json<PlayitStatus>, ApiErr> {
+    {
+        let mut i = app.0.lock().await;
+        let running = i.playit_pid.map(|pid| {
+            let mut sys = System::new();
+            let process = Pid::from_u32(pid);
+            sys.refresh_processes(ProcessesToUpdate::Some(&[process]), true);
+            sys.process(process).is_some()
+        }).unwrap_or(false);
+        if running {
+            return Err(err(StatusCode::CONFLICT, "O agente Playit já foi iniciado pelo painel."));
+        }
+        i.playit_pid = None;
+    }
+    let executable = resolve_playit_executable(req.executable.as_deref())
+        .await
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Agente Playit não encontrado. Instale-o ou informe o caminho do executável."))?;
+    let mut command = Command::new(&executable);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console_window(&mut command);
+    let child = command.spawn().map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao iniciar o Playit: {e}"))
+    })?;
+    let pid = child.id();
+    let mut i = app.0.lock().await;
+    i.playit_pid = pid;
+    let status = PlayitStatus {
+        installed: true,
+        running: pid.is_some(),
+        executable: Some(executable),
+        pid,
+        message: "Agente Playit iniciado. Termine a vinculação no navegador e configure o túnel no painel do Playit.".into(),
+        docs_url: PLAYIT_DOCS_URL.into(),
+    };
+    Ok(Json(status))
+}
+
+async fn playit_stop(State(app): State<AppState>) -> Result<Json<PlayitStatus>, ApiErr> {
+    let pid = {
+        let mut i = app.0.lock().await;
+        i.playit_pid.take()
+    };
+    let Some(pid) = pid else {
+        return Err(err(StatusCode::CONFLICT, "O agente Playit não está sendo gerenciado pelo painel."));
+    };
+    let result = if cfg!(windows) {
+        Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status().await
+    } else {
+        Command::new("kill").args(["-TERM", &pid.to_string()]).status().await
+    };
+    if !matches!(result, Ok(status) if status.success()) {
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "Não foi possível parar o agente Playit."));
+    }
+    Ok(Json(PlayitStatus {
+        installed: true,
+        running: false,
+        executable: None,
+        pid: None,
+        message: "Agente Playit parado.".into(),
+        docs_url: PLAYIT_DOCS_URL.into(),
+    }))
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -9327,6 +9470,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/shadowtunnel/status", get(shadowtunnel_status))
         .route("/api/shadowtunnel/create", post(shadowtunnel_create))
         .route("/api/shadowtunnel/connect", post(shadowtunnel_connect))
+        .route("/api/playit/status", get(playit_status))
+        .route("/api/playit/start", post(playit_start))
+        .route("/api/playit/stop", post(playit_stop))
         .route(
             "/api/shadowtunnel/disconnect",
             post(shadowtunnel_disconnect),
