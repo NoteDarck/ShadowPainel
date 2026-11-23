@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.10.5";
+const APP_VERSION: &str = "0.10.6";
 const MCJARS_API: &str = "https://mcjars.app/api/v2/builds";
 
 const MAX_LOGS: usize = 500;

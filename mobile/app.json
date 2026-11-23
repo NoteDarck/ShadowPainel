@@ -2,13 +2,13 @@
   "expo": {
     "name": "ShadowPainel",
     "slug": "shadowpainel-android",
-    "version": "0.10.5",
+    "version": "0.10.6",
     "orientation": "portrait",
     "scheme": "shadowpainel",
     "userInterfaceStyle": "dark",
     "android": {
       "package": "com.notedarck.shadowpainel",
-      "versionCode": 100500,
+      "versionCode": 100600,
       "usesCleartextTraffic": true
     },
     "extra": {
