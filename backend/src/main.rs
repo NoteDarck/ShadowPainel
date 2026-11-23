@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.10.2";
+const APP_VERSION: &str = "0.10.3";
 const MCJARS_API: &str = "https://mcjars.app/api/v2/builds";
 
 const MAX_LOGS: usize = 500;
@@ -9524,7 +9524,9 @@ async fn main() -> anyhow::Result<()> {
         app = app.layer(middleware::from_fn(host_guard));
     }
 
-    println!("ShadowPainel disponível em http://{addr}");
+    let advertised_addr = std::env::var("SHADOWPAINEL_PUBLIC_ADDR")
+        .unwrap_or_else(|_| addr.to_string());
+    println!("ShadowPainel disponível em http://{advertised_addr}");
     use std::io::Write;
     std::io::stdout().flush()?;
     axum::serve(listener, app)

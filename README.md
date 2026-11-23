@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-0.10.2-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
+<img src="https://img.shields.io/badge/version-0.10.3-8d5dff?style=flat-square&labelColor=080a10" alt="versão"/>
 <img src="https://img.shields.io/badge/Rust-1.80+-dea584?style=flat-square&logo=rust&logoColor=080a10&labelColor=080a10" alt="Rust"/>
 <img src="https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=080a10&labelColor=080a10" alt="Svelte"/>
 <img src="https://img.shields.io/badge/Axum-0.8-8d5dff?style=flat-square&labelColor=080a10" alt="Axum"/>
@@ -49,6 +49,7 @@ aplicativo**, sem navegador externo.
 | 🔒 | **Execução local** | Tudo roda na sua máquina — seus dados não saem do PC. |
 | 🌐 | **ShadowTunnel** | Controle túneis TCP/UDP do plugin Paper, com status, endereços públicos e conexão pelo Gateway API. |
 | 🎮 | **Playit.gg** | Detecte, inicie e pare o agente Playit local e configure o túnel Minecraft Java sem abrir portas no roteador. |
+| 📱 | **Cliente Android** | Acompanhe o servidor pela rede local, veja métricas, troque perfis e inicie ou pare o servidor pelo celular. |
 | 🧱 | **Catálogo MCJars completo** | Crie servidores usando as opções disponíveis no MCJars, incluindo Vanilla, Paper, Arclight, Forge, NeoForge, Fabric, proxies e variantes compatíveis. |
 | 🔍 | **Detecção automática de JAR** | Ao importar um `server.jar` externo, identifica o loader pelo conteúdo do arquivo — inclusive Arclight — em vez de assumir Vanilla ou Paper. |
 | 🪟 | **Instalação Windows aprimorada** | O executável nativo recebe o ícone do ShadowPainel e o instalador cria atalhos funcionais no Menu Iniciar e na Área de Trabalho. |
@@ -84,6 +85,10 @@ Na seção **Configurações avançadas → Integrações → Playit.gg**, o Sha
 Depois de iniciar o agente, conclua a vinculação no navegador do Playit e crie um túnel **Minecraft Java** apontando para `127.0.0.1` e a porta do servidor mostrada pelo painel. O endereço público, a conta, o segredo do agente e a configuração detalhada do túnel permanecem no Playit. O ShadowPainel controla apenas o processo local e não armazena credenciais privadas.
 
 O agente Playit precisa permanecer na mesma máquina do servidor Minecraft. O Playit informa que seus túneis encaminham o tráfego sem exigir redirecionamento de portas no roteador; a disponibilidade depende de o agente estar conectado e do túnel estar ativo no painel do Playit. Consulte também a [documentação oficial do agente](https://github.com/playit-cloud/playit-agent/blob/master/README.md).
+
+## Cliente Android
+
+O cliente companion em [`mobile/`](mobile/) usa Expo e se conecta ao ShadowPainel na rede local. Para usar o celular, inicie o desktop com `SHADOWPAINEL_ADDR=0.0.0.0:4173 SHADOWPAINEL_PUBLIC_ADDR=127.0.0.1:4173 shadowpainel-desktop`, informe no aplicativo o IP do computador com a porta `4173` e mantenha os dois dispositivos na mesma rede. O cliente Android oferece status, métricas, troca de servidor, iniciar/parar e console recente; a interface completa continua disponível no desktop. Não exponha a porta diretamente à internet.
 
 ## MCJars e atualizações
 

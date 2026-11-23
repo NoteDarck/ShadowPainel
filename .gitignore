@@ -2,4 +2,7 @@ backend/target/
 desktop/target/
 frontend/node_modules/
 frontend/dist/
+mobile/node_modules/
+mobile/dist/
+mobile/.expo/
 *.log
