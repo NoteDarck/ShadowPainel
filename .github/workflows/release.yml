@@ -356,9 +356,11 @@ jobs:
 
       - name: Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Componentes Android
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+        with:
+          packages: |
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
 
       - name: Node.js 22
         uses: actions/setup-node@v4
