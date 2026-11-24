@@ -341,72 +341,9 @@ jobs:
           path: ShadowPainel-*
           if-no-files-found: error
 
-  mobile:
-    name: Build APK Android
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools platforms;android-35 build-tools;35.0.0
-
-      - name: Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: mobile/package-lock.json
-
-      - name: Instalar dependências Expo
-        working-directory: mobile
-        run: npm ci
-
-      - name: Gerar projeto Android Expo
-        working-directory: mobile
-        run: npx expo prebuild --platform android --no-install
-
-      - name: Fixar Kotlin compatível com Compose
-        working-directory: mobile/android
-        run: |
-          # Expo SDK 52 seleciona Compose Compiler 1.5.15 para Kotlin 1.9.25.
-          # O React Native 0.76.5 ainda traz 1.9.24 no version catalog; alinhe-o
-          # para evitar que o plugin Kotlin e o compilador Compose usem versões diferentes.
-          sed -i 's/^kotlin = "1\.9\.24"$/kotlin = "1.9.25"/' ../node_modules/react-native/gradle/libs.versions.toml
-          sed -i "s/kotlinVersion = findProperty('android.kotlinVersion') ?: '[^']*'/kotlinVersion = '1.9.25'/" build.gradle
-          grep -n "kotlinVersion" build.gradle
-          grep -n '^kotlin =' ../node_modules/react-native/gradle/libs.versions.toml
-      - name: Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.10.2'
-
-      - name: Build APK
-        working-directory: mobile/android
-        run: gradle --no-daemon --stacktrace -Pandroid.kotlinVersion=1.9.25 assembleDebug
-
-      - name: Nomear APK
-        shell: bash
-        run: cp mobile/android/app/build/outputs/apk/debug/app-debug.apk "ShadowPainel-${GITHUB_REF_NAME}-android-debug.apk"
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-mobile-android
-          path: ShadowPainel-*-android-debug.apk
-          if-no-files-found: error
-
   publish:
     name: Publicar GitHub Release
-    needs: [build, mobile]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     steps:
