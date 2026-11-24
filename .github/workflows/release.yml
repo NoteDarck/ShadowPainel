@@ -374,6 +374,9 @@ jobs:
         working-directory: mobile
         run: npx expo prebuild --platform android --no-install
 
+      - name: Fixar Kotlin compatível com Compose
+        working-directory: mobile/android
+        run: echo "android.kotlinVersion=1.9.25" >> gradle.properties
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -381,7 +384,7 @@ jobs:
 
       - name: Build APK
         working-directory: mobile/android
-        run: gradle --no-daemon --stacktrace assembleDebug
+        run: gradle --no-daemon --stacktrace -Pandroid.kotlinVersion=1.9.25 assembleDebug
 
       - name: Nomear APK
         shell: bash
