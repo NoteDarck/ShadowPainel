@@ -377,8 +377,13 @@ jobs:
       - name: Fixar Kotlin compatível com Compose
         working-directory: mobile/android
         run: |
+          # Expo SDK 52 seleciona Compose Compiler 1.5.15 para Kotlin 1.9.25.
+          # O React Native 0.76.5 ainda traz 1.9.24 no version catalog; alinhe-o
+          # para evitar que o plugin Kotlin e o compilador Compose usem versões diferentes.
+          sed -i 's/^kotlin = "1\.9\.24"$/kotlin = "1.9.25"/' ../node_modules/react-native/gradle/libs.versions.toml
           sed -i "s/kotlinVersion = findProperty('android.kotlinVersion') ?: '[^']*'/kotlinVersion = '1.9.25'/" build.gradle
           grep -n "kotlinVersion" build.gradle
+          grep -n '^kotlin =' ../node_modules/react-native/gradle/libs.versions.toml
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
         with:

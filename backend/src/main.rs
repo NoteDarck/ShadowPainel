@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.10.9";
+const APP_VERSION: &str = "0.10.10";
 const MCJARS_API: &str = "https://mcjars.app/api/v2/builds";
 
 const MAX_LOGS: usize = 500;
@@ -1329,9 +1329,7 @@ fn normalize_base_loader(server_loader: &str, configured: &str) -> Result<String
     if configured.is_empty() {
         return Ok(String::new());
     }
-    if !is_hybrid_loader(server_loader)
-        && configured == server_loader.trim().to_ascii_lowercase()
-    {
+    if !is_hybrid_loader(server_loader) && configured == server_loader.trim().to_ascii_lowercase() {
         return Ok(String::new());
     }
     if matches!(configured.as_str(), "fabric" | "forge" | "neoforge") {
@@ -1344,7 +1342,20 @@ fn supports_content(kind: &str, server_loader: &str, base_loader: &str) -> bool 
     let loader = effective_base_loader(server_loader, base_loader);
     match kind {
         "mods" => matches!(loader.as_str(), "fabric" | "quilt" | "forge" | "neoforge"),
-        "plugins" => matches!(server_loader, "paper" | "purpur" | "pufferfish" | "spigot" | "folia" | "leaves" | "aspaper" | "leaf" | "mohist" | "arclight" | "magma"),
+        "plugins" => matches!(
+            server_loader,
+            "paper"
+                | "purpur"
+                | "pufferfish"
+                | "spigot"
+                | "folia"
+                | "leaves"
+                | "aspaper"
+                | "leaf"
+                | "mohist"
+                | "arclight"
+                | "magma"
+        ),
         "datapacks" => true,
         _ => false,
     }
@@ -1361,11 +1372,18 @@ fn content_loader(kind: &str, loader: &str) -> String {
     }
 }
 
-fn validate_content_target(kind: &str, server_loader: &str, base_loader: &str) -> Result<(), ApiErr> {
+fn validate_content_target(
+    kind: &str,
+    server_loader: &str,
+    base_loader: &str,
+) -> Result<(), ApiErr> {
     if supports_content(kind, server_loader, base_loader) {
         Ok(())
     } else if kind == "mods" {
-        Err(err(StatusCode::BAD_REQUEST, "Mods precisam de Fabric, Quilt, Forge ou NeoForge no servidor."))
+        Err(err(
+            StatusCode::BAD_REQUEST,
+            "Mods precisam de Fabric, Quilt, Forge ou NeoForge no servidor.",
+        ))
     } else if kind == "plugins" {
         Err(err(StatusCode::BAD_REQUEST, "Plugins precisam de Paper/Purpur ou de um servidor híbrido compatível (Arclight, Magma ou Mohist)."))
     } else {
@@ -1784,20 +1802,31 @@ async fn playit_start(
 ) -> Result<Json<PlayitStatus>, ApiErr> {
     {
         let mut i = app.0.lock().await;
-        let running = i.playit_pid.map(|pid| {
-            let mut sys = System::new();
-            let process = Pid::from_u32(pid);
-            sys.refresh_processes(ProcessesToUpdate::Some(&[process]), true);
-            sys.process(process).is_some()
-        }).unwrap_or(false);
+        let running = i
+            .playit_pid
+            .map(|pid| {
+                let mut sys = System::new();
+                let process = Pid::from_u32(pid);
+                sys.refresh_processes(ProcessesToUpdate::Some(&[process]), true);
+                sys.process(process).is_some()
+            })
+            .unwrap_or(false);
         if running {
-            return Err(err(StatusCode::CONFLICT, "O agente Playit já foi iniciado pelo painel."));
+            return Err(err(
+                StatusCode::CONFLICT,
+                "O agente Playit já foi iniciado pelo painel.",
+            ));
         }
         i.playit_pid = None;
     }
     let executable = resolve_playit_executable(req.executable.as_deref())
         .await
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Agente Playit não encontrado. Instale-o ou informe o caminho do executável."))?;
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "Agente Playit não encontrado. Instale-o ou informe o caminho do executável.",
+            )
+        })?;
     let mut command = Command::new(&executable);
     command
         .stdin(Stdio::null())
@@ -1805,7 +1834,10 @@ async fn playit_start(
         .stderr(Stdio::null());
     hide_console_window(&mut command);
     let child = command.spawn().map_err(|e| {
-        err(StatusCode::INTERNAL_SERVER_ERROR, format!("Falha ao iniciar o Playit: {e}"))
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao iniciar o Playit: {e}"),
+        )
     })?;
     let pid = child.id();
     let mut i = app.0.lock().await;
@@ -1827,15 +1859,27 @@ async fn playit_stop(State(app): State<AppState>) -> Result<Json<PlayitStatus>, 
         i.playit_pid.take()
     };
     let Some(pid) = pid else {
-        return Err(err(StatusCode::CONFLICT, "O agente Playit não está sendo gerenciado pelo painel."));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "O agente Playit não está sendo gerenciado pelo painel.",
+        ));
     };
     let result = if cfg!(windows) {
-        Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status().await
+        Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status()
+            .await
     } else {
-        Command::new("kill").args(["-TERM", &pid.to_string()]).status().await
+        Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .await
     };
     if !matches!(result, Ok(status) if status.success()) {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "Não foi possível parar o agente Playit."));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Não foi possível parar o agente Playit.",
+        ));
     }
     Ok(Json(PlayitStatus {
         installed: true,
@@ -2600,7 +2644,10 @@ async fn import_server_jar(
     }
     if let Some(base_loader) = req.base_loader.as_deref() {
         if !matches!(base_loader, "" | "fabric" | "forge" | "neoforge") {
-            return Err(err(StatusCode::BAD_REQUEST, "Loader-base inválido. Use Fabric, Forge ou NeoForge."));
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "Loader-base inválido. Use Fabric, Forge ou NeoForge.",
+            ));
         }
     }
     if !(1..=64).contains(&req.memory_limit_gb) {
@@ -2683,7 +2730,8 @@ async fn import_server_jar(
     } else {
         detected_loader
     };
-    i.cfg.base_loader = effective_base_loader(&i.cfg.loader, req.base_loader.as_deref().unwrap_or(""));
+    i.cfg.base_loader =
+        effective_base_loader(&i.cfg.loader, req.base_loader.as_deref().unwrap_or(""));
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
     i.persist().await.map_err(|e| {
@@ -6519,7 +6567,10 @@ async fn create_server(
         ));
     }
     if !matches!(req.base_loader.trim(), "" | "fabric" | "forge" | "neoforge") {
-        return Err(err(StatusCode::BAD_REQUEST, "Loader-base inválido. Use Fabric, Forge ou NeoForge."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Loader-base inválido. Use Fabric, Forge ou NeoForge.",
+        ));
     }
     if !(1..=64).contains(&req.memory_limit_gb) {
         return Err(err(
@@ -7627,11 +7678,19 @@ async fn install_content(
             ));
         }
         let base = expand(&i.cfg.server_dir);
-        (base, i.cfg.curseforge_api_key.clone(), i.cfg.loader.clone(), i.cfg.base_loader.clone())
+        (
+            base,
+            i.cfg.curseforge_api_key.clone(),
+            i.cfg.loader.clone(),
+            i.cfg.base_loader.clone(),
+        )
     };
     let mut req = req;
     validate_content_target(&req.kind, &server_loader, &base_loader)?;
-    req.loader = content_loader(&req.kind, &effective_base_loader(&server_loader, &base_loader));
+    req.loader = content_loader(
+        &req.kind,
+        &effective_base_loader(&server_loader, &base_loader),
+    );
     let dir = content_dir(&base, &req.kind)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
     tokio::fs::create_dir_all(&dir).await.map_err(|e| {
@@ -9544,8 +9603,8 @@ async fn main() -> anyhow::Result<()> {
         app = app.layer(middleware::from_fn(host_guard));
     }
 
-    let advertised_addr = std::env::var("SHADOWPAINEL_PUBLIC_ADDR")
-        .unwrap_or_else(|_| addr.to_string());
+    let advertised_addr =
+        std::env::var("SHADOWPAINEL_PUBLIC_ADDR").unwrap_or_else(|_| addr.to_string());
     println!("ShadowPainel disponível em http://{advertised_addr}");
     use std::io::Write;
     std::io::stdout().flush()?;
