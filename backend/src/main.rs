@@ -38,7 +38,7 @@ use tokio::{
 use tower_http::services::ServeDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const APP_VERSION: &str = "0.10.6";
+const APP_VERSION: &str = "0.10.7";
 const MCJARS_API: &str = "https://mcjars.app/api/v2/builds";
 
 const MAX_LOGS: usize = 500;
@@ -1324,6 +1324,22 @@ fn effective_base_loader(server_loader: &str, configured: &str) -> String {
     "forge".into()
 }
 
+fn normalize_base_loader(server_loader: &str, configured: &str) -> Result<String, String> {
+    let configured = configured.trim().to_ascii_lowercase();
+    if configured.is_empty() {
+        return Ok(String::new());
+    }
+    if !is_hybrid_loader(server_loader)
+        && configured == server_loader.trim().to_ascii_lowercase()
+    {
+        return Ok(String::new());
+    }
+    if matches!(configured.as_str(), "fabric" | "forge" | "neoforge") {
+        return Ok(configured);
+    }
+    Err("Loader-base inválido. Use Fabric, Forge ou NeoForge.".into())
+}
+
 fn supports_content(kind: &str, server_loader: &str, base_loader: &str) -> bool {
     let loader = effective_base_loader(server_loader, base_loader);
     match kind {
@@ -2149,7 +2165,11 @@ fn view(i: &mut Inner) -> View {
         server_name: i.cfg.server_name.clone(),
         version: i.cfg.version.clone(),
         loader: i.cfg.loader.clone(),
-        base_loader: effective_base_loader(&i.cfg.loader, &i.cfg.base_loader),
+        base_loader: if is_hybrid_loader(&i.cfg.loader) {
+            effective_base_loader(&i.cfg.loader, &i.cfg.base_loader)
+        } else {
+            String::new()
+        },
         server_dir: i.cfg.server_dir.clone(),
         java_path: i.cfg.java_path.clone(),
         java_detected: i.java_detected,
@@ -3490,9 +3510,8 @@ fn validate_config(req: &ConfigRequest) -> Result<(), String> {
         }
     }
     if let Some(base_loader) = req.base_loader.as_deref() {
-        if !matches!(base_loader, "" | "fabric" | "forge" | "neoforge") {
-            return Err("Loader-base inválido. Use Fabric, Forge ou NeoForge.".into());
-        }
+        let server_loader = req.loader.as_deref().unwrap_or("");
+        normalize_base_loader(server_loader, base_loader)?;
     }
     if let Some(java_path) = req.java_path.as_deref() {
         if java_path.trim().is_empty() {
@@ -3526,7 +3545,8 @@ async fn save_config(State(app): State<AppState>, Json(req): Json<ConfigRequest>
         i.cfg.loader = loader.trim().into();
     }
     if let Some(base_loader) = req.base_loader.as_deref() {
-        i.cfg.base_loader = base_loader.trim().into();
+        i.cfg.base_loader = normalize_base_loader(&i.cfg.loader, base_loader)
+            .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
     }
     i.cfg.server_dir = req.server_dir.trim().into();
     i.cfg.memory_limit_gb = req.memory_limit_gb;
