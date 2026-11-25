@@ -1380,3 +1380,11 @@ header p { font-size: 15px; color: var(--muted); max-width: 680px; line-height: 
 .update-row { display:flex; gap:12px; align-items:flex-start; padding:13px 4px; border-bottom:1px solid var(--border); cursor:pointer; }
 .update-row input { margin-top:3px; accent-color:var(--accent-2); }
 .update-row b, .update-row small { display:block; } .update-row small { margin-top:4px; color:var(--muted); } .update-row strong { color:var(--accent-2); }
+
+.code-editor { position:relative; flex:1; min-height:390px; overflow:hidden; background:#090d15; }
+.file-highlight, .file-textarea { box-sizing:border-box; margin:0; padding:17px 18px; border:0; width:100%; min-height:390px; font:12px/1.7 'DM Mono', monospace; letter-spacing:.01em; tab-size:2; white-space:pre; overflow:auto; }
+.file-highlight { position:absolute; inset:0; pointer-events:none; color:#d7deeb; background:#090d15; }
+.file-textarea { position:relative; display:block; resize:none; outline:0; background:transparent; color:transparent; caret-color:#fff; -webkit-text-fill-color:transparent; }
+.file-textarea::selection { background:rgba(141,93,255,.35); }
+.syntax-string { color:#a8e6a1; } .syntax-key { color:#8cc8ff; } .syntax-number { color:#f6c177; } .syntax-boolean { color:#d7a8ff; } .syntax-comment { color:#66758d; font-style:italic; } .syntax-tag { color:#ff9eb5; }
+@media (max-width:760px) { .code-editor, .file-highlight, .file-textarea { min-height:300px; } }

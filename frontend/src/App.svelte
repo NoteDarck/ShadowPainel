@@ -138,7 +138,7 @@
   ].map(([id,name,description]) => ({id,name,description,icon_url:`https://s3.mcjars.app/icons/${id}.png`}));
   let serverProfiles:ServerSummary[] = [];
   let switchingServer = false;
-  let activeTab:'overview'|'servers'|'content'|'worlds'|'config'|'setup' = 'overview';
+  let activeTab:'overview'|'servers'|'content'|'worlds'|'manage'|'config'|'setup' = 'overview';
   let worlds:WorldSummary[] = [];
   let worldsLoading = false;
   let worldBusy = false;
@@ -340,6 +340,8 @@
   let selectedFile = '';
   let fileContent = '';
   let fileDirty = false;
+  let fileEditorEl: HTMLTextAreaElement | undefined;
+  let fileHighlightEl: HTMLPreElement | undefined;
 
   function handleConsoleScroll() {
     if (!consoleEl) return;
@@ -531,6 +533,38 @@
     } catch(e) {
       fail(e, 'Não foi possível abrir a pasta do servidor.');
     }
+  }
+
+  function escapeHtml(value:string) {
+    return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+  }
+  function fileLanguage(path:string) {
+    const extension = path.split('.').pop()?.toLowerCase() || 'text';
+    return ['json','js','ts','yaml','yml','toml','cfg','properties','xml','ini','conf'].includes(extension) ? extension : 'text';
+  }
+  function highlightCode(value:string, path = selectedFile) {
+    const language = fileLanguage(path);
+    if (language === 'text') return escapeHtml(value) || ' ';
+    const tokenPattern = /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(#[^\n]*|\/\/[^\n]*)|\b(true|false|null|undefined)\b|\b(\d+(?:\.\d+)?)\b/g;
+    let output = '';
+    let cursor = 0;
+    for (const match of value.matchAll(tokenPattern)) {
+      const index = match.index ?? 0;
+      output += escapeHtml(value.slice(cursor, index));
+      const token = escapeHtml(match[0]);
+      const isKey = Boolean(match[1] && /^\s*:/.test(value.slice(index + match[0].length)));
+      const className = match[2] ? 'syntax-comment' : match[3] ? 'syntax-boolean' : match[4] ? 'syntax-number' : isKey ? 'syntax-key' : 'syntax-string';
+      output += `<span class="${className}">${token}</span>`;
+      cursor = index + match[0].length;
+    }
+    output += escapeHtml(value.slice(cursor));
+    if (language === 'xml') output = output.replace(/(&lt;\/?[\w:-]+)/g, '<span class="syntax-tag">$1</span>').replace(/([\w:-]+)(=)/g, '<span class="syntax-key">$1</span>$2');
+    return output || ' ';
+  }
+  function syncFileEditorScroll() {
+    if (!fileEditorEl || !fileHighlightEl) return;
+    fileHighlightEl.scrollTop = fileEditorEl.scrollTop;
+    fileHighlightEl.scrollLeft = fileEditorEl.scrollLeft;
   }
 
   async function loadServerFiles(path = filePath) {
@@ -1262,7 +1296,7 @@
   }
 
   $: if (activeTab === 'config') loadServerProperties();
-  $: if (activeTab === 'config' && configSection === 'files' && !serverFiles.length && !fileLoading) loadServerFiles();
+  $: if (activeTab === 'manage' && !serverFiles.length && !fileLoading) loadServerFiles();
 
   async function loadServerProperties() {
     let ok = false;
@@ -1912,6 +1946,9 @@
       <button class:active={activeTab==='content'} on:click={()=>activeTab='content'}>
         <span class="nav-icon">▦</span>Mods e complementos
       </button>
+      <button class:active={activeTab==='manage'} on:click={()=>{activeTab='manage';loadServerFiles();}}>
+        <span class="nav-icon">▤</span>Gerenciar
+      </button>
       <button class:active={activeTab==='worlds'} on:click={()=>{activeTab='worlds';loadWorlds();}}>
         <span class="nav-icon">◇</span>Mundos
       </button>
@@ -1942,6 +1979,7 @@
         <h1>
           {activeTab==='servers' ? 'Meus servidores'
            : activeTab==='content' ? 'Mods e complementos'
+           : activeTab==='manage' ? 'Gerenciar arquivos'
            : activeTab==='worlds' ? 'Mundos'
            : activeTab==='config' ? 'Configurações'
            : activeTab==='setup' ? 'Criar servidor'
@@ -1952,6 +1990,8 @@
             ? 'Escolha um servidor para jogar, administrar ou iniciar.'
             : activeTab==='content'
               ? 'Instale mods, plugins e datapacks sem abrir pastas complicadas.'
+              : activeTab==='manage'
+                ? 'Abra, navegue e edite arquivos do servidor com realce de sintaxe.'
               : activeTab==='worlds'
               ? 'Crie, organize e faça backup dos seus mundos.'
               : activeTab==='config'
@@ -2541,6 +2581,35 @@
         {/if}
       </section>
 
+    {:else if activeTab==='manage'}
+      <section class="settings-card file-manager">
+        <div class="card-head">
+          <div><h3>Arquivos e configurações</h3><p>Navegue pela pasta do servidor e edite arquivos de texto, incluindo configurações de plugins.</p></div>
+          <button class="secondary" on:click={()=>loadServerFiles(filePath)} disabled={fileLoading}>ATUALIZAR</button>
+        </div>
+        <div class="file-breadcrumb"><button class="secondary" on:click={()=>loadServerFiles('')}>Servidor</button>{#if filePath}<span>/</span><button class="secondary" on:click={()=>loadServerFiles(parentFilePath())}>{parentFilePath() || 'Servidor'}</button><span class="file-current">{filePath}</span>{/if}</div>
+        <div class="file-manager-grid">
+          <div class="file-list">
+            {#if fileLoading}<div class="catalog-loading"><div class="spinner"></div> Lendo arquivos…</div>
+            {:else if serverFiles.length === 0}<div class="empty">Nenhum arquivo nesta pasta.</div>
+            {:else}{#each serverFiles as entry (entry.path)}
+              <button class="file-entry" class:active={selectedFile===entry.path} on:click={()=>openServerFile(entry)}>
+                <span class="file-entry-icon">{entry.directory ? '▰' : '▤'}</span><span><b>{entry.name}</b><small>{entry.directory ? 'Pasta' : formatBytes(entry.size)}</small></span><span>›</span>
+              </button>
+            {/each}{/if}
+          </div>
+          <div class="file-editor">
+            {#if selectedFile}
+              <div class="file-editor-head"><b>{selectedFile}</b><button class="primary" on:click={saveServerFile} disabled={fileSaving || !fileDirty}>{fileSaving ? 'SALVANDO…' : 'SALVAR ARQUIVO'}</button></div>
+              <div class="code-editor">
+                <pre class="file-highlight" bind:this={fileHighlightEl} aria-hidden="true">{@html highlightCode(fileContent, selectedFile)}</pre>
+                <textarea class="file-textarea" bind:this={fileEditorEl} bind:value={fileContent} on:input={()=>fileDirty=true} on:scroll={syncFileEditorScroll} spellcheck="false" aria-label="Editor de arquivo"></textarea>
+              </div>
+              {#if server.status !== 'offline'}<small class="field-hint">Pare o servidor para salvar alterações.</small>{/if}
+            {:else}<div class="empty">Selecione um arquivo de texto para editar.<br/><small>Arquivos binários e links simbólicos ficam protegidos.</small></div>{/if}
+          </div>
+        </div>
+      </section>
     {:else if activeTab==='config'}
       <div class="config-tabs" role="tablist" aria-label="Seções das configurações">
         <button class:active={configSection==='server'} on:click={()=>configSection='server'}>
@@ -2548,9 +2617,6 @@
         </button>
         <button class:active={configSection==='properties'} on:click={()=>configSection='properties'}>
           <b>Mundo e rede</b><small>server.properties</small>
-        </button>
-        <button class:active={configSection==='files'} on:click={()=>{configSection='files';loadServerFiles();}}>
-          <b>Arquivos</b><small>Plugins e configurações</small>
         </button>
         <button class:active={configSection==='e4all'} on:click={()=>configSection='e4all'}>
           <b>e4all</b><small>Link e compartilhamento</small>
@@ -2612,33 +2678,6 @@
       </section>
       {/if}
 
-      {#if configSection==='files'}
-      <section class="settings-card file-manager">
-        <div class="card-head">
-          <div><h3>Arquivos e configurações</h3><p>Navegue pela pasta do servidor e edite arquivos de texto, incluindo configurações de plugins.</p></div>
-          <button class="secondary" on:click={()=>loadServerFiles(filePath)} disabled={fileLoading}>ATUALIZAR</button>
-        </div>
-        <div class="file-breadcrumb"><button class="secondary" on:click={()=>loadServerFiles('')}>Servidor</button>{#if filePath}<span>/</span><button class="secondary" on:click={()=>loadServerFiles(parentFilePath())}>{parentFilePath() || 'Servidor'}</button><span class="file-current">{filePath}</span>{/if}</div>
-        <div class="file-manager-grid">
-          <div class="file-list">
-            {#if fileLoading}<div class="catalog-loading"><div class="spinner"></div> Lendo arquivos…</div>
-            {:else if serverFiles.length === 0}<div class="empty">Nenhum arquivo nesta pasta.</div>
-            {:else}{#each serverFiles as entry (entry.path)}
-              <button class="file-entry" class:active={selectedFile===entry.path} on:click={()=>openServerFile(entry)}>
-                <span class="file-entry-icon">{entry.directory ? '▰' : '▤'}</span><span><b>{entry.name}</b><small>{entry.directory ? 'Pasta' : formatBytes(entry.size)}</small></span><span>›</span>
-              </button>
-            {/each}{/if}
-          </div>
-          <div class="file-editor">
-            {#if selectedFile}
-              <div class="file-editor-head"><b>{selectedFile}</b><button class="primary" on:click={saveServerFile} disabled={fileSaving || !fileDirty}>{fileSaving ? 'SALVANDO…' : 'SALVAR ARQUIVO'}</button></div>
-              <textarea class="file-textarea" bind:value={fileContent} on:input={()=>fileDirty=true} spellcheck="false"></textarea>
-              {#if server.status !== 'offline'}<small class="field-hint">Pare o servidor para salvar alterações.</small>{/if}
-            {:else}<div class="empty">Selecione um arquivo de texto para editar.<br/><small>Arquivos binários e links simbólicos ficam protegidos.</small></div>{/if}
-          </div>
-        </div>
-      </section>
-      {/if}
       {#if configSection==='monitoring'}
       <section class="settings-card">
         <div class="card-head"><div><h3>Monitoramento</h3><p>Histórico da sessão atual. A coleta funciona enquanto o painel está aberto.</p></div><button class="secondary" on:click={()=>metricHistory=[]}>LIMPAR HISTÓRICO</button></div>
