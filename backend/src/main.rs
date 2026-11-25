@@ -4036,6 +4036,242 @@ async fn network_diagnose(State(app): State<AppState>) -> Json<NetworkDiagnostic
     })
 }
 
+#[derive(Serialize)]
+struct ServerFileEntry {
+    name: String,
+    path: String,
+    directory: bool,
+    size: u64,
+    modified: Option<String>,
+}
+#[derive(Deserialize)]
+struct ServerFileQuery {
+    path: Option<String>,
+}
+#[derive(Deserialize)]
+struct ServerFileRequest {
+    path: String,
+    content: Option<String>,
+}
+fn server_relative_path(base: &Path, relative: &str) -> Option<PathBuf> {
+    let relative = relative.trim().replace('\\', "/");
+    if relative.is_empty() || relative == "." {
+        return Some(base.to_path_buf());
+    }
+    safe_pack_path(base, &relative)
+}
+fn is_editable_server_text(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "json"
+            | "json5"
+            | "properties"
+            | "yml"
+            | "yaml"
+            | "toml"
+            | "cfg"
+            | "conf"
+            | "txt"
+            | "ini"
+            | "xml"
+            | "js"
+            | "script"
+            | "lang"
+    )
+}
+async fn server_files(
+    State(app): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ServerFileQuery>,
+) -> Result<Json<Value>, ApiErr> {
+    let base = expand(&app.0.lock().await.cfg.server_dir);
+    let relative = query.path.as_deref().unwrap_or("");
+    let dir = server_relative_path(&base, relative)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Caminho inválido."))?;
+    if !dir.is_dir() {
+        return Err(err(StatusCode::NOT_FOUND, "Pasta não encontrada."));
+    }
+    let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao listar arquivos: {e}"),
+        )
+    })?;
+    let base_canonical = tokio::fs::canonicalize(&base).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao acessar servidor: {e}"),
+        )
+    })?;
+    let dir_canonical = tokio::fs::canonicalize(&dir)
+        .await
+        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("Pasta inválida: {e}")))?;
+    if !dir_canonical.starts_with(&base_canonical) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "Acesso fora da pasta do servidor.",
+        ));
+    }
+    let mut files = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao ler arquivo: {e}"),
+        )
+    })? {
+        let path = entry.path();
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && name != ".minecraft" {
+            continue;
+        }
+        let child_path = if relative.trim().is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", relative.trim_matches('/'), name)
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs().to_string());
+        files.push(ServerFileEntry {
+            name,
+            path: child_path,
+            directory: metadata.is_dir(),
+            size: if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            },
+            modified,
+        });
+    }
+    files.sort_by_key(|entry| (!entry.directory, entry.name.to_ascii_lowercase()));
+    Ok(Json(
+        json!({"path": relative.trim_matches('/'), "entries": files}),
+    ))
+}
+async fn read_server_file(
+    State(app): State<AppState>,
+    Json(req): Json<ServerFileRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let base = expand(&app.0.lock().await.cfg.server_dir);
+    let path = server_relative_path(&base, &req.path)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Caminho inválido."))?;
+    if !path.is_file() || !is_editable_server_text(&path) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Escolha um arquivo de texto suportado.",
+        ));
+    }
+    let canonical = tokio::fs::canonicalize(&path).await.map_err(|e| {
+        err(
+            StatusCode::NOT_FOUND,
+            format!("Arquivo não encontrado: {e}"),
+        )
+    })?;
+    let base_canonical = tokio::fs::canonicalize(&base).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao acessar servidor: {e}"),
+        )
+    })?;
+    if !canonical.starts_with(&base_canonical) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "Acesso fora da pasta do servidor.",
+        ));
+    }
+    let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
+        err(
+            StatusCode::NOT_FOUND,
+            format!("Arquivo não encontrado: {e}"),
+        )
+    })?;
+    if metadata.len() > 4 * 1024 * 1024 {
+        return Err(err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Arquivo maior que 4 MB.",
+        ));
+    }
+    let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
+        err(
+            StatusCode::BAD_REQUEST,
+            format!("Arquivo não é texto UTF-8: {e}"),
+        )
+    })?;
+    Ok(Json(json!({"path": req.path, "content": content})))
+}
+async fn write_server_file(
+    State(app): State<AppState>,
+    Json(req): Json<ServerFileRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let (base, status) = {
+        let i = app.0.lock().await;
+        (expand(&i.cfg.server_dir), i.status)
+    };
+    if status != Status::Offline {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Pare o servidor antes de editar arquivos.",
+        ));
+    }
+    let content = req
+        .content
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Conteúdo ausente."))?;
+    if content.len() > 4 * 1024 * 1024 {
+        return Err(err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Arquivo maior que 4 MB.",
+        ));
+    }
+    let path = server_relative_path(&base, &req.path)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Caminho inválido."))?;
+    if !is_editable_server_text(&path) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Somente arquivos de texto podem ser editados.",
+        ));
+    }
+    if !path.is_file() {
+        return Err(err(StatusCode::NOT_FOUND, "Arquivo não encontrado."));
+    }
+    let base_canonical = tokio::fs::canonicalize(&base).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao acessar servidor: {e}"),
+        )
+    })?;
+    let canonical = tokio::fs::canonicalize(&path).await.map_err(|e| {
+        err(
+            StatusCode::NOT_FOUND,
+            format!("Arquivo não encontrado: {e}"),
+        )
+    })?;
+    if !canonical.starts_with(&base_canonical) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "Acesso fora da pasta do servidor.",
+        ));
+    }
+    tokio::fs::write(&path, content).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Falha ao salvar arquivo: {e}"),
+        )
+    })?;
+    Ok(Json(json!({"ok": true, "path": req.path})))
+}
 #[derive(Deserialize)]
 struct ContentFolderRequest {
     kind: String,
@@ -9519,6 +9755,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/servers/switch", post(switch_server))
         .route("/api/server/start", post(start))
         .route("/api/server/stop", post(stop))
+        .route("/api/server/files", get(server_files))
+        .route("/api/server/file/read", post(read_server_file))
+        .route("/api/server/file/write", post(write_server_file))
         .route("/api/server/delete", post(delete_server))
         .route("/api/server/download", post(download_server))
         .route("/api/server/eula", post(accept_eula))

@@ -91,6 +91,7 @@
   type ServerSummary = { server_name:string; version:string; kind:string; server_dir:string; installed:boolean; active:boolean; status:string; server_size_bytes:number };
   type SetupConfig = { server_name:string; server_dir:string; memory_limit_gb:number; loader:string; base_loader:string; kind:string };
   type WorldSummary = { name:string; path:string; active:boolean; size_bytes:number; has_level_dat:boolean; universe_configured:boolean; dimensions:string[] };
+  type ServerFileEntry = { name:string; path:string; directory:boolean; size:number; modified?:string };
   type MetricPoint = { time:string; cpu:number; memory:number; players:number };
 
   const E4_DEFAULTS: Omit<E4allConfig, 'minecraft_dir'> = {
@@ -171,7 +172,7 @@
   let setupVersion = '';
   let setupJavaMajor = 21;
   let setupError = '';
-  let configSection:'server'|'properties'|'e4all'|'integrations'|'backups'|'transfer'|'monitoring'|'updates' = 'server';
+  let configSection:'server'|'properties'|'files'|'e4all'|'integrations'|'backups'|'transfer'|'monitoring'|'updates' = 'server';
 
   let loading = false;
   let notice = '';
@@ -325,6 +326,13 @@
   };
   let loadingProps = false;
   let savedProps = false;
+  let serverFiles:ServerFileEntry[] = [];
+  let filePath = '';
+  let fileLoading = false;
+  let fileSaving = false;
+  let selectedFile = '';
+  let fileContent = '';
+  let fileDirty = false;
 
   function handleConsoleScroll() {
     if (!consoleEl) return;
@@ -518,6 +526,39 @@
     }
   }
 
+  async function loadServerFiles(path = filePath) {
+    if (fileLoading) return;
+    fileLoading = true;
+    try {
+      const data = await api<{path:string; entries:ServerFileEntry[]}>(`/server/files?path=${encodeURIComponent(path)}`);
+      filePath = data.path || '';
+      serverFiles = data.entries || [];
+    } catch(e) { fail(e, 'Não foi possível listar os arquivos do servidor.'); }
+    finally { fileLoading = false; }
+  }
+  async function openServerFile(entry:ServerFileEntry) {
+    if (entry.directory) { await loadServerFiles(entry.path); return; }
+    if (fileDirty && !window.confirm('Há alterações não salvas. Descartar e abrir outro arquivo?')) return;
+    try {
+      const data = await api<{path:string; content:string}>('/server/file/read', json({path:entry.path}));
+      selectedFile = data.path; fileContent = data.content; fileDirty = false;
+    } catch(e) { fail(e, 'Não foi possível abrir esse arquivo.'); }
+  }
+  async function saveServerFile() {
+    if (!selectedFile || fileSaving) return;
+    fileSaving = true;
+    try {
+      await api('/server/file/write', json({path:selectedFile, content:fileContent}));
+      fileDirty = false;
+      setNotice(`Arquivo ${selectedFile} salvo.`);
+    } catch(e) { fail(e, 'Não foi possível salvar o arquivo.'); }
+    finally { fileSaving = false; }
+  }
+  function parentFilePath() {
+    const parts = filePath.split('/').filter(Boolean);
+    parts.pop();
+    return parts.join('/');
+  }
   async function openContentFolder(kind:string) {
     try {
       await api('/server/open-content-folder', json({kind}));
@@ -1118,6 +1159,28 @@
     }
     loading = false;
   }
+  async function restartServer() {
+    if (loading || server.installing || server.status !== 'online') return;
+    loading = true;
+    try {
+      server = await api<Server>('/server/stop', {method:'POST'});
+      setNotice('Servidor reiniciando: aguardando o encerramento seguro…');
+      for (let attempt = 0; attempt < 80; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const state = await api<Server>('/state');
+        server = state;
+        if (state.status === 'offline') break;
+      }
+      if (server.status !== 'offline') throw new Error('O servidor não encerrou dentro do tempo esperado.');
+      server = await api<Server>('/server/start', {method:'POST'});
+      setNotice('Servidor reiniciado com segurança.');
+    } catch(e) {
+      fail(e, 'Falha ao reiniciar o servidor.', [
+        { label:'Tentar novamente', run:restartServer },
+        { label:'Abrir console', run:()=>{ activeTab='overview'; } },
+      ]);
+    } finally { loading = false; }
+  }
 
   async function sendCommand() {
     const trimmed = command.trim();
@@ -1161,6 +1224,7 @@
   }
 
   $: if (activeTab === 'config') loadServerProperties();
+  $: if (activeTab === 'config' && configSection === 'files' && !serverFiles.length && !fileLoading) loadServerFiles();
 
   async function loadServerProperties() {
     let ok = false;
@@ -1945,6 +2009,7 @@
               <button class="primary" on:click={toggleServer} disabled={loading || server.installing || server.status==='stopping'}>
                 {server.transferring ? 'TRANSFERINDO…' : server.installing ? 'CONFIGURANDO…' : loading ? 'AGUARDE…' : server.status==='online' ? 'PARAR SERVIDOR' : server.status==='stopping' ? 'ENCERRANDO…' : 'INICIAR SERVIDOR'} <span>→</span>
               </button>
+              {#if server.status==='online'}<button class="secondary" on:click={restartServer} disabled={loading || server.installing}>REINICIAR</button>{/if}
               {#if !server.eula_accepted}
                 <button class="secondary" on:click={acceptEula}>ACEITAR TERMOS</button>
               {:else}
@@ -2430,6 +2495,9 @@
         <button class:active={configSection==='properties'} on:click={()=>configSection='properties'}>
           <b>Mundo e rede</b><small>server.properties</small>
         </button>
+        <button class:active={configSection==='files'} on:click={()=>{configSection='files';loadServerFiles();}}>
+          <b>Arquivos</b><small>Plugins e configurações</small>
+        </button>
         <button class:active={configSection==='e4all'} on:click={()=>configSection='e4all'}>
           <b>e4all</b><small>Link e compartilhamento</small>
         </button>
@@ -2490,6 +2558,33 @@
       </section>
       {/if}
 
+      {#if configSection==='files'}
+      <section class="settings-card file-manager">
+        <div class="card-head">
+          <div><h3>Arquivos e configurações</h3><p>Navegue pela pasta do servidor e edite arquivos de texto, incluindo configurações de plugins.</p></div>
+          <button class="secondary" on:click={()=>loadServerFiles(filePath)} disabled={fileLoading}>ATUALIZAR</button>
+        </div>
+        <div class="file-breadcrumb"><button class="secondary" on:click={()=>loadServerFiles('')}>Servidor</button>{#if filePath}<span>/</span><button class="secondary" on:click={()=>loadServerFiles(parentFilePath())}>{parentFilePath() || 'Servidor'}</button><span class="file-current">{filePath}</span>{/if}</div>
+        <div class="file-manager-grid">
+          <div class="file-list">
+            {#if fileLoading}<div class="catalog-loading"><div class="spinner"></div> Lendo arquivos…</div>
+            {:else if serverFiles.length === 0}<div class="empty">Nenhum arquivo nesta pasta.</div>
+            {:else}{#each serverFiles as entry (entry.path)}
+              <button class="file-entry" class:active={selectedFile===entry.path} on:click={()=>openServerFile(entry)}>
+                <span class="file-entry-icon">{entry.directory ? '▰' : '▤'}</span><span><b>{entry.name}</b><small>{entry.directory ? 'Pasta' : formatBytes(entry.size)}</small></span><span>›</span>
+              </button>
+            {/each}{/if}
+          </div>
+          <div class="file-editor">
+            {#if selectedFile}
+              <div class="file-editor-head"><b>{selectedFile}</b><button class="primary" on:click={saveServerFile} disabled={fileSaving || !fileDirty}>{fileSaving ? 'SALVANDO…' : 'SALVAR ARQUIVO'}</button></div>
+              <textarea class="file-textarea" bind:value={fileContent} on:input={()=>fileDirty=true} spellcheck="false"></textarea>
+              {#if server.status !== 'offline'}<small class="field-hint">Pare o servidor para salvar alterações.</small>{/if}
+            {:else}<div class="empty">Selecione um arquivo de texto para editar.<br/><small>Arquivos binários e links simbólicos ficam protegidos.</small></div>{/if}
+          </div>
+        </div>
+      </section>
+      {/if}
       {#if configSection==='monitoring'}
       <section class="settings-card">
         <div class="card-head"><div><h3>Monitoramento</h3><p>Histórico da sessão atual. A coleta funciona enquanto o painel está aberto.</p></div><button class="secondary" on:click={()=>metricHistory=[]}>LIMPAR HISTÓRICO</button></div>

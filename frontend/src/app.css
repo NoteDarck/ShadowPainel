@@ -1357,3 +1357,20 @@ header p { font-size: 15px; color: var(--muted); max-width: 680px; line-height: 
   .hero, .settings-card, .metrics, .content-grid, .notice, .install-banner, .undo-bar { margin-left: 16px; margin-right: 16px; }
   .hero { padding: 24px; }
 }
+
+.file-manager-grid { display:grid; grid-template-columns:minmax(220px, .7fr) minmax(0, 1.5fr); gap:14px; }
+.file-list, .file-editor { min-height:420px; border:1px solid var(--border); border-radius:10px; background:var(--panel-2); overflow:hidden; }
+.file-entry { display:grid; grid-template-columns:24px 1fr 18px; align-items:center; gap:8px; width:100%; padding:11px 13px; border:0; border-bottom:1px solid var(--border); background:transparent; color:var(--text); text-align:left; cursor:pointer; }
+.file-entry:hover, .file-entry.active { background:rgba(143,107,255,.13); }
+.file-entry b, .file-entry small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.file-entry b { font-size:12px; } .file-entry small { margin-top:3px; color:var(--muted); font-size:10px; }
+.file-entry-icon { color:var(--accent-2); font-size:16px; }
+.file-breadcrumb { display:flex; align-items:center; gap:7px; margin:-8px 0 14px; color:var(--muted); font-size:12px; flex-wrap:wrap; }
+.file-breadcrumb .secondary { min-height:32px; padding:6px 10px; font-size:11px; }
+.file-current { color:var(--accent-2); font-family:'DM Mono'; font-size:11px; }
+.file-editor { display:flex; flex-direction:column; }
+.file-editor-head { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid var(--border); }
+.file-editor-head b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--accent-2); font:11px 'DM Mono'; }
+.file-editor-head .primary { min-height:34px; padding:7px 10px; font-size:10px; }
+.file-textarea { flex:1; min-height:360px; width:100%; resize:vertical; padding:15px; border:0; outline:0; background:#0a0e16; color:#e8edf7; font:12px/1.6 'DM Mono', monospace; tab-size:2; }
+@media (max-width:760px) { .file-manager-grid { grid-template-columns:1fr; } .file-list, .file-editor { min-height:260px; } }
