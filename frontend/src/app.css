@@ -1374,3 +1374,9 @@ header p { font-size: 15px; color: var(--muted); max-width: 680px; line-height: 
 .file-editor-head .primary { min-height:34px; padding:7px 10px; font-size:10px; }
 .file-textarea { flex:1; min-height:360px; width:100%; resize:vertical; padding:15px; border:0; outline:0; background:#0a0e16; color:#e8edf7; font:12px/1.6 'DM Mono', monospace; tab-size:2; }
 @media (max-width:760px) { .file-manager-grid { grid-template-columns:1fr; } .file-list, .file-editor { min-height:260px; } }
+
+.update-modal { max-width:720px; }
+.update-list { display:flex; flex-direction:column; max-height:52vh; overflow:auto; padding:8px 18px; }
+.update-row { display:flex; gap:12px; align-items:flex-start; padding:13px 4px; border-bottom:1px solid var(--border); cursor:pointer; }
+.update-row input { margin-top:3px; accent-color:var(--accent-2); }
+.update-row b, .update-row small { display:block; } .update-row small { margin-top:4px; color:var(--muted); } .update-row strong { color:var(--accent-2); }

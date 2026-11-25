@@ -92,6 +92,8 @@
   type SetupConfig = { server_name:string; server_dir:string; memory_limit_gb:number; loader:string; base_loader:string; kind:string };
   type WorldSummary = { name:string; path:string; active:boolean; size_bytes:number; has_level_dat:boolean; universe_configured:boolean; dimensions:string[] };
   type ServerFileEntry = { name:string; path:string; directory:boolean; size:number; modified?:string };
+  type ContentUpdate = { key:string; project_id:string; kind:string; filename:string; title?:string; source:'modrinth'|'curseforge'; current_version:string; latest_version:string; version_id:string; dependency?:boolean };
+
   type MetricPoint = { time:string; cpu:number; memory:number; players:number };
 
   const E4_DEFAULTS: Omit<E4allConfig, 'minecraft_dir'> = {
@@ -297,6 +299,11 @@
   let undoKind:'content'|'backup' = 'content';
   let contentDeleteOpen = false;
   let deletingContent = false;
+  let contentUpdates:ContentUpdate[] = [];
+  let updateModalOpen = false;
+  let updateCheckingContent = false;
+  let updateInstallingContent = false;
+  let selectedContentUpdates = new Set<string>();
 
   let setupMode:string = 'manual';
   let modpackSource:'modrinth'|'curseforge' = 'modrinth';
@@ -957,6 +964,37 @@
     } catch {
       // A lista local permite abrir o assistente mesmo sem rede.
     }
+  }
+
+  async function checkContentUpdates() {
+    if (updateCheckingContent) return;
+    updateCheckingContent = true;
+    try {
+      const params = new URLSearchParams({kind:contentKind, loader:contentLoader, version:contentVersion || server.version});
+      const data = await api<{updates:ContentUpdate[]}>(`/content/updates?${params}`);
+      contentUpdates = data.updates || [];
+      selectedContentUpdates = new Set(contentUpdates.map(item => item.key));
+      updateModalOpen = true;
+      if (!contentUpdates.length) setNotice('Nenhuma atualização disponível para este tipo de conteúdo.');
+    } catch(e) { fail(e, 'Não foi possível verificar atualizações.'); }
+    finally { updateCheckingContent = false; }
+  }
+  function toggleContentUpdate(key:string) {
+    const next = new Set(selectedContentUpdates);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    selectedContentUpdates = next;
+  }
+  async function installSelectedContentUpdates() {
+    if (!selectedContentUpdates.size || updateInstallingContent) return;
+    updateInstallingContent = true;
+    try {
+      const selected = contentUpdates.filter(item => selectedContentUpdates.has(item.key));
+      const data = await api<{message:string}>('/content/update', json({kind:contentKind, loader:contentLoader, version:contentVersion || server.version, selected}));
+      updateModalOpen = false;
+      setNotice(data.message || 'Atualizações instaladas.');
+      await loadContent();
+    } catch(e) { fail(e, 'Não foi possível instalar as atualizações.'); }
+    finally { updateInstallingContent = false; }
   }
 
   async function loadContent() {
@@ -2178,6 +2216,7 @@
             <button class="secondary" on:click={selectAll}>
               {selectedItems.size === content.length ? 'Desmarcar Todos' : 'Selecionar Todos'}
             </button>
+            <button class="secondary" on:click={checkContentUpdates} disabled={updateCheckingContent}>{updateCheckingContent ? 'VERIFICANDO…' : 'VERIFICAR ATUALIZAÇÕES'}</button>
             <button class="secondary" on:click={()=>openContentFolder(contentKind)}>ABRIR PASTA</button>
             <button class="primary" on:click={openCatalog}>
               ＋ Adicionar {contentKind === 'mods' ? 'mods' : contentKind === 'plugins' ? 'plugins' : 'datapacks'}
@@ -2433,6 +2472,21 @@
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      {/if}
+      {#if updateModalOpen}
+        <div class="modal-overlay" role="presentation" on:click|self={()=>!updateInstallingContent&&(updateModalOpen=false)} on:keydown={(e)=>e.key==='Escape'&&!updateInstallingContent&&(updateModalOpen=false)}>
+          <div class="modal update-modal">
+            <div class="modal-head"><div><h3>Atualizações disponíveis</h3><p>Selecione os itens que deseja atualizar. Dependências podem ser desmarcadas individualmente.</p></div><button class="modal-close" on:click={()=>updateModalOpen=false} disabled={updateInstallingContent}>✕</button></div>
+            {#if contentUpdates.length===0}<div class="empty">Tudo atualizado.</div>{:else}
+              <div class="update-list">
+                {#each contentUpdates as item}
+                  <label class="update-row"><input type="checkbox" checked={selectedContentUpdates.has(item.key)} on:change={()=>toggleContentUpdate(item.key)}/><span><b>{item.title || item.filename}</b><small>{item.current_version} → <strong>{item.latest_version}</strong> · {item.source === 'curseforge' ? 'CurseForge' : 'Modrinth'}{#if item.dependency} · dependência{/if}</small></span></label>
+                {/each}
+              </div>
+              <div class="modal-footer-batch"><span>{selectedContentUpdates.size} de {contentUpdates.length} selecionado(s)</span><div class="batch-actions"><button class="secondary" on:click={()=>selectedContentUpdates=new Set()} disabled={updateInstallingContent}>Desmarcar todos</button><button class="primary" on:click={installSelectedContentUpdates} disabled={!selectedContentUpdates.size||updateInstallingContent}>{updateInstallingContent?'Atualizando…':'Atualizar selecionados'}</button></div></div>
+            {/if}
           </div>
         </div>
       {/if}
