@@ -6934,6 +6934,10 @@ fn default_content_source() -> String {
     "modrinth".into()
 }
 
+fn default_install_dependencies() -> bool {
+    true
+}
+
 fn content_source(source: Option<&str>) -> Result<&'static str, ApiErr> {
     match source.unwrap_or("modrinth").trim().to_lowercase().as_str() {
         "modrinth" | "" => Ok("modrinth"),
@@ -7696,7 +7700,7 @@ async fn get_content_versions(
     Ok(Json(Value::Array(versions)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ContentInstallRequest {
     project_id: String,
     kind: String,
@@ -7705,6 +7709,8 @@ struct ContentInstallRequest {
     version_id: Option<String>,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default = "default_install_dependencies")]
+    install_dependencies: bool,
 }
 
 async fn remember_content(base: &Path, record: InstalledContent) -> Result<(), ApiErr> {
@@ -7891,11 +7897,143 @@ async fn install_curseforge_content(
     })
 }
 
+async fn required_modrinth_dependencies(
+    client: &reqwest::Client,
+    version: &Value,
+) -> Vec<String> {
+    version
+        .get("dependencies")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|dep| dep.get("dependency_type").and_then(Value::as_str) == Some("required"))
+        .filter_map(|dep| dep.get("project_id").and_then(Value::as_str).map(str::to_owned))
+        .filter(|id| valid_project_id(id))
+        .collect()
+}
+
+async fn required_curseforge_dependencies(
+    _cf: &CurseForge,
+    project_id: &str,
+    file: &Value,
+) -> Vec<String> {
+    file.get("dependencies")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|dep| dep.get("relationType").and_then(Value::as_u64) == Some(3))
+        .filter_map(|dep| dep.get("modId").and_then(value_id))
+        .filter(|id| valid_project_id(id))
+        .filter(|id| id != project_id)
+        .collect()
+}
+
+async fn install_content_tree(
+    client: &reqwest::Client,
+    cf: Option<&CurseForge>,
+    base: &Path,
+    req: ContentInstallRequest,
+    visited: &mut std::collections::HashSet<String>,
+    installed: &mut Vec<InstalledContent>,
+) -> Result<Vec<String>, ApiErr> {
+    let source = content_source(req.source.as_deref())?;
+    let key = format!("{source}:{}:{}", req.kind, req.project_id);
+    if !visited.insert(key) {
+        return Ok(Vec::new());
+    }
+    let dir = content_dir(base, &req.kind)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
+    let mut dependencies = Vec::new();
+    let record = if source == "modrinth" {
+        let version = if let Some(id) = req.version_id.as_deref().filter(|id| !id.is_empty()) {
+            client.get(format!("https://api.modrinth.com/v2/version/{}", urlencoding::encode(id)))
+                .header("User-Agent", format!("ShadowPainel/{APP_VERSION}"))
+                .send().await.map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Falha ao consultar dependência: {e}")))?
+                .error_for_status().map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Modrinth retornou erro: {e}")))?
+                .json::<Value>().await.map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Resposta inválida: {e}")))?
+        } else {
+            modrinth_versions(client, &req.project_id, &content_loader(&req.kind, &req.loader), &req.version).await?.into_iter().next().ok_or_else(|| err(StatusCode::NOT_FOUND, "Nenhuma versão compatível encontrada."))?
+        };
+        dependencies = required_modrinth_dependencies(client, &version).await;
+        install_modrinth_content(client, &dir, &ContentInstallRequest { version_id: version.get("id").and_then(Value::as_str).map(str::to_owned), ..req.clone() }).await?
+    } else {
+        let cf = cf.ok_or_else(|| err(StatusCode::BAD_GATEWAY, "Cliente CurseForge indisponível."))?;
+        if req.kind == "datapacks" { return Err(err(StatusCode::BAD_REQUEST, "O CurseForge não possui catálogo de datapacks.")); }
+        let loader = content_loader(&req.kind, &req.loader);
+        let file = if let Some(id) = req.version_id.as_deref().filter(|id| !id.is_empty()) {
+            cf_file_metadata(cf, &req.project_id, id).await?
+        } else {
+            let mut params = vec![("pageSize", "50".to_string()), ("gameVersion", req.version.clone())];
+            if let Some(loader_type) = cf_loader_type(&loader) { params.push(("modLoaderType", loader_type.to_string())); }
+            cf.get(&format!("/mods/{}/files", req.project_id), &params).await?["data"].as_array().and_then(|a| a.first()).cloned().ok_or_else(|| err(StatusCode::NOT_FOUND, "Nenhum arquivo compatível encontrado."))?
+        };
+        dependencies = required_curseforge_dependencies(cf, &req.project_id, &file).await;
+        install_curseforge_content(cf, client, &dir, &ContentInstallRequest { version_id: file.get("id").and_then(value_id), ..req.clone() }).await?
+    };
+    let filename = record.filename.clone();
+    remember_content(base, record.clone()).await?;
+    installed.push(record);
+    let mut result = vec![filename];
+    if req.install_dependencies {
+        for dep in dependencies {
+            let dep_req = ContentInstallRequest { project_id: dep, kind: req.kind.clone(), loader: req.loader.clone(), version: req.version.clone(), version_id: None, source: Some(source.into()), install_dependencies: true };
+            result.extend(install_content_tree(client, cf, base, dep_req, visited, installed).await?);
+        }
+    }
+    Ok(result)
+}
+
+#[derive(Deserialize)]
+struct ContentUpdatesRequest { kind: String, loader: String, version: String }
+
+async fn content_updates(
+    State(app): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ContentUpdatesRequest>,
+) -> Result<Json<Value>, ApiErr> {
+    let (base, key, server_loader, base_loader) = { let i = app.0.lock().await; (expand(&i.cfg.server_dir), i.cfg.curseforge_api_key.clone(), i.cfg.loader.clone(), i.cfg.base_loader.clone()) };
+    let loader = content_loader(&query.kind, &effective_base_loader(&server_loader, &base_loader));
+    let installed = synchronized_installed_content(&base).await.into_iter().filter(|x| x.kind == query.kind).collect::<Vec<_>>();
+    let client = reqwest::Client::new();
+    let cf = CurseForge::new(&client, &key);
+    let mut updates = Vec::new();
+    for item in installed {
+        let latest = if item.source == "curseforge" {
+            let mut params = vec![("pageSize", "50".to_string()), ("gameVersion", query.version.clone())];
+            if let Some(loader_type) = cf_loader_type(&loader) { params.push(("modLoaderType", loader_type.to_string())); }
+            cf.get(&format!("/mods/{}/files", item.project_id), &params).await.ok().and_then(|d| d["data"].as_array().and_then(|a| a.first()).cloned()).map(|f| (value_id(f.get("id").unwrap_or(&Value::Null)).unwrap_or_default(), f.get("displayName").and_then(Value::as_str).unwrap_or("nova").to_string()))
+        } else { modrinth_versions(&client, &item.project_id, &loader, &query.version).await.ok().and_then(|v| v.first().cloned()).map(|v| (v["id"].as_str().unwrap_or_default().to_string(), v["version_number"].as_str().unwrap_or("nova").to_string())) };
+        if let Some((version_id, latest_version)) = latest {
+            if version_id != item.version_id {
+                updates.push(json!({"key":format!("{}:{}:{}", item.source, item.kind, item.project_id), "project_id":item.project_id, "kind":item.kind, "filename":item.filename, "title":item.title, "source":item.source, "current_version":item.version_number.unwrap_or(item.version_id), "latest_version":latest_version, "version_id":version_id, "dependency":false}));
+            }
+        }
+    }
+    Ok(Json(json!({"updates":updates})))
+}
+
+#[derive(Deserialize)]
+struct ContentUpdateInstallRequest { kind: String, loader: String, version: String, selected: Vec<Value> }
+
+async fn install_content_updates(State(app): State<AppState>, Json(req): Json<ContentUpdateInstallRequest>) -> Result<Json<Value>, ApiErr> {
+    let (base, key, status) = { let i = app.0.lock().await; (expand(&i.cfg.server_dir), i.cfg.curseforge_api_key.clone(), i.status) };
+    if status != Status::Offline { return Err(err(StatusCode::CONFLICT, "Pare o servidor antes de atualizar conteúdo.")); }
+    automatic_backup(&app, "antes-de-atualizar-conteudo").await?;
+    let client = reqwest::Client::new(); let cf = CurseForge::new(&client, &key); let mut done = Vec::new();
+    for item in req.selected {
+        let Some(project_id) = item.get("project_id").and_then(Value::as_str) else { continue };
+        let request = ContentInstallRequest { project_id:project_id.into(), kind:req.kind.clone(), loader:req.loader.clone(), version:req.version.clone(), version_id:item.get("version_id").and_then(Value::as_str).map(str::to_owned), source:item.get("source").and_then(Value::as_str).map(str::to_owned), install_dependencies:false };
+        let source = content_source(request.source.as_deref())?; let dir = content_dir(&base, &req.kind).ok_or_else(|| err(StatusCode::BAD_REQUEST, "Tipo de conteúdo inválido."))?;
+        let record = if source == "curseforge" { install_curseforge_content(&cf, &client, &dir, &request).await? } else { install_modrinth_content(&client, &dir, &request).await? };
+        remember_content(&base, record.clone()).await?; done.push(record.filename);
+    }
+    Ok(Json(json!({"message":format!("{} item(ns) atualizado(s).", done.len()), "updated":done})))
+}
+
 async fn install_content(
     State(app): State<AppState>,
     Json(req): Json<ContentInstallRequest>,
 ) -> Result<Json<Value>, ApiErr> {
-    let source = content_source(req.source.as_deref())?;
+    let _source = content_source(req.source.as_deref())?;
     if !valid_project_id(&req.project_id) {
         return Err(err(StatusCode::BAD_REQUEST, "Projeto inválido."));
     }
@@ -7937,18 +8075,11 @@ async fn install_content(
     })?;
     automatic_backup(&app, &format!("antes-de-{}", req.kind)).await?;
     let client = reqwest::Client::new();
-    let mut record = if source == "curseforge" {
-        let cf = CurseForge::new(&client, &key);
-        install_curseforge_content(&cf, &client, &dir, &req).await?
-    } else {
-        install_modrinth_content(&client, &dir, &req).await?
-    };
-    if record.source == "modrinth" {
-        enrich_installed_content(&client, std::slice::from_mut(&mut record)).await;
-    }
-    let filename = record.filename.clone();
-    remember_content(&base, record).await?;
-    Ok(Json(json!({"ok": true, "filename": filename})))
+    let cf = CurseForge::new(&client, &key);
+    let mut visited = std::collections::HashSet::new();
+    let mut installed = Vec::new();
+    install_content_tree(&client, Some(&cf), &base, req, &mut visited, &mut installed).await?;
+    Ok(Json(json!({"ok": true, "installed": installed.iter().map(|x| &x.filename).collect::<Vec<_>>(), "count": installed.len()})))
 }
 
 // ───────────────────────── CurseForge ─────────────────────────
@@ -9797,6 +9928,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/content/search", post(search_content))
         .route("/api/content/versions", get(get_content_versions))
         .route("/api/content/install", post(install_content))
+        .route("/api/content/updates", get(content_updates))
+        .route("/api/content/update", post(install_content_updates))
         .route("/api/shadowtunnel/status", get(shadowtunnel_status))
         .route("/api/shadowtunnel/create", post(shadowtunnel_create))
         .route("/api/shadowtunnel/connect", post(shadowtunnel_connect))
